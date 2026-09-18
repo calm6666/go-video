@@ -1,0 +1,39 @@
+# Go
+bin/
+dist/
+coverage.out
+*.test
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+**/etc/local.*
+**/etc/*.secret.*
+
+# Media and temporary files
+tmp/
+temp/
+.gotmp/
+uploads/
+transcode-work/
+*.ts
+*.m3u8
+*.mp4
+*.mov
+
+# IDE/OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 参考仓库（仅本地设计参考，不提交）
+# 详见 AGENTS.md §1.4 与 docs/development.md §2：不作为 Go 依赖，不复制其 vendor 旧版框架代码。
+openbilibili-go-common/

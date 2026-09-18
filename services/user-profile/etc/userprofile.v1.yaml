@@ -1,0 +1,34 @@
+Name: userprofile.v1.rpc
+ListenOn: 0.0.0.0:8085
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: user-profile.v1.rpc
+Mode: dev
+
+Redis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+DataSource: "userprofile:userprofile_pass@tcp(127.0.0.1:3306)/userprofile?charset=utf8mb4&parseTime=true&loc=Local"
+
+# 实名证件 RSA 密钥（生产环境必须通过 Secret/Vault 注入，禁止提交真实密钥）。
+# 本地联调可留空：留空时加密/解密返回错误，实名申请与详情接口不可用。
+Realname:
+  PublicKey: ""
+  PrivateKey: ""
+  IMGURLTemplate: ""
+
+# 领域事件 Outbox 发布配置。
+Outbox:
+  PollIntervalSeconds: 2
+  BatchSize: 100
+  MaxAttempts: 10
+
+# account 服务 RPC 客户端：资料更新事件(user.profile_updated)通过
+# account 的 DelCache RPC 失效 account 侧缓存（替代参考仓库 databus 通知）。
+AccountRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: account.v1.rpc

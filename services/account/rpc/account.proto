@@ -1,0 +1,439 @@
+syntax = "proto3";
+
+package account.v1;
+
+option go_package = "go-video/services/account/rpc";
+
+// 用户名片
+message Card {
+  int64 mid = 1;            // 用户 ID
+  string name = 2;          // 用户名
+  string sex = 3;           // 性别
+  string face = 4;          // 头像 URL
+  string sign = 5;          // 个人签名
+  int32 rank = 6;           // 排名
+  int32 level = 7;          // 用户等级
+  int32 silence = 8;        // 是否被禁言：0 否、1 是
+  VipInfo vip = 9;          // 会员信息
+  PendantInfo pendant = 10;  // 头像挂件
+  NameplateInfo nameplate = 11; // 勋章
+  OfficialInfo official = 12;  // 官方认证
+}
+
+// 用户基础信息
+message Info {
+  int64 mid = 1;       // 用户 ID
+  string name = 2;     // 用户名
+  string sex = 3;      // 性别
+  string face = 4;     // 头像 URL
+  string sign = 5;     // 个人签名
+  int32 rank = 6;      // 排名
+}
+
+// 用户完整资料
+message Profile {
+  int64 mid = 1;               // 用户 ID
+  string name = 2;             // 用户名
+  string sex = 3;              // 性别
+  string face = 4;             // 头像 URL
+  string sign = 5;             // 个人签名
+  int32 rank = 6;              // 排名
+  int32 level = 7;             // 用户等级
+  int32 join_time = 8;         // 注册时间（Unix 时间戳）
+  int32 moral = 9;            // 道德值
+  int32 silence = 10;         // 是否被禁言
+  int32 email_status = 11;    // 邮箱绑定状态
+  int32 tel_status = 12;      // 手机绑定状态
+  int32 identification = 13;  // 实名认证状态
+  VipInfo vip = 14;           // 会员信息
+  PendantInfo pendant = 15;   // 头像挂件
+  NameplateInfo nameplate = 16; // 勋章
+  OfficialInfo official = 17;   // 官方认证
+  int64 birthday = 18;       // 生日（Unix 时间戳，0 表示未设置）
+  int32 is_tourist = 19;     // 是否游客：0 否、1 是
+}
+
+// 等级信息
+message LevelInfo {
+  int32 cur = 1;      // 当前等级
+  int32 min = 2;      // 当前等级最小经验值
+  int32 now_exp = 3;  // 当前经验值
+  int32 next_exp = 4; // 升级所需经验值
+}
+
+// 会员信息
+message VipInfo {
+  int32 type = 1;          // 会员类型：0 无、1 月度、2 年度
+  int32 status = 2;        // 会员状态：0 无、1 正常
+  int64 due_date = 3;      // 到期时间（Unix 时间戳）
+  int32 vip_pay_type = 4;  // 付费类型
+}
+
+// 头像挂件信息
+message PendantInfo {
+  int32 pid = 1;        // 挂件 ID
+  string name = 2;      // 挂件名称
+  string image = 3;     // 挂件图片 URL
+  int64 expire = 4;     // 到期时间
+}
+
+// 勋章信息
+message NameplateInfo {
+  int32 nid = 1;            // 勋章 ID
+  string name = 2;          // 勋章名称
+  string image = 3;         // 勋章图片 URL
+  string image_small = 4;   // 勋章小图 URL
+  string level = 5;          // 勋章等级
+  string condition = 6;      // 获取条件
+}
+
+// 官方认证信息
+message OfficialInfo {
+  int32 role = 1;    // 认证角色
+  string title = 2;  // 认证标题
+  string desc = 3;   // 认证描述
+}
+
+// 单个 mid 请求
+message MidReq {
+  int64 mid = 1;       // 用户 ID
+  string real_ip = 2;  // 请求来源 IP
+}
+
+// 批量 mid 请求
+message MidsReq {
+  repeated int64 mids = 1;  // 用户 ID 列表
+  string real_ip = 2;       // 请求来源 IP
+}
+
+// 用户名列表请求
+message NamesReq {
+  repeated string names = 1;  // 用户名列表
+  string real_ip = 2;          // 请求来源 IP
+}
+
+// 经验值变更请求
+message ExpReq {
+  int64 mid = 1;       // 用户 ID
+  double exp = 2;     // 经验值变更量
+  string operater = 3; // 操作者
+  string operate = 4;  // 操作类型
+  string reason = 5;   // 变更原因
+  string real_ip = 6;   // 请求来源 IP
+}
+
+// 道德值变更请求
+message MoralReq {
+  int64 mid = 1;       // 用户 ID
+  double moral = 2;    // 道德值变更量
+  string oper = 3;     // 操作者
+  string reason = 4;   // 变更原因
+  string remark = 5;   // 备注
+  string real_ip = 6;   // 请求来源 IP
+}
+
+// 关系查询请求
+message RelationReq {
+  int64 mid = 1;       // 当前用户 ID
+  int64 owner = 2;     // 目标用户 ID
+  string real_ip = 3;   // 请求来源 IP
+}
+
+// 批量关系查询请求
+message RelationsReq {
+  int64 mid = 1;              // 当前用户 ID
+  repeated int64 owners = 2;  // 目标用户 ID 列表
+  string real_ip = 3;          // 请求来源 IP
+}
+
+// 富关系查询请求
+message RichRelationReq {
+  int64 owner = 1;             // 目标用户 ID
+  repeated int64 mids = 2;     // 用户 ID 列表
+  string real_ip = 3;           // 请求来源 IP
+}
+
+message InfoReply {
+  Info info = 1;
+}
+
+message InfosReply {
+  map<int64, Info> infos = 1;
+}
+
+message CardReply {
+  Card card = 1;
+}
+
+message CardsReply {
+  map<int64, Card> cards = 1;
+}
+
+message ProfileReply {
+  Profile profile = 1;
+}
+
+// 带统计的资料回复
+message ProfileStatReply {
+  Profile profile = 1;          // 用户资料
+  LevelInfo level_info = 2;     // 等级信息
+  double coins = 3;             // 硬币数量
+  int64 following = 4;          // 关注数
+  int64 follower = 5;           // 粉丝数
+}
+
+message RelationReply {
+  bool following = 1;  // 是否关注
+}
+
+message AttentionsReply {
+  repeated int64 attentions = 1;  // 关注列表
+}
+
+message BlacksReply {
+  map<int64, bool> black_list = 1;  // 黑名单
+}
+
+message RelationsReply {
+  map<int64, RelationReply> relations = 1;  // 关系列表
+}
+
+message RichRelationsReply {
+  map<int64, int32> rich_relations = 1;  // 富关系
+}
+
+// 会员信息回复
+message VipReply {
+  int32 type = 1;          // 会员类型
+  int32 status = 2;        // 会员状态
+  int64 due_date = 3;      // 到期时间
+  int32 vip_pay_type = 4;  // 付费类型
+}
+
+message VipsReply {
+  map<int64, VipReply> vips = 1;  // 会员信息列表
+}
+
+message ExpReply {}
+
+message MoralReply {}
+
+// 缓存失效请求（服务间调用，参考 HTTP /cache/del 与 /cache/clear 的 RPC 化）
+message DelCacheReq {
+  int64 mid = 1;    // 用户 ID
+  string action = 2; // 变更动作：updateVip 会额外入延迟队列二次失效
+}
+
+// 缓存失效响应
+message DelCacheReply {}
+
+// ==================== 登录与会话（移植自 passport/passport-auth/identify） ====================
+// 登录请求（密码登录与验证码登录共用；password 为 RSA 加密后的 base64，
+// 开发模式未配置密钥时按明文处理）
+message LoginReq {
+  string account = 1;           // 登录标识：用户名/手机号/邮箱
+  string password = 2;          // 密码（RSA 公钥加密后的 base64）
+  int32 login_type = 3;         // 登录方式：1 密码、2 验证码
+  string capture_code = 4;      // 验证码（login_type=2 时必填）
+  string ip = 5;                // 登录来源 IP
+  string device = 6;            // 设备标识
+  string buvid = 7;             // 设备 BUVID
+}
+
+// 登录响应（成功签发 token 与 refresh_token）
+message LoginReply {
+  int64 mid = 1;                // 用户 ID
+  string token = 2;             // access token（30 天有效）
+  string refresh_token = 3;     // 刷新令牌（90 天有效）
+  string csrf = 4;              // CSRF token
+  int64 expires = 5;            // token 过期时间（Unix 秒）
+}
+
+// 注册请求
+message RegisterReq {
+  string account = 1;           // 注册标识：用户名/手机号/邮箱
+  string password = 2;          // 密码（RSA 公钥加密后的 base64）
+  string capture_code = 3;      // 手机/邮箱注册时的验证码
+  string ip = 4;                // 注册来源 IP
+}
+
+// 注册响应
+message RegisterReply {
+  int64 mid = 1;                // 新用户 ID
+  LoginReply login = 2;         // 注册成功后直接签发的登录态
+}
+
+// 登出请求（吊销指定 token）
+message LogoutReq {
+  string token = 1;             // 要吊销的 access token
+}
+
+// token 校验请求（参考 identify.GetTokenInfo）
+message GetTokenInfoReq {
+  string token = 1;             // access token
+  string buvid = 2;             // 设备 BUVID
+}
+
+// token 校验响应
+message GetTokenInfoReply {
+  bool is_login = 1;            // 是否登录（有效）
+  int64 mid = 2;                // 用户 ID
+  string csrf = 3;              // CSRF token
+  int64 expires = 4;            // 过期时间（Unix 秒）
+}
+
+// cookie 会话校验请求（参考 identify.GetCookieInfo）
+message GetCookieInfoReq {
+  string cookie = 1;            // 请求 Cookie 原文（如 'SESSDATA=xxx;sid=yyy'）
+}
+
+// cookie 会话校验响应
+message GetCookieInfoReply {
+  bool is_login = 1;            // 是否登录（有效）
+  int64 mid = 2;                // 用户 ID
+  string csrf = 3;              // CSRF token
+  int64 expires = 4;            // 过期时间（Unix 秒）
+}
+
+// 刷新 token 请求（参考 passport-login /token/renew）
+message RenewTokenReq {
+  string refresh_token = 1;     // 刷新令牌
+  string ip = 2;                // 请求来源 IP
+}
+
+// 刷新 token 响应
+message RenewTokenReply {
+  string token = 1;             // 新 access token
+  string csrf = 2;              // 新 CSRF token
+  int64 expires = 3;            // 新 token 过期时间（Unix 秒）
+}
+
+// 发送登录/注册/找回验证码请求（参考 sms 服务的账号侧验证码能力）
+message SendCaptureReq {
+  int32 biz = 1;                // 业务：1 登录、2 注册、3 账号找回
+  string target = 2;            // 接收方：手机号
+  string ip = 3;                // 请求来源 IP
+}
+
+// 校验验证码请求
+message CheckCaptureReq {
+  int32 biz = 1;                // 业务：1 登录、2 注册、3 账号找回
+  string target = 2;            // 接收方：手机号
+  string capture_code = 3;      // 验证码
+}
+
+// 设置/修改密码请求（参考 secure 服务；需登录态，改密需旧密码）
+message SetPasswordReq {
+  int64 mid = 1;                // 用户 ID（由网关从登录态注入）
+  string old_password = 2;      // 旧密码（首次设置密码时为空；RSA 加密后的 base64）
+  string new_password = 3;      // 新密码（RSA 加密后的 base64）
+  string ip = 4;                // 请求来源 IP
+}
+
+// 重置密码请求（账号找回，参考 account-recovery；验证码校验后重置）
+message ResetPasswordReq {
+  string account = 1;           // 登录标识：手机号
+  string capture_code = 2;      // 找回验证码
+  string new_password = 3;      // 新密码（RSA 加密后的 base64）
+  string ip = 4;                // 请求来源 IP
+}
+
+// 历史密码校验请求（参考 passport /history/pwd/check）
+message CheckHistoryPwdReq {
+  int64 mid = 1;                // 用户 ID
+  string password = 2;          // 待校验密码（RSA 加密后的 base64，可逗号分隔多个）
+}
+
+// 历史密码校验响应（result 为逗号分隔的 0/1 序列，与入参一一对应）
+message CheckHistoryPwdReply {
+  string result = 1;            // 命中序列：如 "0,1"
+}
+
+// 登录日志查询请求（参考 passport RPC.LoginLogs）
+message LoginLogsReq {
+  int64 mid = 1;                // 用户 ID
+  int32 limit = 2;              // 返回条数上限（默认 20，最大 100）
+}
+
+// 单条登录日志
+message LoginLog {
+  int64 mid = 1;                // 用户 ID
+  string ip = 2;                // 登录来源 IP
+  int64 ts = 3;                 // 登录时间（Unix 秒）
+  int32 login_type = 4;         // 登录方式：1 密码、2 验证码、3 注册
+  int32 status = 5;             // 结果：0 成功、1 失败
+  string reason = 6;            // 失败原因
+  string device = 7;            // 设备标识
+}
+
+// 登录日志查询响应
+message LoginLogsReply {
+  repeated LoginLog logs = 1;   // 日志列表（时间倒序）
+}
+
+service Account {
+  // 查询单个用户基础信息
+  rpc Info3(MidReq) returns (InfoReply);
+  // 批量查询用户基础信息
+  rpc Infos3(MidsReq) returns (InfosReply);
+  // 按用户名批量查询
+  rpc InfosByName3(NamesReq) returns (InfosReply);
+  // 查询单个用户名片
+  rpc Card3(MidReq) returns (CardReply);
+  // 批量查询用户名片
+  rpc Cards3(MidsReq) returns (CardsReply);
+  // 查询用户完整资料
+  rpc Profile3(MidReq) returns (ProfileReply);
+  // 查询带统计的资料
+  rpc ProfileWithStat3(MidReq) returns (ProfileStatReply);
+  // 增加经验值
+  rpc AddExp3(ExpReq) returns (ExpReply);
+  // 增加道德值
+  rpc AddMoral3(MoralReq) returns (MoralReply);
+  // 查询关注关系
+  rpc Relation3(RelationReq) returns (RelationReply);
+  // 查询关注列表
+  rpc Attentions3(MidReq) returns (AttentionsReply);
+  // 查询黑名单
+  rpc Blacks3(MidReq) returns (BlacksReply);
+  // 批量查询关系
+  rpc Relations3(RelationsReq) returns (RelationsReply);
+  // 查询富关系
+  rpc RichRelations3(RichRelationReq) returns (RichRelationsReply);
+  // 查询会员信息
+  rpc Vip3(MidReq) returns (VipReply);
+  // 批量查询会员信息
+  rpc Vips3(MidsReq) returns (VipsReply);
+  // 失效指定用户的缓存（资料变更方调用：user-profile 等下游服务通过本方法
+  // 通知 account 失效 Info/Card/Profile/Vip 缓存，action=updateVip 时
+  // 额外触发 5 秒延迟二次失效）
+  rpc DelCache(DelCacheReq) returns (DelCacheReply);
+
+  // ==================== 登录与会话 ====================
+  // 密码登录（登录标识：用户名/手机/邮箱 + 密码）
+  rpc PasswordLogin(LoginReq) returns (LoginReply);
+  // 验证码登录（手机 + 验证码）
+  rpc CaptureLogin(LoginReq) returns (LoginReply);
+  // 注册（用户名+密码 或 手机+验证码+密码）
+  rpc Register(RegisterReq) returns (RegisterReply);
+  // 登出（吊销 token）
+  rpc Logout(LogoutReq) returns (DelCacheReply);
+  // token 校验（参考 identify.GetTokenInfo，供网关统一鉴权）
+  rpc TokenInfo(GetTokenInfoReq) returns (GetTokenInfoReply);
+  // cookie 会话校验（参考 identify.GetCookieInfo）
+  rpc CookieInfo(GetCookieInfoReq) returns (GetCookieInfoReply);
+  // 刷新 token（参考 passport-login /token/renew）
+  rpc RenewToken(RenewTokenReq) returns (RenewTokenReply);
+  // 发送登录/注册/找回验证码（参考 sms 服务的账号侧验证码能力）
+  rpc SendCapture(SendCaptureReq) returns (DelCacheReply);
+  // 校验验证码（参考 passport-login /captcha/check）
+  rpc CheckCapture(CheckCaptureReq) returns (DelCacheReply);
+  // 设置/修改密码（参考 secure 服务；改密需旧密码）
+  rpc SetPassword(SetPasswordReq) returns (DelCacheReply);
+  // 重置密码（账号找回，参考 account-recovery；验证码校验后重置）
+  rpc ResetPassword(ResetPasswordReq) returns (DelCacheReply);
+  // 历史密码校验（参考 passport /history/pwd/check）
+  rpc CheckHistoryPassword(CheckHistoryPwdReq) returns (CheckHistoryPwdReply);
+  // 登录日志查询（参考 passport RPC.LoginLogs 与 /x/internal/passport/records/loginlog）
+  rpc LoginLogs(LoginLogsReq) returns (LoginLogsReply);
+}

@@ -1,0 +1,17 @@
+Name: admin
+Host: 0.0.0.0
+Port: 8081
+Timeout: 3000
+
+# 管理后台仅内网/VPN 访问；生产环境通过 Secret/配置中心注入，不把密钥写入仓库。
+# 下游领域服务 RPC（网关只做入口与聚合，不直连领域数据库）。
+AccountRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: account.v1.rpc
+UserProfileRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: user-profile.v1.rpc

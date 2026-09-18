@@ -1,0 +1,225 @@
+syntax = "v1"
+
+// ==================== 健康检查 ====================
+type HealthData {
+	Status string `json:"status"`
+}
+
+type HealthResponse {
+	Code    int        `json:"code"`
+	Message string     `json:"message"`
+	Data    HealthData `json:"data"`
+	TTL     int64      `json:"ttl"`
+}
+
+// ==================== 通用载荷 ====================
+type EmptyData {}
+
+type EmptyResponse {
+	Code    int       `json:"code"`
+	Message string    `json:"message"`
+	Data    EmptyData `json:"data"`
+	TTL     int64     `json:"ttl"`
+}
+
+type MoralsUpdateData {
+	AfterMorals map[int64]int64 `json:"after_morals"`
+}
+
+type MoralsUpdateResponse {
+	Code    int              `json:"code"`
+	Message string           `json:"message"`
+	Data    MoralsUpdateData `json:"data"`
+	TTL     int64            `json:"ttl"`
+}
+
+type RealnameStrippedData {
+	Mid       int64 `json:"mid"`
+	Status    int8  `json:"status"`
+	Channel   int8  `json:"channel"`
+	Country   int16 `json:"country"`
+	CardType  int8  `json:"card_type"`
+	AdultType int8  `json:"adult_type"`
+}
+
+type RealnameStrippedResponse {
+	Code    int                  `json:"code"`
+	Message string               `json:"message"`
+	Data    RealnameStrippedData `json:"data"`
+	TTL     int64                `json:"ttl"`
+}
+
+type MidByCardData {
+	CodeToMid map[string]int64 `json:"code_to_mid"`
+}
+
+type MidByCardResponse {
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    MidByCardData `json:"data"`
+	TTL     int64         `json:"ttl"`
+}
+
+// ==================== 请求参数 ====================
+// account 缓存失效（参考 /cache/del、/cache/clear 的参数）
+type ParamModify {
+	Mid          int64  `form:"mid"`
+	ModifiedAttr string `form:"modifiedAttr"`
+}
+
+type ParamMsg {
+	Msg string `form:"msg"`
+}
+
+// user-profile 节操变更（参考 /morals/update、/moral/update 的参数）
+type ParamUpdateMoral {
+	Mid        int64  `form:"mid"`
+	Delta      int64  `form:"delta"`
+	Origin     int64  `form:"origin"`
+	Reason     string `form:"reason"`
+	ReasonType int64  `form:"reason_type"`
+	Operator   string `form:"operator"`
+	Remark     string `form:"remark"`
+	Status     int64  `form:"status"`
+	IsNotify   bool   `form:"is_notify"`
+	IP         string `form:"ip"`
+}
+
+type ParamUpdateMorals {
+	Mids       []int64 `form:"mids,split"`
+	Delta      int64   `form:"delta"`
+	Origin     int64   `form:"origin"`
+	Reason     string  `form:"reason"`
+	ReasonType int64   `form:"reason_type"`
+	Operator   string  `form:"operator"`
+	Remark     string  `form:"remark"`
+	Status     int64   `form:"status"`
+	IsNotify   bool    `form:"is_notify"`
+	IP         string  `form:"ip"`
+}
+
+type ParamUndo {
+	LogID    string `form:"log_id"`
+	Remark   string `form:"remark"`
+	Operator string `form:"operator"`
+}
+
+// user-profile 经验值操作（参考 /exp/set、/exp/update 的参数）
+type ParamExp {
+	Mid     int64   `form:"mid"`
+	Count   float64 `form:"count"`
+	Reason  string  `form:"reason"`
+	Operate string  `form:"operate"`
+	IP      string  `form:"ip"`
+}
+
+// user-profile 属性审核（参考 /property/review/add 的参数）
+type ParamPropertyReview {
+	Mid      int64  `form:"mid"`
+	New      string `form:"new"`
+	State    int8   `form:"state"`
+	Property int8   `form:"property"`
+	Extra    string `form:"extra"`
+}
+
+type ParamMidByCard {
+	CardCode []string `form:"card_code,split"`
+	Country  int32    `form:"country"`
+	CardType int32    `form:"card_type"`
+}
+
+// 登录日志查询参数
+type ParamLoginLog {
+	Mid   int64 `form:"mid"`
+	Limit int32 `form:"limit,default=20"`
+}
+
+// 单条登录日志
+type LoginLogItem {
+	Mid       int64  `json:"mid"`
+	IP        string `json:"ip"`
+	TS        int64  `json:"ts"`
+	LoginType int32  `json:"login_type"`
+	Status    int32  `json:"status"`
+	Reason    string `json:"reason"`
+	Device    string `json:"device"`
+}
+
+type LoginLogsData {
+	Logs []LoginLogItem `json:"logs"`
+}
+
+type LoginLogsResponse {
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    LoginLogsData `json:"data"`
+	TTL     int64         `json:"ttl"`
+}
+
+// ==================== 路由 ====================
+// 健康检查（原有）
+@server (
+	prefix: /admin
+)
+service admin {
+	@doc "管理后台健康检查，返回服务存活状态"
+	@handler health
+	get /healthz returns (HealthResponse)
+}
+
+// account 缓存运营路由（调用 account DelCache RPC）
+@server (
+	prefix: /admin/account
+)
+service admin {
+	@doc "失效指定用户的缓存"
+	@handler cacheDel
+	get /cache/del (ParamModify) returns (EmptyResponse)
+
+	@doc "接收资料变更通知，失效缓存"
+	@handler cacheClear
+	post /cache/clear (ParamMsg) returns (EmptyResponse)
+}
+
+// user-profile 运营路由（调用 user-profile RPC）
+@server (
+	prefix: /x/member
+)
+service admin {
+	@doc "批量变更节操值"
+	@handler moralsUpdate
+	post /morals/update (ParamUpdateMorals) returns (MoralsUpdateResponse)
+
+	@doc "变更单个用户节操值"
+	@handler moralUpdate
+	post /moral/update (ParamUpdateMoral) returns (MoralsUpdateResponse)
+
+	@doc "撤销节操值变更"
+	@handler moralUndo
+	post /moral/undo (ParamUndo) returns (EmptyResponse)
+
+	@doc "设置经验值（仅运营）"
+	@handler expSet
+	post /exp/set (ParamExp) returns (EmptyResponse)
+
+	@doc "增加经验值"
+	@handler expUpdate
+	post /exp/update (ParamExp) returns (EmptyResponse)
+
+	@doc "添加用户属性变更审核"
+	@handler propertyReview
+	post /property/review/add (ParamPropertyReview) returns (EmptyResponse)
+
+	@doc "查询脱敏实名信息"
+	@handler realnameStripped
+	get /realname/stripped/info (ParamModify) returns (RealnameStrippedResponse)
+
+	@doc "按证件号批量查询 mid"
+	@handler realnameMidByCard
+	get /realname/mid/by/card (ParamMidByCard) returns (MidByCardResponse)
+
+	@doc "查询用户登录日志"
+	@handler loginLog
+	get /web/login/log (ParamLoginLog) returns (LoginLogsResponse)
+}
+

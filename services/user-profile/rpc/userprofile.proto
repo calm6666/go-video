@@ -1,0 +1,405 @@
+syntax = "proto3";
+
+package userprofile.v1;
+
+option go_package = "go-video/services/user-profile/rpc";
+
+// 说明：本契约移植自参考仓库 openbilibili-go-common/app/service/main/member/api/api.proto。
+// 依据 AGENTS.md §5，block（封禁）子域属于 risk-control 服务，BlockInfo/BlockBatchInfo/
+// BlockBatchDetail 三个方法不移植到 user-profile（详见服务 README）。
+
+// 单个用户请求（带真实 IP）
+message MidReq {
+  int64 mid = 1;      // 用户 ID
+  string real_ip = 2; // 请求来源真实 IP
+}
+
+// 单个用户请求（带远端 IP）
+message MemberMidReq {
+  int64 mid = 1;       // 用户 ID
+  string remote_ip = 2; // 调用方远端 IP
+}
+
+// 批量用户请求
+message MemberMidsReq {
+  repeated int64 mids = 1; // 用户 ID 列表（最多 100 个）
+  string remote_ip = 2;    // 调用方远端 IP
+}
+
+// 按身份证号批量查询请求
+message MidByRealnameCardsReq {
+  repeated string card_code = 1; // 证件号列表
+  int32 country = 2;             // 国家：0 中国
+  int32 card_type = 3;           // 证件类型：0 身份证
+}
+
+// 空响应（对应参考仓库 EmptyStruct）
+message EmptyReply {}
+
+// 等级信息
+message LevelInfoReply {
+  int32 cur = 1;      // 当前等级
+  int32 min = 2;      // 当前等级经验阈值
+  int32 now_exp = 3;  // 当前经验值（按 ExpMulti 折算后的整数）
+  int32 next_exp = 4; // 下一等级经验阈值（满级为 -1）
+}
+
+// 用户变更日志
+message UserLogReply {
+  int64 mid = 1;                    // 用户 ID
+  string ip = 2;                    // 操作来源 IP
+  int64 ts = 3;                     // 操作时间（Unix 秒）
+  string log_id = 4;                // 日志唯一 ID（UUID）
+  map<string, string> content = 5;  // 日志内容明细
+}
+
+// 用户变更日志集合
+message UserLogsReply {
+  repeated UserLogReply user_logs = 1; // 日志列表
+}
+
+// 经验值变更请求
+message AddExpReq {
+  int64 mid = 1;      // 用户 ID
+  double count = 2;   // 变更量（单位：分）
+  string reason = 3;  // 变更原因
+  string operate = 4; // 操作类型
+  string ip = 5;      // 操作来源 IP
+}
+
+// 经验统计（当日登录/观看/投币/分享奖励标记）
+message ExpStatReply {
+  bool login = 1;   // 当日是否领取登录奖励
+  bool watch = 2;   // 当日是否领取观看奖励
+  int64 coin = 3;   // 当日投币奖励次数
+  bool share = 4;   // 当日是否领取分享奖励
+}
+
+// 用户基础资料
+message BaseInfoReply {
+  int64 mid = 1;      // 用户 ID
+  string name = 2;    // 昵称
+  int64 sex = 3;      // 性别：0 保密、1 男、2 女
+  string face = 4;    // 头像 URL
+  string sign = 5;    // 个人签名
+  int64 rank = 6;     // 排名
+  int64 birthday = 7; // 生日（Unix 秒，默认 -28800 表示未设置）
+}
+
+// 官方认证信息（生效状态）
+message OfficialInfoReply {
+  int32 role = 1;  // 认证角色：0 未认证、1 UP 主、2 身份、3 企业、4 政府、5 媒体、6 其他
+  string title = 2; // 认证称号
+  string desc = 3;  // 认证描述
+}
+
+// 批量基础资料
+message BaseInfosReply {
+  map<int64, BaseInfoReply> base_infos = 1; // mid → 基础资料
+}
+
+// 用户全量信息（基础 + 等级 + 官方认证）
+message MemberInfoReply {
+  BaseInfoReply base_info = 1;       // 基础资料
+  LevelInfoReply level_info = 2;     // 等级信息
+  OfficialInfoReply official_info = 3; // 官方认证信息
+}
+
+// 批量用户全量信息
+message MemberInfosReply {
+  map<int64, MemberInfoReply> member_infos = 1; // mid → 全量信息
+}
+
+// 昵称是否修改过
+message NickUpdatedReply {
+  bool nick_updated = 1; // 是否已首次修改昵称
+}
+
+// 官方认证文档提交请求
+message OfficialDocReq {
+  int64 mid = 1;               // 用户 ID
+  string name = 2;             // 认证主体名称
+  int32 state = 3;             // 审核状态（服务端强制置为待审核）
+  int32 role = 4;              // 认证角色
+  string title = 5;            // 认证称号
+  string desc = 6;             // 认证描述
+  string reject_reason = 7;    // 拒绝原因（审核回填）
+  int32 realname = 8;          // 是否实名：0 否、1 是
+  string operator = 9;         // 经营人/联系人
+  string telephone = 10;       // 联系电话
+  string email = 11;           // 联系邮箱
+  string address = 12;         // 联系地址
+  string company = 13;         // 公司名称
+  string credit_code = 14;     // 统一社会信用代码
+  string organization = 15;    // 政府或组织机构名称
+  string organization_type = 16; // 组织机构类型
+  string business_license = 17;  // 营业执照
+  string business_scale = 18;    // 企业规模
+  string business_level = 19;    // 企业等级
+  string business_auth = 20;     // 企业授权函
+  string supplement = 21;        // 其他补充材料
+  string professional = 22;      // 专业资质
+  string identification = 23;    // 身份证明
+  string submit_source = 24;     // 提交来源
+}
+
+// 资料字段更新请求（性别/昵称/头像/排名/生日/签名）
+message UpdateSexReq {
+  int64 mid = 1;        // 用户 ID
+  int64 sex = 2;        // 性别：0 保密、1 男、2 女
+  string remote_ip = 3; // 调用方远端 IP
+}
+
+message UpdateUnameReq {
+  int64 mid = 1;        // 用户 ID
+  string name = 2;      // 新昵称
+  string remote_ip = 3; // 调用方远端 IP
+}
+
+message UpdateFaceReq {
+  int64 mid = 1;        // 用户 ID
+  string face = 2;      // 新头像 URL
+  string remote_ip = 3; // 调用方远端 IP
+}
+
+message UpdateRankReq {
+  int64 mid = 1;        // 用户 ID
+  int64 rank = 2;       // 新排名
+  string remote_ip = 3; // 调用方远端 IP
+}
+
+message UpdateBirthdayReq {
+  int64 mid = 1;        // 用户 ID
+  int64 birthday = 2;   // 新生日（Unix 秒）
+  string remote_ip = 3; // 调用方远端 IP
+}
+
+message UpdateSignReq {
+  int64 mid = 1;        // 用户 ID
+  string sign = 2;      // 新签名
+  string remote_ip = 3; // 调用方远端 IP
+}
+
+// 官方认证文档详情
+message OfficialDocInfoReply {
+  int64 mid = 1;                // 用户 ID
+  string name = 2;              // 认证主体名称
+  int32 state = 3;              // 审核状态：0 待审核、1 通过、2 不通过、3 重新提交
+  int32 role = 4;               // 认证角色
+  string title = 5;             // 认证称号
+  string desc = 6;              // 认证描述
+  string reject_reason = 7;     // 拒绝原因
+  int32 realname = 8;           // 是否实名
+  string operator = 9;          // 经营人/联系人
+  string telephone = 10;        // 联系电话
+  string email = 11;            // 联系邮箱
+  string address = 12;          // 联系地址
+  string company = 13;          // 公司名称
+  string credit_code = 14;      // 统一社会信用代码
+  string organization = 15;     // 政府或组织机构名称
+  string organization_type = 16; // 组织机构类型
+  string business_license = 17; // 营业执照
+  string business_scale = 18;   // 企业规模
+  string business_level = 19;   // 企业等级
+  string business_auth = 20;    // 企业授权函
+  string supplement = 21;       // 其他补充材料
+  string professional = 22;     // 专业资质
+  string identification = 23;   // 身份证明
+}
+
+// 节操值信息
+message MoralReply {
+  int64 mid = 1;               // 用户 ID
+  int64 moral = 2;             // 当前节操值（基准 7000，最大 10000）
+  int64 added = 3;             // 累计增加值
+  int64 deducted = 4;          // 累计扣减值
+  int64 last_recover_date = 5; // 上次低于 70 时的恢复时间（Unix 秒）
+}
+
+// 单个节操值变更请求
+message UpdateMoralReq {
+  int64 mid = 1;         // 用户 ID
+  int64 delta = 2;       // 变更量（可为负）
+  int64 origin = 3;      // 来源类型：1 举报奖励、2 违规惩罚、3 撤销奖励、4 撤销惩罚、5 自动恢复、6 手动修改
+  string reason = 4;     // 变更原因
+  int64 reason_type = 5; // 原因类型：1 弹幕、2 评论、3 TAG、4 电波、5 账号、6 管理系统
+  string operator = 6;   // 操作人
+  string remark = 7;     // 备注
+  int64 status = 8;      // 日志状态：0 可撤销、1 已撤销、2 不可撤销
+  bool is_notify = 9;    // 是否通知用户
+  string ip = 10;        // 操作来源 IP
+}
+
+// 批量节操值变更请求
+message UpdateMoralsReq {
+  repeated int64 mids = 1; // 用户 ID 列表
+  int64 delta = 2;         // 变更量（可为负）
+  int64 origin = 3;        // 来源类型（同 UpdateMoralReq）
+  string reason = 4;       // 变更原因
+  int64 reason_type = 5;   // 原因类型（同 UpdateMoralReq）
+  string operator = 6;     // 操作人
+  string remark = 7;       // 备注
+  int64 status = 8;        // 日志状态
+  bool is_notify = 9;      // 是否通知用户
+  string ip = 10;          // 操作来源 IP
+}
+
+// 撤销节操值变更请求（参考 member 服务 /moral/undo，RPC 化供网关运营路由聚合）
+message UndoMoralReq {
+  string log_id = 1;   // 原变更日志 ID
+  string remark = 2;   // 撤销备注
+  string operator = 3; // 撤销操作人
+}
+
+// 属性变更审核提交请求（参考 member 服务 /property/review/add，RPC 化）
+message AddPropertyReviewReq {
+  int64 mid = 1;      // 用户 ID
+  string new = 2;     // 变更后的值
+  int32 state = 3;    // 审核状态：0 待审核、1 通过、2 驳回、10 自动审核中
+  int32 property = 4; // 审核属性：1 头像、2 签名、3 昵称
+  string extra = 5;   // 审核扩展信息 JSON（空为 {}）
+}
+
+// 批量节操值变更结果
+message UpdateMoralsReply {
+  map<int64, int64> after_morals = 1; // mid → 变更后的节操值
+}
+
+// 添加用户监控请求
+message AddUserMonitorReq {
+  int64 mid = 1;      // 用户 ID
+  string operator = 2; // 操作人
+  string remark = 3;  // 备注
+}
+
+// 是否处于监控中
+message IsInMonitorReply {
+  bool is_in_monitor = 1; // 是否在监控名单
+}
+
+// 实名认证状态
+message RealnameStatusReply {
+  int32 realname_status = 1; // 实名状态：0 未通过、1 已通过
+}
+
+// 实名申请流程状态
+message RealnameApplyInfoReply {
+  int32 status = 1; // 流程状态：0 审核中、1 通过、2 驳回、3 未申请
+  string remark = 2; // 驳回原因/备注
+}
+
+// 实名认证申请请求
+message RealnameApplyReq {
+  int64 mid = 1;            // 用户 ID
+  int64 capture_code = 2;   // 手机验证码
+  string realname = 3;      // 真实姓名
+  int32 card_type = 4;      // 证件类型：0 身份证
+  string card_code = 5;     // 证件号码（身份证须为 15/18 位）
+  int32 country = 6;        // 国家：0 中国
+  string hand_img_token = 7; // 手持证件照 token
+  string front_img_token = 8; // 证件正面照 token
+  string back_img_token = 9;  // 证件背面照 token
+}
+
+// 实名详情
+message RealnameDetailReply {
+  string realname = 1;  // 真实姓名
+  string card = 2;      // 证件号
+  int32 card_type = 3;  // 证件类型
+  int32 status = 4;     // 实名状态：0 未通过、1 已通过
+  string gender = 5;    // 性别：male/female/unknown（由证件号解析）
+  string hand_img = 6;  // 手持证件照 URL
+}
+
+// 脱敏实名信息
+message RealnameStrippedInfoReply {
+  int64 mid = 1;        // 用户 ID
+  int32 status = 2;     // 流程状态
+  int32 channel = 3;    // 渠道：0 主站、1 支付宝
+  int32 country = 4;    // 国家
+  int32 card_type = 5;  // 证件类型
+  int32 adult_type = 6; // 成年状态：0 未成年、1 已成年、2 未知
+}
+
+// 证件号 → mid 映射
+message MidByRealnameCardReply {
+  map<string, int64> code_to_mid = 5; // 证件号 → 用户 ID
+}
+
+// UserProfile 用户资料服务（移植自参考仓库 member 服务，封禁子域除外）
+service UserProfile {
+  // 查询单个用户基础资料
+  rpc Base(MemberMidReq) returns (BaseInfoReply);
+  // 批量查询用户基础资料
+  rpc Bases(MemberMidsReq) returns (BaseInfosReply);
+  // 查询单个用户全量信息（基础 + 等级 + 官方认证）
+  rpc Member(MemberMidReq) returns (MemberInfoReply);
+  // 批量查询用户全量信息
+  rpc Members(MemberMidsReq) returns (MemberInfosReply);
+  // 查询用户是否修改过昵称
+  rpc NickUpdated(MemberMidReq) returns (NickUpdatedReply);
+  // 标记用户已修改过昵称
+  rpc SetNickUpdated(MemberMidReq) returns (EmptyReply);
+  // 提交官方认证文档
+  rpc SetOfficialDoc(OfficialDocReq) returns (EmptyReply);
+  // 设置性别
+  rpc SetSex(UpdateSexReq) returns (EmptyReply);
+  // 设置昵称
+  rpc SetName(UpdateUnameReq) returns (EmptyReply);
+  // 设置头像
+  rpc SetFace(UpdateFaceReq) returns (EmptyReply);
+  // 设置排名
+  rpc SetRank(UpdateRankReq) returns (EmptyReply);
+  // 设置生日
+  rpc SetBirthday(UpdateBirthdayReq) returns (EmptyReply);
+  // 设置签名
+  rpc SetSign(UpdateSignReq) returns (EmptyReply);
+  // 查询官方认证文档
+  rpc OfficialDoc(MidReq) returns (OfficialDocInfoReply);
+
+  // 查询节操值
+  rpc Moral(MemberMidReq) returns (MoralReply);
+  // 查询节操值变更日志
+  rpc MoralLog(MemberMidReq) returns (UserLogsReply);
+  // 变更节操值
+  rpc AddMoral(UpdateMoralReq) returns (EmptyReply);
+  // 批量变更节操值
+  rpc BatchAddMoral(UpdateMoralsReq) returns (UpdateMoralsReply);
+  // 撤销节操值变更（参考 member 服务 /moral/undo 的 RPC 化）
+  rpc UndoMoral(UndoMoralReq) returns (EmptyReply);
+
+  // 查询经验等级信息（含当前经验）
+  rpc Exp(MidReq) returns (LevelInfoReply);
+  // 查询等级信息（不含当前经验）
+  rpc Level(MidReq) returns (LevelInfoReply);
+  // 更新经验值
+  rpc UpdateExp(AddExpReq) returns (EmptyReply);
+  // 直接设置经验值（仅运营，参考 member 服务 /exp/set 的 RPC 化）
+  rpc SetExp(AddExpReq) returns (EmptyReply);
+  // 查询经验变更日志
+  rpc ExpLog(MidReq) returns (UserLogsReply);
+  // 查询当日经验奖励统计
+  rpc ExpStat(MidReq) returns (ExpStatReply);
+
+  // 查询实名认证状态
+  rpc RealnameStatus(MemberMidReq) returns (RealnameStatusReply);
+  // 查询实名申请流程状态
+  rpc RealnameApplyStatus(MemberMidReq) returns (RealnameApplyInfoReply);
+  // 发送实名手机验证码
+  rpc RealnameTelCapture(MemberMidReq) returns (EmptyReply);
+  // 提交实名认证申请
+  rpc RealnameApply(RealnameApplyReq) returns (EmptyReply);
+  // 查询实名详情（含性别与手持照）
+  rpc RealnameDetail(MemberMidReq) returns (RealnameDetailReply);
+  // 查询脱敏实名信息
+  rpc RealnameStrippedInfo(MemberMidReq) returns (RealnameStrippedInfoReply);
+  // 按证件号批量查询 mid
+  rpc MidByRealnameCard(MidByRealnameCardsReq) returns (MidByRealnameCardReply);
+
+  // 添加用户到监控名单
+  rpc AddUserMonitor(AddUserMonitorReq) returns (EmptyReply);
+  // 查询用户是否在监控名单
+  rpc IsInMonitor(MidReq) returns (IsInMonitorReply);
+  // 添加用户属性变更审核（参考 member 服务 /property/review/add 的 RPC 化）
+  rpc AddPropertyReview(AddPropertyReviewReq) returns (EmptyReply);
+}

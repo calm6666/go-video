@@ -1,0 +1,26 @@
+Name: app
+Host: 0.0.0.0
+Port: 8080
+Timeout: 3000
+
+# 下游领域服务 RPC（网关只做入口与聚合，不直连领域数据库）。
+AccountRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: account.v1.rpc
+UserProfileRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: user-profile.v1.rpc
+
+# /account/privacy 白名单 appkey（对应参考仓库 conf.AppkeyFilter.Privacy）。
+# 留空表示不启用校验（仅限开发环境）。
+PrivacyAppKeys:
+  - "account-internal"
+  - "operation-admin"
+
+# 登录密码加密 RSA 公钥（PEM，/x/passport-login/key 返回给客户端），
+# 必须与 account 服务 PassportRSA.PrivateKey 配对；留空时 /key 返回错误。
+PassportRSAPublicKey: ""

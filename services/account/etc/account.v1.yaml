@@ -1,0 +1,35 @@
+Name: account.v1.rpc
+ListenOn: 0.0.0.0:8083
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: account.v1.rpc
+Mode: dev
+
+Redis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+DataSource: "account:account_pass@tcp(127.0.0.1:3306)/account?charset=utf8mb4&parseTime=true&loc=Local"
+
+# 登录密码 RSA 密钥（生产环境必须通过 Secret/Vault 注入，禁止提交真实密钥）。
+# 客户端经网关 /x/passport-login/key 获取公钥加密密码，服务端用私钥解密；
+# 两者留空时（仅限开发环境）按明文密码处理。
+PassportRSA:
+  PublicKey: ""
+  PrivateKey: ""
+TokenTTLDays: 30
+RefreshTTLDays: 90
+
+# 下游 RPC client。
+# user-profile 已接入：account 的资料/经验/节操/实名聚合走真实 RPC。
+UserProfileRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: user-profile.v1.rpc
+# SocialGraphRPC:
+#   Etcd:
+#     Hosts:
+#     - 127.0.0.1:2379
+#     Key: social-graph.v1.rpc

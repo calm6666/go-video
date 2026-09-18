@@ -1,0 +1,1030 @@
+syntax = "v1"
+
+// ==================== 健康检查 ====================
+type HealthData {
+	Status string `json:"status"`
+}
+
+type HealthResponse {
+	Code    int        `json:"code"`
+	Message string     `json:"message"`
+	Data    HealthData `json:"data"`
+	TTL     int64      `json:"ttl"`
+}
+
+// ==================== account 聚合数据结构（与 services/account/rpc/account.proto 一致） ====================
+// 用户基础信息
+type Info {
+	Mid  int64  `json:"mid"`
+	Name string `json:"name"`
+	Sex  string `json:"sex"`
+	Face string `json:"face"`
+	Sign string `json:"sign"`
+	Rank int32  `json:"rank"`
+}
+
+// 用户名片
+type Card {
+	Mid       int64         `json:"mid"`
+	Name      string        `json:"name"`
+	Sex       string        `json:"sex"`
+	Face      string        `json:"face"`
+	Sign      string        `json:"sign"`
+	Rank      int32         `json:"rank"`
+	Level     int32         `json:"level"`
+	Silence   int32         `json:"silence"`
+	Vip       VipInfo       `json:"vip"`
+	Pendant   PendantInfo   `json:"pendant"`
+	Nameplate NameplateInfo `json:"nameplate"`
+	Official  OfficialInfo  `json:"official"`
+}
+
+// 用户完整资料
+type Profile {
+	Mid            int64         `json:"mid"`
+	Name           string        `json:"name"`
+	Sex            string        `json:"sex"`
+	Face           string        `json:"face"`
+	Sign           string        `json:"sign"`
+	Rank           int32         `json:"rank"`
+	Level          int32         `json:"level"`
+	JoinTime       int32         `json:"jointime"`
+	Moral          int32         `json:"moral"`
+	Silence        int32         `json:"silence"`
+	EmailStatus    int32         `json:"email_status"`
+	TelStatus      int32         `json:"tel_status"`
+	Identification int32         `json:"identification"`
+	Vip            VipInfo       `json:"vip"`
+	Pendant        PendantInfo   `json:"pendant"`
+	Nameplate      NameplateInfo `json:"nameplate"`
+	Official       OfficialInfo  `json:"official"`
+	Birthday       int64         `json:"birthday"`
+	IsTourist      int32         `json:"is_tourist"`
+}
+
+// 等级信息
+type LevelInfo {
+	Cur     int32 `json:"current_level"`
+	Min     int32 `json:"current_min"`
+	NowExp  int32 `json:"current_exp"`
+	NextExp int32 `json:"next_exp"`
+}
+
+// 会员信息
+type VipInfo {
+	Type       int32 `json:"type"`
+	Status     int32 `json:"status"`
+	DueDate    int64 `json:"due_date"`
+	VipPayType int32 `json:"vip_pay_type"`
+}
+
+// 头像挂件信息
+type PendantInfo {
+	Pid    int32  `json:"pid"`
+	Name   string `json:"name"`
+	Image  string `json:"image"`
+	Expire int64  `json:"expire"`
+}
+
+// 勋章信息
+type NameplateInfo {
+	Nid        int32  `json:"nid"`
+	Name       string `json:"name"`
+	Image      string `json:"image"`
+	ImageSmall string `json:"image_small"`
+	Level      string `json:"level"`
+	Condition  string `json:"condition"`
+}
+
+// 官方认证信息
+type OfficialInfo {
+	Role  int32  `json:"role"`
+	Title string `json:"title"`
+	Desc  string `json:"desc"`
+}
+
+// 带统计的资料
+type ProfileStat {
+	Profile   Profile   `json:"profile"`
+	LevelExp  LevelInfo `json:"level_exp"`
+	Coins     float64   `json:"coins"`
+	Following int64     `json:"following"`
+	Follower  int64     `json:"follower"`
+}
+
+// 隐私信息
+type Privacy {
+	Realname     string `json:"realname"`
+	IdentityCard string `json:"identity_card"`
+	IdentitySex  string `json:"identity_sex"`
+	Tel          string `json:"tel"`
+	RegIP        string `json:"reg_ip"`
+	RegTS        int64  `json:"reg_ts"`
+	HandIMG      string `json:"hand_img"`
+}
+
+// ==================== v1 老客户端结构 ====================
+// v1 等级信息：next_exp 在满级时为字符串 "--"
+type V1LevelInfo {
+	Cur     int         `json:"current_level"`
+	Min     int         `json:"current_min"`
+	NowExp  int         `json:"current_exp"`
+	NextExp interface{} `json:"next_exp"`
+}
+
+// v1 官方认证（旧结构：type + desc）
+type V1OfficialVerify {
+	Type int8   `json:"type"`
+	Desc string `json:"desc"`
+}
+
+// v1 会员信息明细（老客户端字段名）
+type V1VipDetail {
+	Type          int    `json:"vipType"`
+	DueDate       int64  `json:"vipDueDate"`
+	DueRemark     string `json:"dueRemark"`
+	AccessStatus  int    `json:"accessStatus"`
+	VipStatus     int    `json:"vipStatus"`
+	VipStatusWarn string `json:"vipStatusWarn"`
+}
+
+// v1 用户基础信息
+type V1Info {
+	Mid            string           `json:"mid"`
+	Name           string           `json:"uname"`
+	Sex            string           `json:"sex"`
+	Sign           string           `json:"sign"`
+	Avatar         string           `json:"avatar"`
+	Rank           string           `json:"rank"`
+	DisplayRank    string           `json:"DisplayRank"`
+	LevelInfo      V1LevelInfo      `json:"level_info"`
+	Pendant        PendantInfo      `json:"pendant"`
+	Nameplate      NameplateInfo    `json:"nameplate"`
+	OfficialVerify V1OfficialVerify `json:"official_verify"`
+	Vip            V1VipDetail      `json:"vip"`
+}
+
+// v1 用户名片
+type V1Card {
+	Mid            string           `json:"mid"`
+	Name           string           `json:"name"`
+	Approve        bool             `json:"approve"`
+	Sex            string           `json:"sex"`
+	Rank           string           `json:"rank"`
+	Face           string           `json:"face"`
+	DisplayRank    string           `json:"DisplayRank"`
+	Regtime        int64            `json:"regtime"`
+	Spacesta       int              `json:"spacesta"`
+	Birthday       string           `json:"birthday"`
+	Place          string           `json:"place"`
+	Description    string           `json:"description"`
+	Article        int              `json:"article"`
+	Attentions     []int64          `json:"attentions"`
+	Fans           int              `json:"fans"`
+	Friend         int              `json:"friend"`
+	Attention      int              `json:"attention"`
+	Sign           string           `json:"sign"`
+	LevelInfo      V1LevelInfo      `json:"level_info"`
+	Pendant        PendantInfo      `json:"pendant"`
+	Nameplate      NameplateInfo    `json:"nameplate"`
+	OfficialVerify V1OfficialVerify `json:"official_verify"`
+	Vip            V1VipDetail      `json:"vip"`
+}
+
+// v1 会员信息
+type V1Vip {
+	Type          int    `json:"vipType"`
+	DueDate       int64  `json:"vipDueDate"`
+	DueRemark     string `json:"dueRemark"`
+	AccessStatus  int    `json:"accessStatus"`
+	VipStatus     int    `json:"vipStatus"`
+	VipStatusWarn string `json:"vipStatusWarn"`
+}
+
+// ==================== v2 结构 ====================
+// v2 我的资料（myinfo/userinfo 共用）
+type V2MyInfo {
+	Mid            int64            `json:"mid"`
+	Name           string           `json:"uname"`
+	Face           string           `json:"face"`
+	Rank           int32            `json:"rank"`
+	Scores         int32            `json:"scores"`
+	Coins          float64          `json:"coins"`
+	Sex            int32            `json:"sex"`
+	Sign           string           `json:"sign"`
+	JoinTime       int32            `json:"jointime"`
+	Spacesta       int32            `json:"spacesta"`
+	Active         int32            `json:"active"`
+	Silence        int32            `json:"silence"`
+	EmailStatus    int32            `json:"email_status"`
+	TelStatus      int32            `json:"tel_status"`
+	Identification int32            `json:"identification"`
+	Moral          int32            `json:"moral"`
+	Birthday       string           `json:"birthday"`
+	Telephone      string           `json:"telephone"`
+	LevelInfo      LevelInfo        `json:"level_info"`
+	Pendant        PendantInfo      `json:"pendant"`
+	Nameplate      NameplateInfo    `json:"nameplate"`
+	OfficialVerify V1OfficialVerify `json:"official_verify"`
+	Vip            V1VipDetail      `json:"vip"`
+}
+
+// ==================== 请求参数 ====================
+type ParamMid {
+	Mid int64 `form:"mid"`
+}
+
+type ParamMids {
+	Mids []int64 `form:"mids,split"`
+}
+
+type ParamNames {
+	Names []string `form:"names,split"`
+}
+
+// ==================== 响应数据载荷 ====================
+type EmptyData {}
+
+type InfoData {
+	Info Info `json:"info"`
+}
+
+type InfosData {
+	Infos map[int64]Info `json:"infos"`
+}
+
+type CardData {
+	Card Card `json:"card"`
+}
+
+type CardsData {
+	Cards map[int64]Card `json:"cards"`
+}
+
+type VipData {
+	Vip VipInfo `json:"vip"`
+}
+
+type VipsData {
+	Vips map[int64]VipInfo `json:"vips"`
+}
+
+type ProfileData {
+	Profile Profile `json:"profile"`
+}
+
+type ProfileStatData {
+	ProfileStat ProfileStat `json:"profile_stat"`
+}
+
+type PrivacyData {
+	Privacy Privacy `json:"privacy"`
+}
+
+// ==================== 响应信封（统一四字段） ====================
+type LevelData {
+	LevelInfo LevelInfo `json:"level_info"`
+}
+
+type LevelResponse {
+	Code    int       `json:"code"`
+	Message string    `json:"message"`
+	Data    LevelData `json:"data"`
+	TTL     int64     `json:"ttl"`
+}
+
+type OfficialInfoData {
+	OfficialInfo OfficialInfo `json:"official_info"`
+}
+
+type OfficialInfoResponse {
+	Code    int              `json:"code"`
+	Message string           `json:"message"`
+	Data    OfficialInfoData `json:"data"`
+	TTL     int64            `json:"ttl"`
+}
+
+type InfoResponse {
+	Code    int      `json:"code"`
+	Message string   `json:"message"`
+	Data    InfoData `json:"data"`
+	TTL     int64    `json:"ttl"`
+}
+
+type InfosResponse {
+	Code    int       `json:"code"`
+	Message string    `json:"message"`
+	Data    InfosData `json:"data"`
+	TTL     int64     `json:"ttl"`
+}
+
+type CardResponse {
+	Code    int      `json:"code"`
+	Message string   `json:"message"`
+	Data    CardData `json:"data"`
+	TTL     int64    `json:"ttl"`
+}
+
+type CardsResponse {
+	Code    int       `json:"code"`
+	Message string    `json:"message"`
+	Data    CardsData `json:"data"`
+	TTL     int64     `json:"ttl"`
+}
+
+type VipResponse {
+	Code    int     `json:"code"`
+	Message string  `json:"message"`
+	Data    VipData `json:"data"`
+	TTL     int64   `json:"ttl"`
+}
+
+type VipsResponse {
+	Code    int      `json:"code"`
+	Message string   `json:"message"`
+	Data    VipsData `json:"data"`
+	TTL     int64    `json:"ttl"`
+}
+
+type ProfileResponse {
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    ProfileData `json:"data"`
+	TTL     int64       `json:"ttl"`
+}
+
+type ProfileStatResponse {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    ProfileStatData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type PrivacyResponse {
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    PrivacyData `json:"data"`
+	TTL     int64       `json:"ttl"`
+}
+
+type V1InfoResponse {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    V1Info `json:"data"`
+	TTL     int64  `json:"ttl"`
+}
+
+type V1InfosResponse {
+	Code    int               `json:"code"`
+	Message string            `json:"message"`
+	Data    map[string]V1Info `json:"data"`
+	TTL     int64             `json:"ttl"`
+}
+
+type V1CardResponse {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    V1Card `json:"data"`
+	TTL     int64  `json:"ttl"`
+}
+
+type V1VipResponse {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    V1Vip  `json:"data"`
+	TTL     int64  `json:"ttl"`
+}
+
+type V2MyInfoResponse {
+	Code    int      `json:"code"`
+	Message string   `json:"message"`
+	Data    V2MyInfo `json:"data"`
+	TTL     int64    `json:"ttl"`
+}
+
+// ==================== 路由 ====================
+// 健康检查（原有）
+@server (
+	prefix: /api
+)
+service app {
+	@doc "健康检查，返回服务存活状态"
+	@handler health
+	get /healthz returns (HealthResponse)
+}
+
+// account 聚合查询路由（BFF：调用 account gRPC）
+@server (
+	prefix: /account
+)
+service app {
+	@doc "查询单个用户基础信息"
+	@handler info
+	get /info (ParamMid) returns (InfoResponse)
+
+	@doc "批量查询用户基础信息"
+	@handler infos
+	get /infos (ParamMids) returns (InfosResponse)
+
+	@doc "按用户名批量查询用户基础信息"
+	@handler infoByName
+	get /info/by/name (ParamNames) returns (InfosResponse)
+
+	@doc "查询单个用户名片"
+	@handler card
+	get /card (ParamMid) returns (CardResponse)
+
+	@doc "批量查询用户名片"
+	@handler cards
+	get /cards (ParamMids) returns (CardsResponse)
+
+	@doc "查询单个用户会员信息"
+	@handler vip
+	get /vip (ParamMid) returns (VipResponse)
+
+	@doc "批量查询用户会员信息"
+	@handler vips
+	get /vips (ParamMids) returns (VipsResponse)
+
+	@doc "查询用户完整资料"
+	@handler profile
+	get /profile (ParamMid) returns (ProfileResponse)
+
+	@doc "查询带统计的资料"
+	@handler profileWithStat
+	get /profile/stat (ParamMid) returns (ProfileStatResponse)
+}
+
+// /privacy 仅允许白名单 appkey 访问（从 account 服务迁移的 filterByAppkey 语义）
+@server (
+	prefix:     /account
+	middleware: AppkeyVerify
+)
+service app {
+	@doc "查询用户隐私信息（需白名单 appkey）"
+	@handler privacy
+	get /privacy (ParamMid) returns (PrivacyResponse)
+}
+
+// v1 老客户端兼容路由
+@server (
+	prefix: /account/v1
+)
+service app {
+	@doc "v1 老客户端：查询用户基础信息"
+	@handler v1Info
+	get /info (ParamMid) returns (V1InfoResponse)
+
+	@doc "v1 老客户端：批量查询用户基础信息"
+	@handler v1Infos
+	get /infos (ParamMids) returns (V1InfosResponse)
+
+	@doc "v1 老客户端：查询用户名片"
+	@handler v1Card
+	get /card (ParamMid) returns (V1CardResponse)
+
+	@doc "v1 老客户端：查询用户会员信息"
+	@handler v1Vip
+	get /vip (ParamMid) returns (V1VipResponse)
+}
+
+// v2 兼容路由
+@server (
+	prefix: /account/v2
+)
+service app {
+	@doc "v2 查询我的资料"
+	@handler v2MyInfo
+	get /myinfo (ParamMid) returns (V2MyInfoResponse)
+
+	@doc "v2 查询我的资料（userinfo 别名）"
+	@handler v2UserInfo
+	get /userinfo (ParamMid) returns (V2MyInfoResponse)
+}
+
+// ==================== user-profile 聚合结构（参考仓库 account-interface 的 /x/member 路由风格） ====================
+// 基础资料（对应 user-profile BaseInfoReply）
+type MemberBaseInfo {
+	Mid      int64  `json:"mid"`
+	Name     string `json:"name"`
+	Sex      int64  `json:"sex"`
+	Face     string `json:"face"`
+	Sign     string `json:"sign"`
+	Rank     int64  `json:"rank"`
+	Birthday int64  `json:"birthday"`
+}
+
+// 用户全量信息（对应 user-profile MemberInfoReply）
+type MemberFullInfo {
+	BaseInfo     MemberBaseInfo `json:"base_info"`
+	LevelInfo    LevelInfo      `json:"level_info"`
+	OfficialInfo OfficialInfo   `json:"official_info"`
+}
+
+// 节操值（对应 user-profile MoralReply）
+type MoralInfo {
+	Mid             int64 `json:"mid"`
+	Moral           int64 `json:"moral"`
+	Added           int64 `json:"added"`
+	Deducted        int64 `json:"deducted"`
+	LastRecoverDate int64 `json:"last_recover_date"`
+}
+
+// 用户变更日志（对应 user-profile UserLogReply）
+type UserLog {
+	Mid     int64             `json:"mid"`
+	IP      string            `json:"ip"`
+	TS      int64             `json:"ts"`
+	LogID   string            `json:"log_id"`
+	Content map[string]string `json:"content"`
+}
+
+// 当日经验奖励统计（对应 user-profile ExpStatReply）
+type ExpStat {
+	Login bool  `json:"login"`
+	Watch bool  `json:"watch_av"`
+	Coin  int64 `json:"coins_av"`
+	Share bool  `json:"share_av"`
+}
+
+// 实名简要信息（对应 user-profile RealnameBrief）
+type RealnameBrief {
+	Realname string `json:"realname"`
+	Card     string `json:"card"`
+	CardType int    `json:"card_type"`
+	Status   int8   `json:"status"`
+}
+
+// 实名申请流程状态（参考 RealnameApplyStatusInfo）
+type RealnameApplyStatus {
+	Status   int8   `json:"status"`
+	Remark   string `json:"remark"`
+	Realname string `json:"realname"`
+	Card     string `json:"card"`
+}
+
+// 脱敏实名信息（对应 user-profile RealnameStrippedInfoReply）
+type RealnameStrippedInfo {
+	Mid       int64 `json:"mid"`
+	Status    int8  `json:"status"`
+	Channel   int8  `json:"channel"`
+	Country   int16 `json:"country"`
+	CardType  int8  `json:"card_type"`
+	AdultType int8  `json:"adult_type"`
+}
+
+// ==================== user-profile 请求参数 ====================
+type ParamUname {
+	Mid  int64  `form:"mid"`
+	Name string `form:"name"`
+}
+
+type ParamUserSign {
+	Mid      int64  `form:"mid"`
+	UserSign string `form:"user_sign"`
+}
+
+type ParamSex {
+	Mid int64 `form:"mid"`
+	Sex int64 `form:"sex"`
+}
+
+type ParamBirthday {
+	Mid      int64 `form:"mid"`
+	Birthday int64 `form:"birthday"`
+}
+
+type ParamFace {
+	Mid  int64  `form:"mid"`
+	Face string `form:"face"`
+}
+
+type ParamBaseAll {
+	Mid      int64  `form:"mid"`
+	Name     string `form:"name"`
+	Sex      int64  `form:"sex"`
+	Face     string `form:"face"`
+	UserSign string `form:"user_sign"`
+	Rank     int64  `form:"rank"`
+	Birthday int64  `form:"birthday"`
+}
+
+type ParamExp {
+	Mid     int64   `form:"mid"`
+	Count   float64 `form:"count"`
+	Reason  string  `form:"reason"`
+	Operate string  `form:"operate"`
+	IP      string  `form:"ip"`
+}
+
+type ParamRealnameApply {
+	Mid       int64  `form:"mid"`
+	Capture   int64  `form:"capture"`
+	RealName  string `form:"real_name"`
+	CardType  int64  `form:"card_type"`
+	CardNum   string `form:"card_num"`
+	Country   int64  `form:"country"`
+	IMG1Token string `form:"img1_token"`
+	IMG2Token string `form:"img2_token"`
+	IMG3Token string `form:"img3_token"`
+}
+
+type ParamCaptureCheck {
+	Mid     int64 `form:"mid"`
+	Capture int   `form:"capture"`
+}
+
+type ParamRealnameCheck {
+	Mid      int64  `form:"mid"`
+	CardType int8   `form:"card_type"`
+	CardCode string `form:"card_code"`
+}
+
+// ==================== user-profile 响应数据载荷 ====================
+type EmptyResponse {
+	Code    int       `json:"code"`
+	Message string    `json:"message"`
+	Data    EmptyData `json:"data"`
+	TTL     int64     `json:"ttl"`
+}
+
+type MemberBaseData {
+	BaseInfo MemberBaseInfo `json:"base_info"`
+}
+
+type MemberBaseResponse {
+	Code    int            `json:"code"`
+	Message string         `json:"message"`
+	Data    MemberBaseData `json:"data"`
+	TTL     int64          `json:"ttl"`
+}
+
+type BatchBaseData {
+	BaseInfos map[int64]MemberBaseInfo `json:"base_infos"`
+}
+
+type BatchBaseResponse {
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    BatchBaseData `json:"data"`
+	TTL     int64         `json:"ttl"`
+}
+
+type MemberFullData {
+	MemberInfo MemberFullInfo `json:"member_info"`
+}
+
+type MemberFullResponse {
+	Code    int            `json:"code"`
+	Message string         `json:"message"`
+	Data    MemberFullData `json:"data"`
+	TTL     int64          `json:"ttl"`
+}
+
+type MoralData {
+	Moral MoralInfo `json:"moral"`
+}
+
+type MoralResponse {
+	Code    int       `json:"code"`
+	Message string    `json:"message"`
+	Data    MoralData `json:"data"`
+	TTL     int64     `json:"ttl"`
+}
+
+type MoralLogData {
+	UserLogs []UserLog `json:"user_logs"`
+}
+
+type MoralLogResponse {
+	Code    int          `json:"code"`
+	Message string       `json:"message"`
+	Data    MoralLogData `json:"data"`
+	TTL     int64        `json:"ttl"`
+}
+
+type ExpRewardData {
+	ExpStat ExpStat `json:"exp_stat"`
+}
+
+type ExpRewardResponse {
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    ExpRewardData `json:"data"`
+	TTL     int64         `json:"ttl"`
+}
+
+type RealnameStatusData {
+	Status int8 `json:"status"`
+}
+
+type RealnameStatusResponse {
+	Code    int                `json:"code"`
+	Message string             `json:"message"`
+	Data    RealnameStatusData `json:"data"`
+	TTL     int64              `json:"ttl"`
+}
+
+type RealnameBriefData {
+	RealnameBrief RealnameBrief `json:"realname_brief"`
+}
+
+type RealnameBriefResponse {
+	Code    int               `json:"code"`
+	Message string            `json:"message"`
+	Data    RealnameBriefData `json:"data"`
+	TTL     int64             `json:"ttl"`
+}
+
+type RealnameApplyStatusData {
+	RealnameApplyStatus RealnameApplyStatus `json:"realname_apply_status"`
+}
+
+type RealnameApplyStatusResponse {
+	Code    int                     `json:"code"`
+	Message string                  `json:"message"`
+	Data    RealnameApplyStatusData `json:"data"`
+	TTL     int64                   `json:"ttl"`
+}
+
+type RealnameAdultData {
+	Type int8 `json:"type"`
+}
+
+type RealnameAdultResponse {
+	Code    int               `json:"code"`
+	Message string            `json:"message"`
+	Data    RealnameAdultData `json:"data"`
+	TTL     int64             `json:"ttl"`
+}
+
+type RealnameCheckData {
+	Result bool `json:"result"`
+}
+
+type RealnameCheckResponse {
+	Code    int               `json:"code"`
+	Message string            `json:"message"`
+	Data    RealnameCheckData `json:"data"`
+	TTL     int64             `json:"ttl"`
+}
+
+// ==================== user-profile 客户端路由（参考仓库 account-interface /x/member/*） ====================
+@server (
+	prefix: /x/member
+)
+service app {
+	@doc "查询我的全量资料（基础+等级+官方认证）"
+	@handler memberAccount
+	get /web/account (ParamMid) returns (MemberFullResponse)
+
+	@doc "查询单个用户基础资料"
+	@handler memberBase
+	get /base (ParamMid) returns (MemberBaseResponse)
+
+	@doc "批量查询用户基础资料"
+	@handler memberBatchBase
+	get /batchBase (ParamMids) returns (BatchBaseResponse)
+
+	@doc "查询节操值"
+	@handler memberMoral
+	get /moral (ParamMid) returns (MoralResponse)
+
+	@doc "查询节操值变更日志"
+	@handler moralLog
+	get /web/moral/log (ParamMid) returns (MoralLogResponse)
+
+	@doc "查询经验等级信息（含当前经验）"
+	@handler memberExp
+	get /exp (ParamMid) returns (LevelResponse)
+
+	@doc "查询等级信息（不含当前经验）"
+	@handler memberLevel
+	get /level (ParamMid) returns (LevelResponse)
+
+	@doc "查询生效官方认证信息"
+	@handler memberOfficial
+	get /official (ParamMid) returns (OfficialInfoResponse)
+
+	@doc "查询经验变更日志"
+	@handler expLog
+	get /web/exp/log (ParamMid) returns (MoralLogResponse)
+
+	@doc "查询当日经验奖励统计"
+	@handler expReward
+	get /web/exp/reward (ParamMid) returns (ExpRewardResponse)
+}
+
+// 资料编辑路由（参考仓库 /x/member/app/* 与 /x/member/web/update）
+@server (
+	prefix: /x/member
+)
+service app {
+	@doc "更新用户昵称"
+	@handler updateUname
+	post /app/uname/update (ParamUname) returns (EmptyResponse)
+
+	@doc "更新用户签名"
+	@handler updateSign
+	post /app/sign/update (ParamUserSign) returns (EmptyResponse)
+
+	@doc "更新用户性别"
+	@handler updateSex
+	post /app/sex/update (ParamSex) returns (EmptyResponse)
+
+	@doc "更新用户生日"
+	@handler updateBirthday
+	post /app/birthday/update (ParamBirthday) returns (EmptyResponse)
+
+	@doc "更新用户头像"
+	@handler updateFace
+	post /app/face/update (ParamFace) returns (EmptyResponse)
+
+	@doc "整体更新用户基础资料"
+	@handler updateBaseAll
+	post /web/update (ParamBaseAll) returns (EmptyResponse)
+}
+
+// 实名认证路由（参考仓库 /x/member/realname/*）
+@server (
+	prefix: /x/member/realname
+)
+service app {
+	@doc "查询实名认证状态"
+	@handler realnameStatus
+	get /status (ParamMid) returns (RealnameStatusResponse)
+
+	@doc "查询实名简要信息"
+	@handler realnameInfo
+	get /info (ParamMid) returns (RealnameBriefResponse)
+
+	@doc "查询实名申请流程状态"
+	@handler realnameApplyStatus
+	get /apply/status (ParamMid) returns (RealnameApplyStatusResponse)
+
+	@doc "发送实名手机验证码"
+	@handler realnameTelCapture
+	post /tel/capture (ParamMid) returns (EmptyResponse)
+
+	@doc "校验实名手机验证码"
+	@handler realnameCaptureCheck
+	get /tel/capture/check (ParamCaptureCheck) returns (EmptyResponse)
+
+	@doc "提交实名认证申请"
+	@handler realnameApply
+	post /apply (ParamRealnameApply) returns (EmptyResponse)
+
+	@doc "查询实名成年状态"
+	@handler realnameAdult
+	get /adult (ParamMid) returns (RealnameAdultResponse)
+
+	@doc "校验实名证件号"
+	@handler realnameCheck
+	get /check (ParamRealnameCheck) returns (RealnameCheckResponse)
+}
+
+// ==================== 登录路由（参考仓库 passport-login 接口层 /x/passport-login） ====================
+// 登录请求参数（密码为 RSA 公钥加密后的 base64，登录方式：1 密码、2 验证码）
+type ParamLogin {
+	Account     string `form:"account"`
+	Password    string `form:"password"`
+	LoginType   int32  `form:"login_type,default=1"`
+	CaptureCode string `form:"capture_code"`
+	IP          string `form:"ip"`
+	Device      string `form:"device"`
+	Buvid       string `form:"buvid"`
+}
+
+// 注册请求参数（手机/邮箱注册带验证码，用户名注册可无）
+type ParamRegister {
+	Account     string `form:"account"`
+	Password    string `form:"password"`
+	CaptureCode string `form:"capture_code"`
+	IP          string `form:"ip"`
+}
+
+// 登出/校验请求参数
+type ParamToken {
+	Token string `form:"token"`
+}
+
+// 刷新 token 请求参数
+type ParamRenew {
+	RefreshToken string `form:"refresh_token"`
+}
+
+// 验证码发送/校验请求参数
+type ParamCaptureSend {
+	Target string `form:"target"`
+	IP     string `form:"ip"`
+}
+
+type ParamCaptureVerify {
+	Target      string `form:"target"`
+	CaptureCode string `form:"capture_code"`
+}
+
+// cookie 会话校验请求参数（客户端回传 Cookie 原文）
+type ParamCookie {
+	Cookie string `form:"cookie"`
+}
+
+// RSA 公钥响应（参考 passport-login /key）
+type KeyData {
+	PublicKey string `json:"public_key"`
+	Hash      string `json:"hash"`
+}
+
+type KeyResponse {
+	Code    int     `json:"code"`
+	Message string  `json:"message"`
+	Data    KeyData `json:"data"`
+	TTL     int64   `json:"ttl"`
+}
+
+// 登录态数据（token/refresh/csrf）
+type LoginData {
+	Mid          int64  `json:"mid"`
+	Token        string `json:"token"`
+	RefreshToken string `json:"refresh_token"`
+	Csrf         string `json:"csrf"`
+	Expires      int64  `json:"expires"`
+}
+
+type LoginResponse {
+	Code    int       `json:"code"`
+	Message string    `json:"message"`
+	Data    LoginData `json:"data"`
+	TTL     int64     `json:"ttl"`
+}
+
+// 会话校验数据（is_login/mid/csrf/expires）
+type SessionData {
+	IsLogin bool   `json:"is_login"`
+	Mid     int64  `json:"mid"`
+	Csrf    string `json:"csrf"`
+	Expires int64  `json:"expires"`
+}
+
+type SessionResponse {
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    SessionData `json:"data"`
+	TTL     int64       `json:"ttl"`
+}
+
+// 刷新 token 响应数据
+type RenewData {
+	Token   string `json:"token"`
+	Csrf    string `json:"csrf"`
+	Expires int64  `json:"expires"`
+}
+
+type RenewResponse {
+	Code    int       `json:"code"`
+	Message string    `json:"message"`
+	Data    RenewData `json:"data"`
+	TTL     int64     `json:"ttl"`
+}
+
+@server (
+	prefix: /x/passport-login
+)
+service app {
+	@doc "获取密码加密 RSA 公钥"
+	@handler loginKey
+	get /key returns (KeyResponse)
+
+	@doc "登录（密码/验证码，login_type 区分）"
+	@handler login
+	post /web/login (ParamLogin) returns (LoginResponse)
+
+	@doc "发送登录验证码"
+	@handler loginCaptureSend
+	post /web/captcha/send (ParamCaptureSend) returns (EmptyResponse)
+
+	@doc "校验登录验证码"
+	@handler loginCaptureCheck
+	post /web/captcha/check (ParamCaptureVerify) returns (EmptyResponse)
+
+	@doc "注册（用户名+密码 或 手机/邮箱+验证码+密码）"
+	@handler register
+	post /web/register (ParamRegister) returns (LoginResponse)
+
+	@doc "登出"
+	@handler logout
+	post /exit (ParamToken) returns (EmptyResponse)
+
+	@doc "刷新 token"
+	@handler renewToken
+	post /token/renew (ParamRenew) returns (RenewResponse)
+
+	@doc "查询 cookie 会话登录态"
+	@handler cookieInfo
+	get /web/cookie/info (ParamCookie) returns (SessionResponse)
+
+	@doc "查询 token 登录态"
+	@handler tokenInfo
+	get /web/token/info (ParamToken) returns (SessionResponse)
+}
+
