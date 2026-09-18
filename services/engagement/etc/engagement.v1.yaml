@@ -1,0 +1,14 @@
+Name: engagement.v1.rpc
+ListenOn: 0.0.0.0:8083
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: engagement.v1.rpc
+
+# Redis 缓存与计数器
+Redis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL 主库 DSN（仅本地示例，生产从配置中心/Secret 注入）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_engagement?charset=utf8mb4&parseTime=true&loc=Local

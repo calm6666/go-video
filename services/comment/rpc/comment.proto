@@ -1,0 +1,159 @@
+syntax = "proto3";
+
+package comment.v1;
+
+option go_package = "go-video/services/comment/rpc";
+
+// 说明：参考仓库 openbilibili-go-common 没有独立 comment 服务层
+// （评论相关逻辑散落在 interface/reply 与 reply-feed 推送服务中）。
+// 本服务依据本项目 README 与 AGENTS.md §5 从头设计评论领域：
+// 评论、楼中楼回复、举报、置顶/折叠状态、审核状态。
+// 点赞数据归 engagement 服务，本服务仅记录评论自身状态与计数快照。
+
+// 空响应
+message EmptyReply {}
+
+// 评论目标类型（与 obc reply 兼容：1 视频、4 评论回复、5 图片、6 视频（UGV）、9 番剧、10 番剧评论）
+message Target {
+  int64 oid = 1; // 目标 ID（视频 aid / 评论 root 等）
+  int32 tp = 2;  // 目标类型，参见上文注释
+}
+
+// 评论排序
+enum SortMode {
+  SORT_UNSPECIFIED = 0; // 未指定（默认按热度）
+  SORT_HOT = 1;         // 按热度
+  SORT_TIME = 2;         // 按时间倒序
+}
+
+// 评论状态
+enum CommentState {
+  STATE_NORMAL = 0;    // 正常
+  STATE_FOLDED = 1;    // 折叠（被举报或低质）
+  STATE_DELETED = 2;  // 已删除
+  STATE_PINNED = 3;    // 置顶
+  STATE_PENDING = 4;  // 待审核
+  STATE_REJECTED = 5; // 审核驳回
+}
+
+// 评论主体（DB 行投影）。
+// 注：message 名取 CommentInfo 而非 Comment，避免与 service Comment 同名冲突。
+message CommentInfo {
+  int64 rpid = 1;      // 评论 ID
+  int64 oid = 2;        // 目标 ID
+  int32 tp = 3;         // 目标类型
+  int64 root = 4;       // 根评论 ID（0 表示本身是根评论）
+  int64 parent = 5;     // 父评论 ID（0 表示直接对 oid 评论）
+  int64 mid = 6;        // 评论者用户 ID
+  string content = 7;   // 评论内容（明文，富文本由 gateway 渲染）
+  int32 state = 8;      // 评论状态，参见 CommentState
+  int64 ctime = 9;       // 创建时间（Unix 秒）
+  int64 mtime = 10;      // 修改时间（Unix 秒）
+  int32 like_count = 11; // 点赞数快照（真实计数归 engagement）
+  int32 reply_count = 12; // 回复数快照
+}
+
+// --- 发布 ---
+
+message PostCommentReq {
+  int64 oid = 1;         // 目标 ID
+  int32 tp = 2;          // 目标类型
+  int64 root = 3;        // 根评论 ID（直接对 oid 评论时为 0）
+  int64 parent = 4;      // 父评论 ID（同上）
+  int64 mid = 5;         // 评论者用户 ID
+  string content = 6;    // 评论内容
+  int32 state = 7;       // 初始状态（通常为 STATE_PENDING 待审核）
+  string trace_id = 8;   // 调用方透传 trace_id，便于审核链路关联
+}
+
+message PostCommentReply {
+  int64 rpid = 1;        // 新评论 ID
+  int64 ctime = 2;        // 创建时间
+}
+
+// --- 删除 ---
+
+message DeleteCommentReq {
+  int64 rpid = 1;        // 评论 ID
+  int64 mid = 2;         // 操作者用户 ID（用于鉴权校验）
+  bool admin = 3;        // 是否管理员操作（管理员可绕过本人校验）
+}
+
+// --- 查询 ---
+
+message ListCommentsReq {
+  int64 oid = 1;         // 目标 ID
+  int32 tp = 2;          // 目标类型
+  int64 viewer_mid = 3;  // 查看者用户 ID（用于过滤黑名单/屏蔽词）
+  SortMode sort = 4;     // 排序方式
+  int32 pn = 5;          // 页码（从 1 开始）
+  int32 ps = 6;          // 每页大小（最大 49，与 obc 一致）
+}
+
+message ListCommentsReply {
+  repeated CommentInfo comments = 1; // 评论列表
+  int32 total = 2;                     // 总数
+}
+
+message ListRepliesReq {
+  int64 root = 1;        // 根评论 ID
+  int64 viewer_mid = 2;  // 查看者用户 ID
+  int32 pn = 3;          // 页码
+  int32 ps = 4;          // 每页大小（最大 49）
+}
+
+message ListRepliesReply {
+  repeated CommentInfo replies = 1; // 回复列表
+  int32 total = 2;                    // 总数
+}
+
+// --- 置顶 ---
+
+message PinCommentReq {
+  int64 rpid = 1;    // 评论 ID
+  int64 oid = 2;     // 目标 ID（用于校验）
+  bool pin = 3;      // true 置顶、false 取消
+  int64 admin_mid = 4; // 操作管理员（需为视频 UP 或管理员）
+}
+
+// --- 举报 ---
+
+message ReportCommentReq {
+  int64 rpid = 1;        // 被举报评论 ID
+  int64 reporter_mid = 2; // 举报者用户 ID
+  int32 reason = 3;       // 举报原因码
+  string content = 4;     // 举报理由补充说明
+  string trace_id = 5;    // 透传 trace_id
+}
+
+// --- 计数快照 ---
+
+message CommentStatsReq {
+  int64 oid = 1;         // 目标 ID
+  int32 tp = 2;          // 目标类型
+}
+
+message CommentStatsReply {
+  int64 total = 1;       // 目标下评论总数（含回复）
+  int64 root_total = 2;  // 根评论数
+}
+
+// Comment 视频评论及回复服务。
+// 依据 AGENTS.md §5，本服务只持有评论自身状态与计数快照；
+// 点赞真实计数归 engagement 服务，本服务通过点赞事件异步刷新快照。
+service Comment {
+  // 发布评论或回复（state 通常为待审核）
+  rpc PostComment(PostCommentReq) returns (PostCommentReply);
+  // 删除评论（本人或管理员）
+  rpc DeleteComment(DeleteCommentReq) returns (EmptyReply);
+  // 分页查询目标下的根评论
+  rpc ListComments(ListCommentsReq) returns (ListCommentsReply);
+  // 分页查询某根评论下的楼中楼回复
+  rpc ListReplies(ListRepliesReq) returns (ListRepliesReply);
+  // 置顶/取消置顶评论
+  rpc PinComment(PinCommentReq) returns (EmptyReply);
+  // 举报评论（写入 moderation-orchestrator 待审队列）
+  rpc ReportComment(ReportCommentReq) returns (EmptyReply);
+  // 查询目标下的评论计数快照
+  rpc CommentStats(CommentStatsReq) returns (CommentStatsReply);
+}

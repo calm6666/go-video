@@ -1,0 +1,310 @@
+syntax = "proto3";
+
+package engagement.v1;
+
+option go_package = "go-video/services/engagement/rpc";
+
+// 说明：本契约移植自参考仓库 openbilibili-go-common：
+//   - app/service/main/thumbup：8 个点赞方法（Like/Stats/MultiStats/HasLike/
+//     UserLikes/ItemLikes/UpdateCount/RawStat）
+//   - app/service/main/favorite：核心收藏方法（AddFav/DelFav/IsFavored/
+//     IsFavoreds/UserFolders/AddFolder/DelFolder）
+//   - app/service/main/share：AddShare
+// 依据 AGENTS.md §1，不移植 coin 服务（投币属商业化范围外）。
+// favorite 的 30+ 高级收藏夹管理方法（MoveFavs/CopyFavs/SortFavs 等）不移植，
+// 由 services/operation 管理后台承接。
+
+// 空响应
+message EmptyReply {}
+
+// 点赞动作
+enum Action {
+  ACTION_UNSPECIFIED = 0; // 未指定
+  ACTION_LIKE = 1;        // 点赞
+  ACTION_CANCEL_LIKE = 2; // 取消点赞
+  ACTION_DISLIKE = 3;     // 点踩
+  ACTION_CANCEL_DISLIKE = 4; // 取消点踩
+}
+
+// 点赞状态
+enum LikeState {
+  STATE_UNSPECIFIED = 0; // 未指定
+  STATE_LIKE = 1;        // 已点赞
+  STATE_DISLIKE = 2;      // 已点踩
+}
+
+// --- 点赞（移植自 thumbup） ---
+
+message LikeReq {
+  string business = 1; // 业务名（如 "archive"）
+  int64 mid = 2;        // 操作用户 ID
+  int64 up_mid = 3;     // 被点赞内容 UP 主 ID（用于通知）
+  int64 origin_id = 4;  // 来源 ID
+  int64 message_id = 5; // 对象 ID
+  Action action = 6;    // 动作
+  string ip = 7;         // 调用方 IP
+}
+
+message LikeReply {
+  int64 origin_id = 1;     // 来源 ID
+  int64 message_id = 2;    // 对象 ID
+  int64 like_number = 3;   // 当前点赞数
+  int64 dislike_number = 4; // 当前点踩数
+}
+
+message StatState {
+  int64 origin_id = 1;     // 来源 ID
+  int64 message_id = 2;    // 对象 ID
+  int64 like_number = 3;   // 点赞数
+  int64 dislike_number = 4; // 点踩数
+  LikeState like_state = 5; // 当前用户状态
+}
+
+message StatsReq {
+  string business = 1;          // 业务名
+  int64 origin_id = 2;           // 来源 ID
+  repeated int64 message_ids = 3; // 对象 ID 列表（最多 100）
+  int64 mid = 4;                 // 当前用户（可选，不需要 like_state 时不填）
+  string ip = 5;                  // 调用方 IP
+}
+
+message StatsReply {
+  map<int64, StatState> stats = 1; // message_id → 计数与状态
+}
+
+message MultiStatsReq {
+  message Record {
+    int64 origin_id = 1;  // 来源 ID
+    int64 message_id = 2; // 对象 ID
+  }
+  message Business {
+    repeated Record records = 1;
+  }
+  int64 mid = 1;                          // 当前用户
+  map<string, Business> business = 2;     // 业务 → 记录列表
+  string ip = 3;                            // 调用方 IP
+}
+
+message MultiStatsReply {
+  message Records {
+    map<int64, StatState> records = 1;
+  }
+  map<string, Records> business = 1; // 业务 → 记录映射
+}
+
+message HasLikeReq {
+  string business = 1;           // 业务名
+  repeated int64 message_ids = 2; // 对象 ID 列表
+  int64 mid = 3;                  // 用户 ID
+  string ip = 4;                   // 调用方 IP
+}
+
+message UserLikeState {
+  int64 mid = 1;          // 用户 ID
+  int64 time = 2;          // 点赞时间（Unix 秒）
+  LikeState state = 3;     // 点赞状态
+}
+
+message HasLikeReply {
+  map<int64, UserLikeState> states = 1; // message_id → 状态
+}
+
+message UserLikesReq {
+  string business = 1; // 业务名
+  int64 mid = 2;        // 用户 ID
+  int32 pn = 3;         // 页码（从 1 开始）
+  int32 ps = 4;         // 每页大小（最大 50）
+  string ip = 5;         // 调用方 IP
+}
+
+message ItemRecord {
+  int64 message_id = 1; // 对象 ID
+  int64 time = 2;         // 点赞时间（Unix 秒）
+}
+
+message UserLikesReply {
+  int32 total = 1;                // 总数
+  repeated ItemRecord items = 2;   // 点赞记录列表
+}
+
+message ItemLikesReq {
+  string business = 1; // 业务名
+  int64 origin_id = 2;  // 来源 ID
+  int64 message_id = 3; // 对象 ID
+  int64 last_mid = 4;    // 上页最后 mid（去重翻页用）
+  int32 pn = 5;          // 页码
+  int32 ps = 6;          // 每页大小（最大 50）
+  string ip = 7;          // 调用方 IP
+}
+
+message UserRecord {
+  int64 mid = 1;  // 用户 ID
+  int64 time = 2; // 点赞时间（Unix 秒）
+}
+
+message ItemLikesReply {
+  repeated UserRecord users = 1; // 点赞用户列表
+}
+
+message UpdateCountReq {
+  string business = 1;     // 业务名
+  int64 origin_id = 2;      // 来源 ID
+  int64 message_id = 3;     // 对象 ID
+  int64 like_change = 4;    // 点赞数增量
+  int64 dislike_change = 5; // 点踩数增量
+  string operator = 6;      // 操作人（运营/系统）
+  string ip = 7;             // 调用方 IP
+}
+
+message RawStatReq {
+  string business = 1; // 业务名
+  int64 origin_id = 2; // 来源 ID
+  int64 message_id = 3; // 对象 ID
+  string ip = 4;         // 调用方 IP
+}
+
+message RawStatReply {
+  int64 origin_id = 1;      // 来源 ID
+  int64 message_id = 2;      // 对象 ID
+  int64 like_number = 3;     // 点赞数（原始值）
+  int64 dislike_number = 4;  // 点踩数（原始值）
+  int64 like_change = 5;     // 点赞数修正增量
+  int64 dislike_change = 6;  // 点踩数修正增量
+}
+
+// --- 收藏（移植自 favorite 核心） ---
+
+message AddFavReq {
+  int32 tp = 1;    // 收藏类型（与 obc 一致：2 视频、11 视频（ugv）、12 音频 等）
+  int64 mid = 2;    // 用户 ID
+  int64 fid = 3;    // 收藏夹 ID（0 默认夹）
+  int64 oid = 4;    // 目标 ID
+  int32 otype = 5;  // 目标子类型
+}
+
+message DelFavReq {
+  int32 tp = 1;    // 收藏类型
+  int64 mid = 2;    // 用户 ID
+  int64 fid = 3;    // 收藏夹 ID
+  int64 oid = 4;    // 目标 ID
+  int32 otype = 5;  // 目标子类型
+}
+
+message IsFavoredReq {
+  int32 tp = 1;  // 收藏类型
+  int64 mid = 2; // 用户 ID
+  int64 oid = 3; // 目标 ID
+}
+
+message IsFavoredReply {
+  bool faved = 1; // 是否已收藏
+}
+
+message IsFavoredsReq {
+  int32 tp = 1;           // 收藏类型
+  int64 mid = 2;           // 用户 ID
+  repeated int64 oids = 3; // 目标 ID 列表（最多 100）
+}
+
+message IsFavoredsReply {
+  map<int64, bool> faveds = 1; // oid → 是否已收藏
+}
+
+message Folder {
+  int64 fid = 1;          // 收藏夹 ID
+  int64 mid = 2;           // 用户 ID
+  string name = 3;         // 收藏夹名
+  string description = 4;  // 描述
+  string cover = 5;        // 封面 URL
+  int32 public = 6;        // 是否公开：0 私密、1 公开
+  int32 state = 7;         // 状态：0 正常、1 删除
+  int64 ctime = 8;         // 创建时间（Unix 秒）
+  int64 mtime = 9;         // 修改时间（Unix 秒）
+  int32 count = 10;        // 收藏数量快照
+}
+
+message UserFoldersReq {
+  int32 tp = 1;     // 收藏类型
+  int64 mid = 2;     // 用户 ID
+  int64 vmid = 3;    // 被查看用户 ID（用于他人主页）
+  int64 oid = 4;     // 目标 ID（可选，用于"收藏到哪个夹"提示）
+  bool all_count = 5; // 是否返回全部分类计数
+  int32 otype = 6;   // 目标子类型
+}
+
+message UserFoldersReply {
+  repeated Folder folders = 1; // 收藏夹列表
+}
+
+message AddFolderReq {
+  int32 tp = 1;            // 收藏类型
+  int64 mid = 2;            // 用户 ID
+  string name = 3;          // 收藏夹名
+  string description = 4;    // 描述
+  string cover = 5;          // 封面 URL
+  int32 public = 6;          // 是否公开
+}
+
+message AddFolderReply {
+  int64 fid = 1; // 新收藏夹 ID
+}
+
+message DelFolderReq {
+  int32 tp = 1; // 收藏类型
+  int64 mid = 2; // 用户 ID
+  int64 fid = 3; // 收藏夹 ID
+}
+
+// --- 分享（移植自 share） ---
+
+message AddShareReq {
+  int64 oid = 1;   // 目标 ID
+  int64 mid = 2;    // 用户 ID
+  int32 type = 3;   // 目标类型
+  string ip = 4;    // 调用方 IP
+}
+
+message AddShareReply {
+  int64 shares = 1; // 当前分享数
+}
+
+// Engagement 点赞、收藏、分享社区互动服务。
+// 依据 AGENTS.md §1，不实现投币或任何商业化余额；
+// 依据 §5，本服务只持有用户行为事实、收藏夹、可重算计数，
+// 不复制视频主数据，不直接更新推荐结果。
+service Engagement {
+  // 点赞/取消点赞/点踩（幂等：重复请求不重复增加计数）
+  rpc Like(LikeReq) returns (LikeReply);
+  // 批量查询对象计数与当前用户状态
+  rpc Stats(StatsReq) returns (StatsReply);
+  // 跨业务批量查询计数
+  rpc MultiStats(MultiStatsReq) returns (MultiStatsReply);
+  // 批量查询用户是否点赞
+  rpc HasLike(HasLikeReq) returns (HasLikeReply);
+  // 用户的点赞列表（分页）
+  rpc UserLikes(UserLikesReq) returns (UserLikesReply);
+  // 对象的点赞人列表（分页）
+  rpc ItemLikes(ItemLikesReq) returns (ItemLikesReply);
+  // 运营修改计数（增量）
+  rpc UpdateCount(UpdateCountReq) returns (EmptyReply);
+  // 查询原始计数（未修正值）
+  rpc RawStat(RawStatReq) returns (RawStatReply);
+
+  // 添加收藏
+  rpc AddFav(AddFavReq) returns (EmptyReply);
+  // 删除收藏
+  rpc DelFav(DelFavReq) returns (EmptyReply);
+  // 查询是否已收藏
+  rpc IsFavored(IsFavoredReq) returns (IsFavoredReply);
+  // 批量查询是否已收藏
+  rpc IsFavoreds(IsFavoredsReq) returns (IsFavoredsReply);
+  // 用户收藏夹列表
+  rpc UserFolders(UserFoldersReq) returns (UserFoldersReply);
+  // 创建收藏夹
+  rpc AddFolder(AddFolderReq) returns (AddFolderReply);
+  // 删除收藏夹
+  rpc DelFolder(DelFolderReq) returns (EmptyReply);
+
+  // 记录分享并返回分享数
+  rpc AddShare(AddShareReq) returns (AddShareReply);
+}

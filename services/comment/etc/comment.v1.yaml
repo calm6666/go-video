@@ -1,0 +1,14 @@
+Name: comment.v1.rpc
+ListenOn: 0.0.0.0:8082
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: comment.v1.rpc
+
+# Redis 缓存
+Redis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL 主库 DSN（仅本地示例，生产从配置中心/Secret 注入）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_comment?charset=utf8mb4&parseTime=true&loc=Local
