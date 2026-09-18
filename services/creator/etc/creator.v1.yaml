@@ -1,0 +1,13 @@
+Name: creator.v1.rpc
+ListenOn: 0.0.0.0:8086
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: creator.v1.rpc
+Mode: dev
+
+Redis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+DataSource: "creator:creator_pass@tcp(127.0.0.1:3306)/creator?charset=utf8mb4&parseTime=true&loc=Local"

@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+package creator.v1;
+
+option go_package = "go-video/services/creator/rpc";
+
+// 说明：本契约移植自参考仓库 openbilibili-go-common/app/service/main/up。
+// 依据 AGENTS.md §5，稿件数据归 video 服务、互动计数归 engagement/social-graph
+// 等服务、活跃度统计归 spm 域，故 obc up 服务的 UpArcs/UpsArcs/UpCount/
+// UpsCount/UpsAidPubTime/AddUpPassedCache*/DelUpPassedCache*/UpBaseStats/
+// UpInfoActivitys 共 11 个方法不移植到本服务，由各 owner 服务承接。
+
+// 空请求（对应参考仓库 NoArgReq）
+message NoArgReq {}
+
+// 空响应（对应参考仓库 NoReply）
+message EmptyReply {}
+
+// 单个创作者请求
+message MidReq {
+  int64 mid = 1; // 用户 ID
+}
+
+// 批量创作者请求（最多 100 个）
+message MidsReq {
+  repeated int64 mids = 1; // 用户 ID 列表
+}
+
+// UP 主特殊用户组信息
+message UpGroup {
+  int64 id = 1;         // 分组 ID
+  string name = 2;      // 分组名
+  string tag = 3;       // 标签名称
+  string short_tag = 4; // 标签简称
+  string font_color = 5; // 字体色
+  string bg_color = 6;  // 背景色
+  string note = 7;      // 备注
+}
+
+// UP 主特殊属性
+message UpSpecial {
+  repeated int64 group_ids = 1; // 所属特殊分组 ID 列表
+}
+
+// 单个 UP 主特殊属性请求
+message UpSpecialReq {
+  int64 mid = 1; // 用户 ID
+}
+
+// 多个 UP 主特殊属性请求
+message UpsSpecialReq {
+  repeated int64 mids = 1; // 用户 ID 列表（最多 100）
+}
+
+// 特殊属性响应
+message UpSpecialReply {
+  UpSpecial up_special = 1; // 特殊属性
+}
+
+// 多个特殊属性响应
+message UpsSpecialReply {
+  map<int64, UpSpecial> up_specials = 1; // mid → 特殊属性
+}
+
+// 所有特殊分组响应
+message UpGroupsReply {
+  map<int64, UpGroup> up_groups = 1; // 分组 ID → 分组信息
+}
+
+// 分组下用户请求
+message UpGroupMidsReq {
+  int64 group_id = 1; // 分组 ID
+  int32 pn = 2;       // 页码（从 1 开始）
+  int32 ps = 3;       // 每页大小（最大 1000）
+}
+
+// 分组下用户响应
+message UpGroupMidsReply {
+  repeated int64 mids = 1; // 分组下用户 ID
+  int32 total = 2;         // 总数
+}
+
+// UP 主身份属性请求
+message UpAttrReq {
+  int64 mid = 1;  // 用户 ID
+  int32 from = 2; // 来源：0 稿件作者、1 移动投稿作者、2 直播 UP、3 直播白名单
+}
+
+// UP 主身份属性响应
+message UpAttrReply {
+  int32 is_author = 1; // 是否有身份：0 否、1 是
+}
+
+// 关注弹窗开关请求（设置和查询共用）
+message UpSwitchReq {
+  int64 mid = 1;   // 用户 ID
+  int32 from = 2;  // 业务来源：0 播放器关注开关、1 UP 主荣誉周报退订
+  int32 state = 3; // 开关状态：0 关闭、1 打开（仅 SetUpSwitch 使用）
+}
+
+// 关注弹窗开关响应
+message UpSwitchReply {
+  int32 state = 1; // 当前开关状态：0 关闭、1 打开
+}
+
+// 高能联盟 UP 主请求
+message HighAllyUpsReq {
+  repeated int64 mids = 1; // 用户 ID 列表
+}
+
+// 签约信息
+message SignUp {
+  int64 mid = 1;       // 签约 UP 主 ID
+  int32 state = 2;     // 签约状态
+  int64 begin_date = 3; // 签约开始时间（Unix 秒）
+  int64 end_date = 4;  // 签约结束时间（Unix 秒）
+}
+
+// 高能联盟 UP 主响应
+message HighAllyUpsReply {
+  map<int64, SignUp> lists = 1; // mid → 签约信息
+}
+
+// Creator 创作者身份与权限服务（移植自参考仓库 up 服务）
+service Creator {
+  // 查询单个 UP 主特殊属性
+  rpc UpSpecial(UpSpecialReq) returns (UpSpecialReply);
+  // 批量查询 UP 主特殊属性
+  rpc UpsSpecial(UpsSpecialReq) returns (UpsSpecialReply);
+  // 查询所有特殊用户组
+  rpc UpGroups(NoArgReq) returns (UpGroupsReply);
+  // 查询某个分组下的所有用户
+  rpc UpGroupMids(UpGroupMidsReq) returns (UpGroupMidsReply);
+  // 查询 UP 主身份属性
+  rpc UpAttr(UpAttrReq) returns (UpAttrReply);
+  // 设置 UP 主关注弹窗开关
+  rpc SetUpSwitch(UpSwitchReq) returns (EmptyReply);
+  // 查询 UP 主关注弹窗开关
+  rpc UpSwitch(UpSwitchReq) returns (UpSwitchReply);
+  // 查询高能联盟 UP 主签约信息
+  rpc GetHighAllyUps(HighAllyUpsReq) returns (HighAllyUpsReply);
+}
