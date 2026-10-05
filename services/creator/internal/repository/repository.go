@@ -11,10 +11,41 @@ import (
 	"go-video/services/creator/model"
 )
 
+// Cacher 是 Repository 对缓存层的最小依赖面（生产由 *Cache 实现）。
+//
+// 为什么要有这个接口：Repository.cache 原先是具体类型 *Cache，而 ServiceContext.Repository
+// 又是具体类型 *repository.Repository，logic 单测无处塞替身，只能连真 Redis。抽出接口后，
+// 测试用 NewWithDeps(内存缓存, 内存 model...) 组装**真实的 Repository**，
+// 缓存读穿/回填/失效顺序、空标记与脏值的判定仍然整条在被测路径上
+// （与 services/comment/internal/repository/repository.go 的 Cacher 同一取舍）。
+// 只声明 Repository 实际调用的方法（Cache.DelSpecial 目前没有调用方，故不进入接口）。
+// 语义约定与 *Cache 一致：miss 返回零值且 err=nil，不视为错误。
+type Cacher interface {
+	Ping(ctx context.Context) error
+
+	GetSpecial(ctx context.Context, mid int64) ([]int64, error)
+	SetSpecial(ctx context.Context, mid int64, ids []int64) error
+
+	GetGroups(ctx context.Context) (string, error)
+	SetGroups(ctx context.Context, payload string) error
+
+	GetGroupMids(ctx context.Context, gid int64, pn, ps int32) (string, error)
+	SetGroupMids(ctx context.Context, gid int64, pn, ps int32, payload string) error
+
+	GetAttr(ctx context.Context, mid int64, from int32) (int32, bool, error)
+	SetAttr(ctx context.Context, mid int64, from, state int32) error
+	SetAttrEmpty(ctx context.Context, mid int64, from int32) error
+
+	GetSwitch(ctx context.Context, mid int64, from int32) (int32, bool, error)
+	SetSwitch(ctx context.Context, mid int64, from, state int32) error
+	DelSwitch(ctx context.Context, mid int64, from int32) error
+}
+
+var _ Cacher = (*Cache)(nil)
+
 // Repository 是 creator 服务的数据访问入口。
-// 组合 5 个 model 与 Redis 缓存，为 logic 层提供统一接口。
 type Repository struct {
-	cache *Cache
+	cache Cacher
 	conn  sqlx.SqlConn
 
 	specialModel  model.UpSpecialModel
@@ -25,7 +56,7 @@ type Repository struct {
 	signUpModel   model.SignUpModel
 }
 
-// New 构造 Repository。
+// New 构造 Repository（生产路径唯一入口）。
 func New(rds *redis.Redis, conn sqlx.SqlConn) *Repository {
 	return &Repository{
 		cache:         NewCache(rds),
@@ -36,6 +67,22 @@ func New(rds *redis.Redis, conn sqlx.SqlConn) *Repository {
 		attrModel:     model.NewUpAttrModel(conn),
 		switchModel:   model.NewUpSwitchModel(conn),
 		signUpModel:   model.NewSignUpModel(conn),
+	}
+}
+
+// NewWithDeps 用给定的依赖组装 Repository。
+// 生产代码只应通过 New 构造；本函数为 logic 单测提供注入缝（见 Cacher 注释）。
+func NewWithDeps(cache Cacher, specialModel model.UpSpecialModel, groupModel model.UpGroupModel,
+	groupMemModel model.UpGroupMemberModel, attrModel model.UpAttrModel,
+	switchModel model.UpSwitchModel, signUpModel model.SignUpModel) *Repository {
+	return &Repository{
+		cache:         cache,
+		specialModel:  specialModel,
+		groupModel:    groupModel,
+		groupMemModel: groupMemModel,
+		attrModel:     attrModel,
+		switchModel:   switchModel,
+		signUpModel:   signUpModel,
 	}
 }
 
@@ -185,11 +232,13 @@ func (r *Repository) UpSwitch(ctx context.Context, mid int64, from int32) (int32
 }
 
 // SetUpSwitch 设置开关状态（先 DB 后失效缓存）。
-func (r *Repository) SetUpSwitch(ctx context.Context, mid, from, state int32) error {
+// mid 全程 int64：up_switch.mid 是 BIGINT UNSIGNED，截断会写到别的号上
+// （见 model/up_switch.go 的 Upsert 注释与 internal/logic/upswitch_test.go 的回归用例）。
+func (r *Repository) SetUpSwitch(ctx context.Context, mid int64, from, state int32) error {
 	if err := r.switchModel.Upsert(ctx, mid, from, state); err != nil {
 		return fmt.Errorf("SetUpSwitch Upsert: %w", err)
 	}
-	return r.cache.DelSwitch(ctx, int64(mid), from)
+	return r.cache.DelSwitch(ctx, mid, from)
 }
 
 // --- 高能联盟签约 ---

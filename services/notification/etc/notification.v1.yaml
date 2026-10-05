@@ -1,0 +1,118 @@
+Name: notification.v1.rpc
+ListenOn: 0.0.0.0:8108
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: notification.v1.rpc
+
+# 日志与探针：本地开发保持控制台输出，生产由配置中心覆盖
+Log:
+  ServiceName: notification.v1.rpc
+  Mode: console
+  Level: info
+
+# 业务缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会触发 conflict key redis）
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL 主库 DSN（仅本地示例，生产从配置中心/Secret 注入）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_notification?charset=utf8mb4&parseTime=true&loc=Local
+
+# Kafka 消费配置（对齐 deploy/docker-compose 的 redpanda：PLAINTEXT 9092）
+# 注意：默认构建产物不链接 kq，这是刻意的（本仓库从未与任何 Kafka broker 联调过，
+# 默认产物若链接 kq，启动日志就会显示「消费者已启动」，那是伪造），
+# 需要以 `go build -tags notification_kafka ./services/notification` 构建后才生效；
+# 未带该 tag 且 Enabled=true 时服务启动即失败，不会静默“假装在消费”。
+# go-queue 已是 go.mod 的直接 require（`go.mod:9`），启用消费不需要任何依赖变更。
+# 本地只跑 RPC 投递链路时保持 Enabled: false（启动日志会显式声明未消费）。
+Kafka:
+  Enabled: false
+  Brokers:
+  - 127.0.0.1:9092
+  Group: notification.v1
+  RequestTopic: notification.request.v1
+  Offset: last
+  Conns: 1
+  Consumers: 4
+  Processors: 8
+  MaxEventRetries: 5
+
+# 预留：account RPC 客户端配置。本期不建链（account.v1 无取联系方式的方法，见 README 缺口）
+# AccountRPC:
+#   Endpoints:
+#   - 127.0.0.1:8083
+#   NonBlock: true
+
+# 通道适配器：仓库不引入厂商 SDK，统一使用通用 HTTP provider。
+# ApiKeyRef/SecretRef 只写环境变量名，真实密钥由 Secret/Vault 注入；留空表示未配置。
+Providers:
+  Push:
+    Enabled: false
+    Name: generic-http-push
+    Endpoint: ""            # 例：https://push.example.internal/v1/push
+    Method: POST
+    TimeoutMs: 3000
+    MaxRetries: 2
+    RetryDelayMs: 200
+    Headers:
+      Content-Type: application/json
+    BodyTemplate: '{"token":"{{target}}","title":"{{title}}","body":"{{body}}","key":"{{idempotency_key}}"}'
+    SignMode: bearer
+    ApiKeyRef: NOTIFICATION_PUSH_API_KEY
+    SecretRef: NOTIFICATION_PUSH_SECRET
+    SuccessField: code
+    SuccessValue: "0"
+    MessageIDField: data.msg_id
+  Sms:
+    Enabled: false
+    Name: generic-http-sms
+    Endpoint: ""
+    Method: POST
+    TimeoutMs: 3000
+    MaxRetries: 2
+    RetryDelayMs: 200
+    Headers:
+      Content-Type: application/json
+    BodyTemplate: '{"to":"{{target}}","content":"{{body}}","key":"{{idempotency_key}}"}'
+    SignMode: apikey
+    ApiKeyRef: NOTIFICATION_SMS_API_KEY
+    ApiKeyHeader: X-Api-Key
+    SuccessField: code
+    SuccessValue: "0"
+    MessageIDField: data.msg_id
+  Email:
+    Enabled: false
+    Name: generic-http-email
+    Endpoint: ""
+    Method: POST
+    TimeoutMs: 5000
+    MaxRetries: 2
+    RetryDelayMs: 200
+    Headers:
+      Content-Type: application/json
+    BodyTemplate: '{"to":"{{target}}","subject":"{{title}}","text":"{{body}}","key":"{{idempotency_key}}"}'
+    SignMode: hmac-sha256
+    SecretRef: NOTIFICATION_EMAIL_SECRET
+    SuccessField: code
+    SuccessValue: "0"
+    MessageIDField: data.msg_id
+
+# 投递策略
+Notification:
+  DailyQuotaPerMid: 50        # 单用户单通道每日上限，0 表示不限制
+  DndEnabled: true            # 免打扰校验总开关
+  DefaultTimezone: Asia/Shanghai
+  DefaultLanguage: zh-CN
+  BackoffSeconds:             # 退避阶梯（秒），索引 = 已重试次数，末尾值持续复用
+  - 60
+  - 300
+  - 1800
+  - 3600
+  - 21600
+  MaxDeliveryRetries: 5
+  SyncSend: false             # false=只落任务由调度器投递（推荐）；true=落库后同步投递一次
+  DispatcherEnabled: true     # 本进程是否启动投递调度器
+  DispatchIntervalMs: 1000
+  DispatchBatch: 64
+  MaxRecipients: 200

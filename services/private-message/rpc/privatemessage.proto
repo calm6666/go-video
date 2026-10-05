@@ -1,0 +1,442 @@
+syntax = "proto3";
+
+package privatemessage.v1;
+
+option go_package = "go-video/services/private-message/rpc";
+
+// 说明：private-message 是用户私信（单聊）领域的数据所有者，只提供 gRPC（无 .api），
+// 遵循 AGENTS.md §3/§4：面向终端的 HTTP/WebSocket 入口在 gateway/app，本服务不返回数据库原始对象。
+//
+// 数据边界（AGENTS.md §5）：
+//   - 本服务只写 go_video_private_message 库自身的表；账号资料归 account/user-profile，
+//     关注与黑名单归 social-graph，风控名单与处罚归 risk-control，审核结论归 moderation-orchestrator。
+//     跨服务只传主键（mid / conversation_id / msg_id / task_id），不建跨库外键。
+//   - 私信与站内信（inbox）是两个不同域：会话与消息必须分库分表，禁止与系统消息共表
+//     （services/private-message/README.md 约束）。
+//
+// 隐私与留存（AGENTS.md §6/§9）：
+//   - 私信正文属最高敏感级（隐私级别 P4：私密通信内容）。正文以 AES-GCM 信封加密后落库
+//     （content_cipher + key_version），密钥在 Secret/Vault，轮换只改 key_version 不改历史行。
+//   - 明文只在通过可见性门禁（黑名单/风控/审核状态/撤回状态）后于 RPC 响应中短暂出现，
+//     列表与预览一律使用脱敏摘要，日志与事件严禁打印正文（见 SendMessage 的 preview 语义）。
+//   - 留存天数由服务配置 PrivateMessage.MessageRetentionDays 决定；到期行由 PurgeExpiredMessages
+//     物理清除，但撤回/举报审计记录保留更久（合规证据链优先于正文留存）。
+//
+// 反骚扰：黑名单、互关门槛与陌生人限制在**查询与发送两条路径上统一过滤**，
+// 判定依据来自 social-graph / risk-control 的 RPC，本服务只缓存结果不落对方数据。
+
+// 空响应。
+message EmptyReply {}
+
+// 消息载体类型（与 pm_message.msg_type 一致）。
+enum MsgType {
+  MSG_TYPE_UNSPECIFIED = 0; // 未指定：服务端拒绝
+  MSG_TYPE_TEXT = 1;        // 纯文本
+  MSG_TYPE_IMAGE = 2;       // 图片（只存 asset 主键引用，不存 OSS 地址）
+  MSG_TYPE_AUDIO = 3;       // 语音（同上）
+  MSG_TYPE_VIDEO = 4;       // 短视频（同上）
+  MSG_TYPE_SHARE = 5;       // 稿件/用户/直播间分享卡片（引用放 media_ref，正文放 content）
+}
+
+// 消息状态机（与 pm_message.state 一致，取值不可变更）。
+// 撤回与审核下架都只改状态位（可见性标记），行与审计记录保留。
+enum MsgState {
+  MSG_STATE_UNSPECIFIED = 0; // 未指定：服务端拒绝
+  MSG_STATE_NORMAL = 1;      // 正常：会话双方可见
+  MSG_STATE_PENDING_REVIEW = 2; // 待审核：仅发送者本人可见（机审结论回写前不外露）
+  MSG_STATE_WITHDRAWN = 3;   // 已撤回：双方不再展示正文，保留审计
+  MSG_STATE_REJECTED = 4;    // 审核驳回：命中违规，双方不可见
+  MSG_STATE_DELETED = 5;     // 运营/司法处置删除：保留行与处置记录
+}
+
+// 会话状态（与 pm_conversation.state 一致）。
+enum ConversationState {
+  CONVERSATION_STATE_UNSPECIFIED = 0; // 未指定
+  CONVERSATION_STATE_NORMAL = 1;      // 正常
+  CONVERSATION_STATE_FROZEN = 2;      // 风控冻结：禁止新发送，历史仍可查看
+}
+
+// 撤回来源（与 pm_withdraw_log.source 一致），区分用户自助撤回与平台处置。
+enum WithdrawSource {
+  WITHDRAW_SOURCE_UNSPECIFIED = 0; // 未指定：服务端拒绝
+  WITHDRAW_SOURCE_SENDER = 1;      // 发送者本人限时撤回
+  WITHDRAW_SOURCE_RECEIVER = 2;    // 接收方撤回自己的这条消息（仅对双方隐藏）
+  WITHDRAW_SOURCE_MODERATION = 3;  // 审核结论驱动的系统撤回
+  WITHDRAW_SOURCE_ADMIN = 4;       // 运营/管理员处置撤回
+}
+
+// 审核结论（取值与 moderation.v1.Verdict 一致，只有 moderation-orchestrator 能写入）。
+enum ModerationVerdict {
+  VERDICT_UNSPECIFIED = 0; // 未指定：服务端拒绝
+  VERDICT_PASS = 1;        // 通过：PENDING_REVIEW → NORMAL
+  VERDICT_REVIEW = 2;      // 转人审：保持 PENDING_REVIEW
+  VERDICT_REJECT = 3;      // 拒绝：PENDING_REVIEW/其他 → REJECTED
+}
+
+// 接收范围（反骚扰门槛，与 pm_user_setting.allow_from 一致）。
+enum AllowFrom {
+  ALLOW_FROM_UNSPECIFIED = 0; // 未指定：服务端按 default 处理
+  ALLOW_FROM_ANYONE = 1;      // 所有人
+  ALLOW_FROM_FOLLOWED = 2;    // 仅我关注的人
+  ALLOW_FROM_MUTUAL = 3;      // 仅互相关注
+  ALLOW_FROM_NONE = 4;        // 关闭私信
+}
+
+// 举报处理状态（与 pm_report.state 一致）。
+enum ReportState {
+  REPORT_STATE_UNSPECIFIED = 0; // 未指定
+  REPORT_STATE_PENDING = 1;     // 待处理
+  REPORT_STATE_HANDLED = 2;     // 已处理（含撤回/处罚）
+  REPORT_STATE_DISMISSED = 3;   // 已驳回
+}
+
+// 举报处置动作（HandleReport 使用，需 operator_mid）。
+enum ReportAction {
+  REPORT_ACTION_UNSPECIFIED = 0; // 未指定：服务端拒绝
+  REPORT_ACTION_DISMISS = 1;     // 驳回举报
+  REPORT_ACTION_WITHDRAW = 2;    // 撤回被举报消息（source=ADMIN）
+  REPORT_ACTION_PUNISH = 3;      // 转交 risk-control 处罚（本服务只记录已转交）
+  REPORT_ACTION_ESCALATE = 4;    // 升级送 moderation 人审
+}
+
+// ConversationInfo 是会话在“某个用户视角”下的投影（未读数与隐藏状态是用户侧的）。
+message ConversationInfo {
+  int64 conversation_id = 1;   // 会话 ID
+  int64 peer_mid = 2;          // 对方 mid（本视角）
+  int32 state = 3;             // 会话状态，参见 ConversationState
+  int64 last_msg_id = 4;       // 最后一条消息 ID
+  int64 last_seq = 5;          // 会话内最后序列号
+  int32 last_msg_type = 6;     // 最后消息载体类型
+  string last_preview = 7;     // 最后消息脱敏摘要（不含正文原文；撤回为固定文案）
+  int64 last_msg_time = 8;     // 最后消息时间（Unix 秒，列表游标）
+  int64 read_seq = 9;          // 本方已读游标（本方看到的最大 seq）
+  int64 unread_count = 10;     // 未读数（last_seq - read_seq 的可见面估算，投影可重算）
+  bool hidden = 11;            // 本方是否隐藏该会话（不影响对方）
+  int64 ctime = 12;            // 会话创建时间（Unix 秒）
+}
+
+// MessageInfo 是单条私信。content 是解密后的明文，只在通过可见性门禁后返回。
+message MessageInfo {
+  int64 msg_id = 1;            // 消息 ID
+  int64 conversation_id = 2;   // 会话 ID
+  int64 seq = 3;               // 会话内单调递增序列号（分页游标）
+  int64 sender_mid = 4;        // 发送者 mid
+  int32 msg_type = 5;          // 载体类型，参见 MsgType
+  string content = 6;          // 明文正文（撤回/驳回时返回固定占位文案）
+  string media_ref = 7;        // 媒体引用（asset 主键字符串，不含对象存储地址）
+  int32 state = 8;             // 消息状态，参见 MsgState
+  int64 audit_task_id = 9;     // 机审任务 ID（0 表示未送审）
+  string client_msg_id = 10;   // 客户端消息 ID（幂等回放时回显）
+  int64 ctime = 11;            // 发送时间（Unix 秒）
+  int64 withdraw_time = 12;    // 撤回时间（0 表示未撤回）
+}
+
+// --- 会话 ---
+
+// GetOrCreateConversationReq 按 (mid, peer_mid) 规范化排序定位或创建单聊会话。
+// 幂等：pair_key = min:max 的唯一索引，重复调用返回同一 conversation_id。
+message GetOrCreateConversationReq {
+  int64 mid = 1;       // 发起人（必须是会话双方之一）
+  int64 peer_mid = 2;  // 对方
+  string trace_id = 3; // 链路追踪 ID
+}
+
+message GetOrCreateConversationReply {
+  int64 conversation_id = 1; // 会话 ID
+  bool created = 2;          // true 表示本次新建
+  int32 state = 3;           // 会话状态
+  int64 ctime = 4;           // 创建时间
+}
+
+// ListConversationsReq 会话列表。按 docs/api-and-events.md §2 采用 cursor：
+// 游标为 (last_msg_time, conversation_id) 的倒序位点，禁止 offset 深翻页。
+// 黑名单/风控/已隐藏会话在查询层统一过滤。
+message ListConversationsReq {
+  int64 mid = 1;           // 归属用户
+  string cursor = 2;       // 上一页 next_cursor，空表示第一页
+  int32 ps = 3;            // 每页大小，0 表示服务端默认值
+  bool only_unread = 4;    // 只看有未读的会话
+  bool include_hidden = 5; // 是否包含本方隐藏的会话（默认不含）
+  string trace_id = 6;     // 链路追踪 ID
+}
+
+message ListConversationsReply {
+  repeated ConversationInfo list = 1; // 按 last_msg_time 倒序
+  string next_cursor = 2;             // 空表示到底
+  bool has_more = 3;
+  int64 unread_total = 4;             // 该用户未读会话数（过滤后的口径）
+}
+
+// HideConversationReq 用户侧隐藏会话（只影响本人列表，不删除对方数据）。
+message HideConversationReq {
+  int64 mid = 1;             // 操作者
+  int64 conversation_id = 2; // 会话 ID
+  bool hide = 3;             // true 隐藏、false 恢复
+  string trace_id = 4;       // 链路追踪 ID
+}
+
+// --- 发送与分页 ---
+
+// SendMessageReq 发送私信。
+// 幂等：client_msg_id 必填且按 (sender_mid, client_msg_id) 唯一，重试返回首次结果。
+// 门禁顺序：参数校验 → social-graph 黑名单/接收范围 → risk-control CheckAction →
+// 内容长度与敏感预检 → 落库（PENDING_REVIEW 或 NORMAL）→ 提交机审 → 更新会话游标。
+message SendMessageReq {
+  int64 mid = 1;              // 发送者（gateway 注入，本服务不解析 token）
+  int64 conversation_id = 2;  // 目标会话；为 0 时按 peer_mid 建会话
+  int64 peer_mid = 3;         // conversation_id 为 0 时必填
+  MsgType msg_type = 4;       // 载体类型
+  string content = 5;         // 正文（按 MaxContentRunes 限制，日志禁止打印）
+  string media_ref = 6;       // 媒体引用（asset 主键；IMAGE/AUDIO/VIDEO/SHARE 必填）
+  string client_msg_id = 7;   // 客户端消息 ID（幂等键，必填）
+  string trace_id = 8;        // 链路追踪 ID
+}
+
+message SendMessageReply {
+  int64 msg_id = 1;          // 消息 ID（幂等回放返回原值）
+  int64 conversation_id = 2; // 会话 ID
+  int64 seq = 3;             // 会话内序列号
+  int32 state = 4;           // 落库状态
+  int64 ctime = 5;           // 发送时间
+  bool replayed = 6;         // true 表示命中 client_msg_id，未产生新消息
+  int64 audit_task_id = 7;   // 机审任务 ID（0 表示未送审）
+  string preview = 8;        // 脱敏摘要（写进会话列表用，非原文）
+}
+
+// ListMessagesReq 消息分页：按 conversation_id + seq 游标倒序拉取，
+// 走 uniq_conv_seq 索引，禁止 offset 全表扫。撤回/驳回的消息按占位文案返回。
+message ListMessagesReq {
+  int64 conversation_id = 1; // 会话 ID
+  int64 mid = 2;             // 查看者（用于黑名单/风控/权限过滤与明文解密授权）
+  int64 cursor_seq = 3;      // 上一页 next_cursor_seq，0 表示从最新开始
+  int32 ps = 4;              // 每页大小，0 表示服务端默认值
+  string trace_id = 5;       // 链路追踪 ID
+}
+
+message ListMessagesReply {
+  repeated MessageInfo list = 1; // 按 seq 倒序
+  int64 next_cursor_seq = 2;     // 0 表示到底
+  bool has_more = 3;
+  int64 read_seq = 4;            // 查看者当前已读游标
+}
+
+// MarkReadReq 前移已读游标。
+// 语义取舍：已读是“每会话每成员一行游标”，不是逐条已读状态表。
+// 容量：逐条回执的行数级是 会话成员数 × 消息数（百万级消息即亿级行），
+// 游标方案固定 2 行/会话，未读数由 last_seq - read_seq 估算 + 可重算，代价是
+// 无法回答“某人读过哪一条”，产品只需“读到哪”，因此选游标（README 有说明）。
+// 幂等：只允许游标前进，回退请求返回当前值且 changed=false。
+message MarkReadReq {
+  int64 conversation_id = 1; // 会话 ID
+  int64 mid = 2;             // 读者
+  int64 read_seq = 3;        // 前进到的序列号
+  string trace_id = 4;       // 链路追踪 ID
+}
+
+message MarkReadReply {
+  int64 read_seq = 1;      // 生效后的游标
+  bool changed = 2;        // false 表示重复或回退请求
+  int64 unread_count = 3;  // 该会话剩余未读数
+}
+
+// GetUnreadSummaryReq 未读汇总（角标用）。计数是投影，可由成员游标重算。
+message GetUnreadSummaryReq {
+  int64 mid = 1;      // 用户
+  bool force = 2;     // true 时忽略缓存回源重算
+  string trace_id = 3; // 链路追踪 ID
+}
+
+message GetUnreadSummaryReply {
+  int64 unread_total = 1;      // 未读消息总数
+  int64 unread_conversations = 2; // 有未读的会话数
+  int64 computed_at = 3;       // 计算时间（Unix 秒）
+}
+
+// --- 撤回 ---
+
+// WithdrawMessageReq 撤回消息。只改 pm_message.state 与可见性标记，
+// 并写 pm_withdraw_log 保留审计证据（谁、何时、以什么理由、哪个来源）。
+// 授权：sender 本人在窗口内限时撤回；RECEIVER 只能撤自己收到的那条；
+// MODERATION/ADMIN 必须带 operator/task_id 且写审计。
+message WithdrawMessageReq {
+  int64 msg_id = 1;             // 消息 ID
+  int64 operator_mid = 2;       // 操作者 mid（本人撤回时为发送者；admin 时为管理员）
+  WithdrawSource source = 3;    // 撤回来源
+  string reason = 4;            // 原因（审计用，不返回给客户端）
+  int64 audit_task_id = 5;      // source=MODERATION 时对应的审核任务 ID
+  string trace_id = 6;          // 链路追踪 ID
+}
+
+message WithdrawMessageReply {
+  int64 msg_id = 1;        // 消息 ID
+  int32 state = 2;         // 撤回后状态
+  bool withdrawn = 3;      // false 表示已撤回过或不允许撤回
+  int64 withdraw_time = 4; // 生效时间
+}
+
+// --- 用户偏好（反骚扰） ---
+
+// UserSettingInfo 用户侧私信偏好。判定结果缓存由本服务负责，源头在 social-graph/risk-control。
+message UserSettingInfo {
+  int64 mid = 1;                // 用户
+  AllowFrom allow_from = 2;     // 接收范围门槛
+  bool reject_stranger = 3;     // 拒绝陌生人（未互关）消息
+  bool keyword_filter = 4;      // 是否启用敏感词/引流词前置过滤
+  bool mute_conversation = 5;   // 会话免打扰（仅影响推送，不影响入库）
+  int64 mtime = 6;              // 最近更新时间
+}
+
+message UpdateUserSettingReq {
+  int64 mid = 1;                // 用户
+  AllowFrom allow_from = 2;     // 传 UNSPECIFIED 表示不修改
+  optional bool reject_stranger = 3;
+  optional bool keyword_filter = 4;
+  optional bool mute_conversation = 5;
+  string trace_id = 6;          // 链路追踪 ID
+}
+
+message GetUserSettingReq {
+  int64 mid = 1;      // 用户
+  string trace_id = 2; // 链路追踪 ID
+}
+
+// --- 举报与审核联动 ---
+
+// ReportMessageReq 举报私信：只写本域举报事实并向 moderation 送审，
+// 不直连 moderation 库（AGENTS.md §5）。
+message ReportMessageReq {
+  int64 msg_id = 1;        // 被举报消息
+  int64 reporter_mid = 2;  // 举报者（必须是会话成员）
+  int32 reason = 3;        // 举报原因码（稳定枚举，由 gateway/客户端约定）
+  string description = 4;  // 补充说明（不写正文）
+  string trace_id = 5;     // 链路追踪 ID
+}
+
+message ReportMessageReply {
+  int64 report_id = 1;      // 举报记录 ID
+  bool duplicated = 2;      // true 表示同一举报人对同一消息已举报过
+  int64 audit_task_id = 3;  // 送审任务 ID（0 表示未送审）
+}
+
+// ReportInfo 举报记录（运营/审核侧投影，不返回消息正文）。
+message ReportInfo {
+  int64 report_id = 1;       // 举报 ID
+  int64 conversation_id = 2; // 会话 ID
+  int64 msg_id = 3;          // 消息 ID
+  int64 reporter_mid = 4;    // 举报者
+  int64 target_mid = 5;      // 被举报人
+  int32 reason = 6;          // 原因码
+  string description = 7;    // 补充说明
+  int32 state = 8;           // 处理状态，参见 ReportState
+  int64 audit_task_id = 9;   // 审核任务 ID
+  int64 handler = 10;        // 处理人（0 表示未处理）
+  string handle_note = 11;   // 处理结论备注
+  int64 ctime = 12;          // 举报时间
+  int64 mtime = 13;          // 最近更新时间
+}
+
+message ListReportsReq {
+  ReportState state = 1;      // 状态过滤，UNSPECIFIED 表示全部
+  int64 target_mid = 2;       // 按被举报人过滤（0 不限）
+  string cursor = 3;          // 游标（report_id 倒序位点）
+  int32 ps = 4;               // 每页大小
+  int64 operator_mid = 5;     // 运营/管理员，必须 > 0
+  string trace_id = 6;        // 链路追踪 ID
+}
+
+message ListReportsReply {
+  repeated ReportInfo list = 1;
+  string next_cursor = 2;
+  bool has_more = 3;
+}
+
+message HandleReportReq {
+  int64 report_id = 1;      // 举报 ID
+  ReportAction action = 2;  // 处置动作
+  int64 handler = 3;        // 处理人（运营/管理员），必须 > 0
+  string note = 4;          // 处置备注（审计）
+  bool withdraw_message = 5; // 是否同时撤回被举报消息
+  string idempotency_key = 6; // 幂等键（重复处置返回首次结果）
+  string trace_id = 7;
+}
+
+message HandleReportReply {
+  int64 report_id = 1;
+  int32 state = 2;           // 处理后状态
+  bool replayed = 3;         // true 表示命中幂等键
+  int64 withdraw_msg_id = 4; // 连带撤回的消息（0 表示未撤回）
+}
+
+// ApplyModerationVerdictReq 是审核结论的唯一写入口（moderation-orchestrator 或
+// moderation.result.v1 消费者调用）。业务方不得自行把消息标记为“已审核通过”。
+// 按 event_id 去重，重复投递返回 applied=false。
+message ApplyModerationVerdictReq {
+  int64 msg_id = 1;              // 私信消息 ID
+  int64 task_id = 2;             // moderation 任务 ID
+  ModerationVerdict verdict = 3; // 结论
+  string reason = 4;             // 结论原因（命中词/模型分等，脱敏）
+  int64 operator = 5;            // 处理人（0 表示机审）
+  string event_id = 6;           // moderation.result.v1 的 event_id，用于去重
+  string trace_id = 7;
+}
+
+message ApplyModerationVerdictReply {
+  int64 msg_id = 1;
+  int32 state = 2;      // 迁移后的状态
+  bool applied = 3;     // false 表示重复投递或非法迁移
+  string message = 4;   // 说明（重复投递/终态/非法迁移）
+}
+
+// --- 留存治理 ---
+
+// PurgeExpiredMessagesReq 按留存策略物理清除到期正文（保留撤回/举报审计）。
+// 由 cron 或服务自检调用；批处理上限与干跑模式避免长事务与主从延迟放大。
+message PurgeExpiredMessagesReq {
+  int64 before_time = 1;   // 清理 ctime 早于该时间的消息，0 表示按配置窗口推算
+  int32 batch_limit = 2;   // 单次清理上限，0 表示服务端默认值
+  bool dry_run = 3;        // true 只统计不删除
+  int64 operator = 4;      // 触发者（cron 传 0）
+  string trace_id = 5;
+}
+
+message PurgeExpiredMessagesReply {
+  int64 expired_before = 1; // 本次生效的留存截止点
+  int64 scanned = 2;        // 扫描到的到期消息数
+  int64 purged = 3;         // 实际清除数（dry_run 时为 0）
+  int64 remaining = 4;      // 估算剩余到期数
+}
+
+// PrivateMessage 私信服务。
+// 方法名表达领域动作，不暴露数据库 CRUD（docs/api-and-events.md §1.1）。
+service PrivateMessage {
+  // 定位或创建单聊会话（pair_key 唯一索引保证幂等）。
+  rpc GetOrCreateConversation(GetOrCreateConversationReq) returns (GetOrCreateConversationReply);
+  // 发送私信（client_msg_id 幂等 + 门禁顺序见 SendMessageReq 注释）。
+  rpc SendMessage(SendMessageReq) returns (SendMessageReply);
+  // 会话列表（cursor 分页，黑名单/风控/隐藏会话在查询层过滤）。
+  rpc ListConversations(ListConversationsReq) returns (ListConversationsReply);
+  // 会话内消息分页（conversation_id + seq 游标，禁止 offset 全表扫）。
+  rpc ListMessages(ListMessagesReq) returns (ListMessagesReply);
+  // 前移已读游标（幂等，只前进不回退）。
+  rpc MarkRead(MarkReadReq) returns (MarkReadReply);
+  // 未读汇总（投影，可重算）。
+  rpc GetUnreadSummary(GetUnreadSummaryReq) returns (GetUnreadSummaryReply);
+  // 撤回消息（只改可见性标记 + 写审计）。
+  rpc WithdrawMessage(WithdrawMessageReq) returns (WithdrawMessageReply);
+  // 本方隐藏/恢复会话。
+  rpc HideConversation(HideConversationReq) returns (EmptyReply);
+  // 更新反骚扰偏好。
+  rpc UpdateUserSetting(UpdateUserSettingReq) returns (UserSettingInfo);
+  // 查询反骚扰偏好。
+  rpc GetUserSetting(GetUserSettingReq) returns (UserSettingInfo);
+  // 举报私信（写本域举报事实并向 moderation 送审）。
+  rpc ReportMessage(ReportMessageReq) returns (ReportMessageReply);
+  // 运营侧举报分页。
+  rpc ListReports(ListReportsReq) returns (ListReportsReply);
+  // 运营侧举报处置（幂等键防重复处置）。
+  rpc HandleReport(HandleReportReq) returns (HandleReportReply);
+  // 审核结论回写（唯一写结论入口，按 event_id 去重）。
+  rpc ApplyModerationVerdict(ApplyModerationVerdictReq) returns (ApplyModerationVerdictReply);
+  // 留存到期清理（正文物理删除，审计保留）。
+  rpc PurgeExpiredMessages(PurgeExpiredMessagesReq) returns (PurgeExpiredMessagesReply);
+}

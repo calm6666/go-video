@@ -44,6 +44,11 @@
 | `audit` | 管理操作和安全审计 | operation | append-only storage |
 | `open-platform` | 应用、密钥、OAuth 授权、配额 | 第四阶段 | account、gateway |
 | `cron` | 任务定义、执行记录和租约 | 独立任务进程 | MQ、各领域 RPC |
+| `membership` | 会员套餐、会员身份、权益授予与判定 | 第五阶段（商业化） | MySQL、Redis；被 trade-order 同步调用 |
+| `trade-order` | 商业订单状态机、履约指令、退款申请与审批 | 第五阶段（商业化） | membership、payment、coin（同步 RPC） |
+| `payment` | 钱包余额、充值单、支付单、退款单、资金流水（沙箱台账） | 第五阶段（商业化） | MySQL；不调用真实支付渠道 |
+| `coin` | 硬币余额、投币记录、每日上限与流水 | 第五阶段（商业化） | MySQL、Redis |
+| `creator-revenue` | 分成规则、参与关系、计量与应结台账 | 第五阶段（商业化） | spm/coin 上报的计量事实；不出金 |
 
 ## 2. 部署合并原则
 
@@ -63,6 +68,14 @@ cron          = 定时任务和补偿任务
 
 `playback`、`transcode`、`live-gateway`、`danmaku`、`engagement`、`search-query`、`event-collector` 和 `spm` 根据吞吐、资源或故障隔离需要优先独立。合并服务仍要保持包级领域边界和独立数据访问接口，后续拆分不能依赖跨包私有变量。
 
+商业化面（2026-09-22 纳入范围）建议合并为一个 `commerce` 进程组，但数据所有权仍按服务分开：
+
+```text
+commerce = membership + trade-order + payment + coin + creator-revenue
+```
+
+合并部署的前提是每个域仍只写自己的 schema（`go_video_membership` / `go_video_trade_order` / `go_video_payment` / `go_video_coin` / `go_video_creator_revenue`）。广告投放、广告位分析和广告推荐不在范围内，商业化服务不得出现广告相关接口或字段（AGENTS.md §1、§7）。
+
 ## 3. 依赖方向
 
 ```text
@@ -73,6 +86,11 @@ media → upload/asset/transcode/content-fingerprint
 community → identity/content/moderation/notify
 search/recommend/spm ← 领域事件（尽量不反向阻塞主链路）
 cron → 领域 API/RPC（不直接写别人的数据库）
+commerce: trade-order → membership/payment/coin（下单、扣款、履约、退款审批的编排方）
+commerce: membership、payment、coin、creator-revenue 互不直连，只被编排方同步调用
+creator-revenue ← spm/coin 的计量与投币事实（服务身份上报，不反向读取原始行为表）
 ```
+
+`commerce` 内部是**单向编排**：只有 `trade-order` 能驱动会员开通、资金变动与硬币发放，`payment` 与 `membership` 之间不互调（订单先落支付单，再由订单调用授予）。权益读取（`CheckEntitlement`）由 `gateway/app` 和服务侧直接调 `membership`，网关不代为判定。
 
 推荐、搜索、SPM、通知和统计默认最终一致；内容发布、权限、审核结论和播放授权由领域服务同步确认。

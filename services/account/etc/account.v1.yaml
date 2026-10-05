@@ -6,7 +6,7 @@ Etcd:
   Key: account.v1.rpc
 Mode: dev
 
-Redis:
+CacheRedis:
   Host: 127.0.0.1:6379
   Type: node
 
@@ -21,15 +21,18 @@ PassportRSA:
 TokenTTLDays: 30
 RefreshTTLDays: 90
 
-# 下游 RPC client。
+# 下游 RPC client。留空时对应 client 为 nil，repository 降级返回默认值，不阻塞主流程。
 # user-profile 已接入：account 的资料/经验/节操/实名聚合走真实 RPC。
 UserProfileRPC:
   Etcd:
     Hosts:
     - 127.0.0.1:2379
     Key: user-profile.v1.rpc
-# SocialGraphRPC:
-#   Etcd:
-#     Hosts:
-#     - 127.0.0.1:2379
-#     Key: social-graph.v1.rpc
+# social-graph 已接入适配器（internal/repository/socialgraph_client.go）：
+# 单条/批量关注判定、关注列表、黑名单与关注/粉丝计数走真实 RPC。
+# 注意：本服务从未在任何环境启动过，这段配置的运行时行为（etcd 不可达时的启动表现）未经验证。
+SocialGraphRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: socialgraph.v1.rpc

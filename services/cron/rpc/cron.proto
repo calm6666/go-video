@@ -1,0 +1,596 @@
+syntax = "proto3";
+
+package cron.v1;
+
+option go_package = "go-video/services/cron/rpc";
+
+// 说明：cron 是全仓定时/补偿任务的**调度与审计**所有者，只提供 gRPC（无 .api），
+// 遵循 AGENTS.md §3（定时任务放在 services/cron）与 §4（领域服务不返回数据库原始对象）。
+//
+// 数据边界（AGENTS.md §5）：
+//   - 本服务只写 go_video_cron 库自己的 5 张表（任务定义、执行记录、租约、游标、审计）；
+//     任何业务数据变更都必须通过下游领域 RPC 完成，绝不直连其他服务的库/表/Redis key。
+//   - 本服务不订阅 MQ：任务由 MySQL 到期扫描驱动（见 README「为什么 cron 不接 MQ」）。
+//     上游若需要「事件驱动的补偿」，应由事件消费者所属服务落任务，cron 只负责按点触发。
+//
+// 幂等与重放语义（AGENTS.md §5、docs/api-and-events.md §3）：
+//   - 一次「计划触发」由 (task_key, planned_at) 唯一标识，claim 依赖
+//     cron_task_run 的 UNIQUE(task_key, planned_at, attempt)：同计划时刻并发只有一个赢家；
+//   - 重试是同一 (task_key, planned_at) 下的新 attempt 行，不是新的计划时刻；
+//   - 任务处理器必须以 (task_key, planned_at) 为幂等上下文，增量型任务（归档、报表、
+//     索引重建、死信重放）以 cron_task_checkpoint 的 CAS 游标记录已处理水位，
+//     因此「重放同一计划时刻」只会重新推进游标，不会产生第二次副作用。
+
+// 空响应。
+message EmptyReply {}
+
+// 任务定义状态。
+enum TaskState {
+  TASK_STATE_UNSPECIFIED = 0; // 未指定：查询语境表示「全部状态」
+  TASK_STATE_ENABLED = 1;     // 启用：到期即产生计划触发
+  TASK_STATE_PAUSED = 2;      // 暂停：不产生新的计划触发，已 RUNNING 的执行继续跑完
+  TASK_STATE_DISABLED = 3;    // 停用：终态，保留历史执行记录，只能重新 Register 恢复
+}
+
+// 调度方式。
+enum ScheduleType {
+  SCHEDULE_TYPE_UNSPECIFIED = 0;
+  SCHEDULE_TYPE_CRON = 1;     // 标准 cron 表达式（UTC+配置时区），使用 cron_expr
+  SCHEDULE_TYPE_INTERVAL = 2; // 固定间隔，使用 interval_seconds
+  SCHEDULE_TYPE_MANUAL = 3;   // 仅手动 Trigger/RetryRun，不自动到期
+}
+
+// 错过的计划点处理策略（进程宕机或多副本同时看到过期计划点时）。
+enum MisfirePolicy {
+  MISFIRE_POLICY_UNSPECIFIED = 0;
+  MISFIRE_POLICY_FIRE_ONCE_NOW = 1; // 合并所有过期点，只立即补跑一次
+  MISFIRE_POLICY_SKIP_TO_NEXT = 2;  // 丢弃过期点，从下一个计划点继续
+  MISFIRE_POLICY_FIRE_ALL = 3;      // 逐个补齐过期点（最多 BackfillLimit 个）
+}
+
+// 执行记录状态（cron_task_run.state）。
+enum RunState {
+  RUN_STATE_UNSPECIFIED = 0;
+  RUN_STATE_PENDING = 1;    // 已 claim，等待 worker 领取
+  RUN_STATE_RUNNING = 2;    // worker 持有租约执行中
+  RUN_STATE_RETRYING = 3;   // 本次失败，等待退避窗口后重试（同计划时刻的新 attempt）
+  RUN_STATE_SUCCEEDED = 4;  // 终态：成功
+  RUN_STATE_FAILED = 5;     // 终态：达到 MaxAttempts 后失败，需人工 RetryRun
+  RUN_STATE_TIMEOUT = 6;    // 终态：超过 TimeoutSeconds 被判定超时
+  RUN_STATE_CANCELED = 7;   // 终态：人工/暂停取消
+  RUN_STATE_SKIPPED = 8;    // 终态：并发上限/misfire 策略下主动跳过（无副作用）
+}
+
+// 触发来源。
+enum TriggerType {
+  TRIGGER_TYPE_UNSPECIFIED = 0;
+  TRIGGER_TYPE_SCHEDULED = 1; // 到期自动触发
+  TRIGGER_TYPE_MANUAL = 2;    // 运营/管理后台手动触发
+  TRIGGER_TYPE_RETRY = 3;     // 退避重试产生的新 attempt
+  TRIGGER_TYPE_REPLAY = 4;    // 人工重放已完成的历史执行
+}
+
+// 租约结果。
+enum LeaseOutcome {
+  LEASE_OUTCOME_UNSPECIFIED = 0;
+  LEASE_OUTCOME_ACQUIRED = 1;      // 本次 claim 成功，返回 run_id + fence_token
+  LEASE_OUTCOME_ALREADY_OWNED = 2; // 同一计划时刻已被其它实例持有且租约未过期
+  LEASE_OUTCOME_ALREADY_CLAIMED = 3; // 本实例已持有该计划时刻，可继续心跳（幂等重入）
+  LEASE_OUTCOME_NOT_RUNNABLE = 4;  // 任务不存在/已暂停/已停用，不产生执行记录
+  LEASE_OUTCOME_CONCURRENCY_LIMIT = 5; // 达到 ConcurrencyLimit，按 SKIPPED 记录
+}
+
+// 执行结果上报状态（ReportTaskResult 的目标状态，只允许 RUNNING 推进到这些值）。
+enum ReportState {
+  REPORT_STATE_UNSPECIFIED = 0;
+  REPORT_STATE_SUCCEEDED = 1; // 成功
+  REPORT_STATE_FAILED = 2;    // 失败：服务端按重试策略决定 RETRYING 或 FAILED
+  REPORT_STATE_TIMEOUT = 3;   // 超时
+  REPORT_STATE_CANCELED = 4;  // 取消
+  REPORT_STATE_SKIPPED = 5;   // 主动跳过（无副作用）
+}
+
+// TaskDefinition 任务定义（cron_task_definition 的对外投影）。
+message TaskDefinition {
+  int64 task_id = 1;             // 自增主键
+  string task_key = 2;           // 任务唯一键，如 rights.expire_scan（跨环境稳定，注册表按此索引）
+  string name = 3;               // 展示名
+  string handler = 4;            // 处理器名：进程内注册表的键（见 README「任务注册表」）
+  string task_group = 5;         // 分组（rights/index/report/cleanup/replay），用于批量暂停与健康统计
+  ScheduleType schedule_type = 6;
+  string cron_expr = 7;          // SCHEDULE_TYPE_CRON 时使用
+  int32 interval_seconds = 8;    // SCHEDULE_TYPE_INTERVAL 时使用
+  string timezone = 9;           // cron 表达式时区，默认 Asia/Shanghai
+  int32 timeout_seconds = 10;    // 单次执行超时；到期由 worker 判定 TIMEOUT
+  int32 max_attempts = 11;       // 含首次的最大尝试次数（1 表示不重试）
+  int32 retry_base_seconds = 12; // 退避基数：base * 2^(attempt-1)
+  int32 retry_max_seconds = 13;  // 退避上限
+  int32 concurrency_limit = 14;  // 同一任务允许并行的执行数，1 表示串行
+  int32 lease_ttl_seconds = 15;  // 租约 TTL：到期后可被其它实例抢占
+  MisfirePolicy misfire_policy = 16;
+  int32 misfire_backfill_limit = 17; // MISFIRE_POLICY_FIRE_ALL 时单轮最多补齐的计划点数
+  string params = 18;                // 处理器参数 JSON 文本（不含密钥，密钥走 Secret 引用）
+  string secret_refs = 19;           // 逗号分隔的环境变量名，处理器自行取值，库里不存密钥值
+  TaskState state = 20;
+  int64 next_fire_at = 21;     // 下一个计划时刻（Unix 秒，0 表示不参与到期扫描）
+  int64 last_fire_at = 22;     // 最近一次产生执行记录的计划时刻
+  int64 last_success_at = 23;  // 最近一次成功完成时间
+  string last_error = 24;      // 最近一次失败摘要（截断，不含堆栈）
+  int64 version = 25;          // 乐观锁版本，UpdateTask/DisableTask 必须回传
+  string owner = 26;           // 责任团队/服务
+  string operator = 27;        // 最近一次变更操作人
+  int64 ctime = 28;
+  int64 mtime = 29;
+}
+
+// RunRecord 执行记录（cron_task_run 的对外投影）。
+message RunRecord {
+  int64 run_id = 1;            // 执行记录 ID
+  string task_key = 2;         // 任务键
+  int64 planned_at = 3;        // 计划时刻（Unix 秒）：与 task_key 共同构成幂等身份
+  int32 attempt = 4;           // 第几次尝试，从 1 开始
+  TriggerType trigger_type = 5;
+  RunState state = 6;
+  string lease_owner = 7;      // 持有租约的实例标识（hostname+pid+随机后缀）
+  int64 lease_expire_at = 8;   // 租约到期时间，过期即可被抢占
+  int64 fence_token = 9;       // 单调递增栅栏令牌，上报时必须回传，防止被抢占后的僵尸写
+  int64 started_at = 10;
+  int64 finished_at = 11;
+  int64 duration_ms = 12;
+  string result_summary = 13;  // 处理器回填的结果摘要（如 scanned=1200,updated=34）
+  string last_error = 14;
+  int64 next_retry_at = 15;    // RETRYING 状态的下次可执行时间
+  string trace_id = 16;
+  int64 ctime = 17;
+  int64 mtime = 18;
+}
+
+// LeaseInfo 任务级互斥租约（cron_task_lease 的对外投影）。
+message LeaseInfo {
+  string lease_key = 1;        // 默认等于 task_key；带 scope 时为 task_key + "/" + scope
+  string owner = 2;            // 当前持有实例，空表示无人持有
+  int64 fence_token = 3;       // 每次抢占 +1，处理器必须把它带给下游写操作
+  int64 expire_at = 4;         // 租约到期时间（Unix 秒），过期即可被抢占
+  int64 acquired_at = 5;
+  int32 takeover_count = 6;    // 因过期被抢占的次数，用于发现实例不稳定
+}
+
+// Checkpoint 增量任务游标（cron_task_checkpoint 的对外投影）。
+message Checkpoint {
+  string task_key = 1;
+  string scope_key = 2;        // 同一任务内的分片/维度游标，如 region=cn、shard=7
+  int64 value = 3;             // 数值游标（通常是已处理到的主键或时间水位）
+  string value_str = 4;        // 字符串游标（如索引别名、分区名）
+  int64 version = 5;           // CAS 版本，SaveCheckpoint 必须回传 expected_version
+  string operator = 6;
+  int64 ctime = 7;
+  int64 mtime = 8;
+}
+
+// TaskAudit 任务变更审计（cron_task_audit 的对外投影）。
+message TaskAudit {
+  int64 id = 1;
+  string task_key = 2;
+  string action = 3;           // register/update/pause/resume/disable/trigger/retry/replay
+  string from_state = 4;
+  string to_state = 5;
+  string operator = 6;
+  string detail = 7;           // 变更摘要 JSON 文本，不含密钥
+  string trace_id = 8;
+  int64 ctime = 9;
+}
+
+// --- 任务定义注册与查询 ---
+
+// RegisterTaskReq 注册（首次创建）任务定义。
+// 幂等：以 task_key 为唯一键，同 key 重复注册返回已存在错误，避免误覆盖线上调度；
+// 修改已存在的定义必须走 UpdateTask 并携带 expected_version。
+message RegisterTaskReq {
+  TaskDefinition definition = 1; // 至少提供 task_key/name/handler/schedule 与超时/重试策略
+  string idempotency_key = 2;    // 必填：调用方保证同一次注册动作唯一
+  string operator = 3;
+  string trace_id = 4;
+}
+
+message RegisterTaskReply {
+  TaskDefinition definition = 1;
+  bool created = 2;              // false 表示 task_key 已存在且 definition 与线上一致（幂等重入）
+  string dedupe_reason = 3;      // created=false 时说明命中了哪条幂等约束
+}
+
+// UpdateTaskReq 修改任务定义（含调度、超时、重试策略与参数）。
+message UpdateTaskReq {
+  string task_key = 1;
+  TaskDefinition definition = 2; // 只允许改 name/handler/task_group/schedule/timeout/retry/
+                                 // concurrency/lease_ttl/misfire/params/secret_refs/owner；
+                                 // task_key/state/version 以服务端为准，忽略请求值
+  int64 expected_version = 3;    // 乐观锁：与服务端当前 version 不一致时返回冲突错误
+  string operator = 4;
+  string trace_id = 5;
+}
+
+message UpdateTaskReply {
+  TaskDefinition definition = 1;
+}
+
+message GetTaskReq {
+  string task_key = 1;
+}
+
+message GetTaskReply {
+  TaskDefinition definition = 1;
+}
+
+// ListTasksReq 任务定义分页（配置类小表，游标按 task_key 升序）。
+message ListTasksReq {
+  TaskState state = 1;      // 未指定表示全部
+  string task_group = 2;    // 空表示全部
+  string handler = 3;       // 空表示全部
+  string cursor = 4;        // 上一页 next_cursor，空表示第一页
+  int32 page_size = 5;      // 0 表示服务端默认值，超过上限返回 ErrPsTooLarge
+}
+
+message ListTasksReply {
+  repeated TaskDefinition list = 1;
+  string next_cursor = 2;   // 空表示没有更多
+  bool has_more = 3;
+  int64 total = 4;
+}
+
+// PauseTaskReq 暂停任务：不产生新的计划触发，正在跑的执行不中断。
+// 幂等：重复暂停同一任务返回 changed=false，不重复写审计。
+message PauseTaskReq {
+  string task_key = 1;
+  string reason = 2;        // 必填：审计要求可追溯
+  int64 expected_version = 3;
+  string idempotency_key = 4;
+  string operator = 5;
+  string trace_id = 6;
+}
+
+// ResumeTaskReq 恢复暂停的任务。
+// 恢复时如何处理暂停期间错过的计划点，由任务的 MisfirePolicy 决定。
+message ResumeTaskReq {
+  string task_key = 1;
+  int64 expected_version = 2;
+  string idempotency_key = 3;
+  string operator = 4;
+  string trace_id = 5;
+}
+
+// DisableTaskReq 停用任务（终态）。历史执行记录与游标保留，供审计与回溯。
+message DisableTaskReq {
+  string task_key = 1;
+  string reason = 2;
+  int64 expected_version = 3;
+  string idempotency_key = 4;
+  string operator = 5;
+  string trace_id = 6;
+}
+
+message TaskOperationReply {
+  TaskDefinition definition = 1;
+  bool changed = 2;         // false 表示目标状态已达成（幂等重入）
+  int64 audit_id = 3;       // 本次写入的 cron_task_audit 行
+}
+
+// TriggerTaskReq 立即触发一次执行（planned_at = 服务端当前时间截断到秒）。
+// 同秒内重复触发由 (task_key, planned_at, attempt) 唯一键挡住，返回已存在的 run。
+message TriggerTaskReq {
+  string task_key = 1;
+  string params = 2;            // 覆盖本次执行的参数 JSON 文本，空表示用定义中的 params
+  int64 planned_at = 3;         // 0 表示服务端当前时间；显式传入即“补跑某个计划时刻”
+  string idempotency_key = 4;   // 必填
+  string operator = 5;
+  string trace_id = 6;
+}
+
+message TriggerTaskReply {
+  RunRecord run = 1;
+  bool created = 2;
+}
+
+// --- 到期扫描与租约 ---
+
+// ListDueTasksReq 供本服务 worker（或独立调度进程）拉取到期任务。
+// 只读语义：不产生执行记录，也不占用租约，claim 由 AcquireLease 完成。
+message ListDueTasksReq {
+  int64 now = 1;            // 0 表示服务端当前时间
+  int32 limit = 2;          // 单轮最多返回多少个到期任务，0 表示服务端默认值
+  string task_group = 3;    // 空表示全部分组
+  int32 lookahead_seconds = 4; // 允许预取的提前量，0 表示只返回已到期项
+}
+
+// DueTask 一个可执行的计划点。
+message DueTask {
+  string task_key = 1;
+  int64 planned_at = 2;       // 计划时刻，claim 时的幂等身份
+  string handler = 3;
+  string params = 4;
+  int32 timeout_seconds = 5;
+  int32 max_attempts = 6;
+  int32 lease_ttl_seconds = 7;
+  int32 concurrency_limit = 8;
+  int64 running_count = 9;    // 当前 RUNNING 的执行数，供调度端提前退避
+  string task_group = 10;
+}
+
+message ListDueTasksReply {
+  repeated DueTask list = 1;
+  int64 server_time = 2;      // 调度端据此校正本地时钟，避免各实例时钟漂移
+}
+
+// AcquireLeaseReq 抢占某个计划时刻的执行权。
+// 事务内：CAS cron_task_lease（过期即可抢占，fence_token+1）+ INSERT cron_task_run
+// （UNIQUE(task_key, planned_at, attempt) 保证同计划时刻单赢家）。
+message AcquireLeaseReq {
+  string task_key = 1;
+  int64 planned_at = 2;       // 必填：计划时刻
+  int32 attempt = 3;          // 0/1 表示首次；>1 必须是服务端已有的 RETRYING 重试号
+  string scope = 4;           // 任务级锁的分片键，空表示按 task_key 全局互斥
+  string owner = 5;           // 实例标识，必填（hostname-pid-random）
+  int32 ttl_seconds = 6;      // 0 表示使用任务定义的 lease_ttl_seconds
+  TriggerType trigger_type = 7;
+  string trace_id = 8;
+}
+
+message AcquireLeaseReply {
+  LeaseOutcome outcome = 1;
+  int64 run_id = 2;           // outcome=ACQUIRED/ALREADY_CLAIMED 时有效
+  int64 fence_token = 3;      // 后续 RenewLease/ReportTaskResult 必须回传
+  int64 lease_expire_at = 4;
+  int64 server_time = 5;
+  string message = 6;         // 被拒绝时的人读原因
+}
+
+// RenewLeaseReq 心跳续租。fence_token 不一致说明租约已被抢占，
+// 服务端返回 ErrLeaseLost，调用方必须立刻放弃本次执行（不再写下游）。
+message RenewLeaseReq {
+  int64 run_id = 1;
+  string owner = 2;
+  int64 fence_token = 3;
+  int32 ttl_seconds = 4;      // 0 表示沿用原 TTL
+}
+
+message RenewLeaseReply {
+  int64 lease_expire_at = 1;
+  int64 server_time = 2;
+}
+
+// ReleaseLeaseReq 释放租约并终结执行记录（ReportTaskResult 已隐式释放，
+// 本方法用于「领取后决定不执行」的分支，避免租约空转到过期）。
+message ReleaseLeaseReq {
+  int64 run_id = 1;
+  string owner = 2;
+  int64 fence_token = 3;
+  RunState final_state = 4;   // 只能是 RUN_STATE_SKIPPED 或 RUN_STATE_CANCELED
+  string reason = 5;
+}
+
+// ReportTaskResultReq 上报执行结果。
+// 幂等：重复上报同一 run_id 的终态返回 first_reported=false 且不改变已有终态；
+// 只有持有当前 fence_token 的实例可以写入。
+message ReportTaskResultReq {
+  int64 run_id = 1;
+  string owner = 2;
+  int64 fence_token = 3;
+  ReportState state = 4;
+  string result_summary = 5;  // 处理器结果摘要（禁止写入大对象、事件原文或敏感字段）
+  string error_message = 6;   // 失败原因，截断保存
+  Checkpoint checkpoint = 7;  // 非空时在同一个事务里 CAS 推进游标
+  string trace_id = 8;
+}
+
+message ReportTaskResultReply {
+  RunRecord run = 1;               // 上报后的最终状态
+  bool first_reported = 2;         // false 表示该 run 已是终态，本次上报被幂等丢弃
+  bool checkpoint_advanced = 3;    // 游标是否被本次上报推进
+  int64 next_retry_at = 4;         // state=RETRYING 时的下次可执行时间
+  int32 next_attempt = 5;          // 0 表示不再有重试机会
+}
+
+// --- 执行记录查询与人工干预 ---
+
+message GetTaskRunReq {
+  int64 run_id = 1;
+}
+
+message GetTaskRunReply {
+  RunRecord run = 1;
+}
+
+// ListTaskRunsReq 执行记录分页（按 (planned_at, run_id) 倒序游标）。
+message ListTaskRunsReq {
+  string task_key = 1;        // 空表示全部任务
+  RunState state = 2;         // 未指定表示全部
+  int64 planned_from = 3;     // 计划时刻下界（含）
+  int64 planned_to = 4;       // 计划时刻上界（含），0 表示不限
+  string cursor = 5;
+  int32 page_size = 6;
+}
+
+message ListTaskRunsReply {
+  repeated RunRecord list = 1;
+  string next_cursor = 2;
+  bool has_more = 3;
+  int64 total = 4;
+}
+
+// RetryRunReq 人工重试某条已终结（FAILED/TIMEOUT）的执行。
+// 语义：在同一 (task_key, planned_at) 下追加 attempt = 历史最大 + 1 的新执行记录，
+// 因此处理器的幂等上下文不变，重放不会重复产生副作用。
+message RetryRunReq {
+  int64 run_id = 1;
+  string idempotency_key = 2;   // 必填
+  string operator = 3;
+  string reason = 4;
+  string trace_id = 5;
+}
+
+message RetryRunReply {
+  RunRecord run = 1;            // 新建的重试运行
+  bool created = 2;
+}
+
+// --- 游标 ---
+
+message GetCheckpointReq {
+  string task_key = 1;
+  string scope_key = 2;
+}
+
+message GetCheckpointReply {
+  Checkpoint checkpoint = 1;
+  bool found = 2;               // false 表示从未推进过游标，checkpoint 字段无效
+}
+
+// ListCheckpointsReq 游标分页（按 (task_key, scope_key) 升序游标）。
+message ListCheckpointsReq {
+  string task_key = 1;
+  string cursor = 2;
+  int32 page_size = 3;
+}
+
+message ListCheckpointsReply {
+  repeated Checkpoint list = 1;
+  string next_cursor = 2;
+  bool has_more = 3;
+  int64 total = 4;
+}
+
+// SaveCheckpointReq 独立推进游标（不等执行结束）。
+// expected_version：0 表示要求「尚不存在」，>0 表示 CAS；不一致返回 ErrCheckpointConflict。
+message SaveCheckpointReq {
+  Checkpoint checkpoint = 1;
+  int64 expected_version = 2;
+  string idempotency_key = 3;
+  string operator = 4;
+  string trace_id = 5;
+}
+
+message SaveCheckpointReply {
+  Checkpoint checkpoint = 1;
+  bool advanced = 2;
+}
+
+// --- 租约查询 ---
+
+message GetLeaseReq {
+  string task_key = 1;
+  string scope = 2;
+}
+
+message GetLeaseReply {
+  LeaseInfo lease = 1;
+  bool found = 2;
+}
+
+// ListLeasesReq 租约分页（按 expire_at 升序，方便先看快过期的）。
+message ListLeasesReq {
+  string task_key = 1;   // 空表示全部
+  bool only_expired = 2; // true 表示只返回已过期可抢占的租约
+  int64 now = 3;
+  string cursor = 4;
+  int32 page_size = 5;
+}
+
+message ListLeasesReply {
+  repeated LeaseInfo list = 1;
+  string next_cursor = 2;
+  bool has_more = 3;
+  int64 total = 4;
+}
+
+// --- 审计与健康度 ---
+
+// ListTaskAuditsReq 任务变更审计分页（按 id 倒序游标）。
+message ListTaskAuditsReq {
+  string task_key = 1;
+  string action = 2;
+  int64 ctime_from = 3;
+  int64 ctime_to = 4;
+  string cursor = 5;
+  int32 page_size = 6;
+}
+
+message ListTaskAuditsReply {
+  repeated TaskAudit list = 1;
+  string next_cursor = 2;
+  bool has_more = 3;
+  int64 total = 4;
+}
+
+// GroupHealth 单个分组的调度健康度。
+message GroupHealth {
+  string task_group = 1;
+  int32 enabled_tasks = 2;
+  int32 paused_tasks = 3;
+  int32 due_backlog = 4;        // 已过期但尚未产生执行记录的计划任务数
+  int32 running = 5;
+  int32 retrying = 6;
+  int32 failed_last_hour = 7;
+  int32 expired_leases = 8;     // 租约过期未释放的数量（实例崩溃线索）
+  int64 oldest_due_planned_at = 9; // 最老积压计划时刻，0 表示无积压
+}
+
+message GetSchedulerHealthReq {
+  int64 now = 1;
+  string task_group = 2; // 空表示全部分组
+}
+
+message GetSchedulerHealthReply {
+  int64 server_time = 1;
+  repeated GroupHealth groups = 2;
+  string version = 3; // 服务构建版本，便于排障定位
+}
+
+// Cron 定时与补偿任务的调度、租约与审计服务。
+// 方法名表达领域动作，不暴露数据库 CRUD（docs/api-and-events.md §1.1）。
+service Cron {
+  // 注册任务定义（task_key 唯一，重复注册幂等返回）。
+  rpc RegisterTask(RegisterTaskReq) returns (RegisterTaskReply);
+  // 修改任务定义（乐观锁）。
+  rpc UpdateTask(UpdateTaskReq) returns (UpdateTaskReply);
+  // 查询单个任务定义。
+  rpc GetTask(GetTaskReq) returns (GetTaskReply);
+  // 分页列出任务定义。
+  rpc ListTasks(ListTasksReq) returns (ListTasksReply);
+  // 暂停任务（可恢复）。
+  rpc PauseTask(PauseTaskReq) returns (TaskOperationReply);
+  // 恢复任务，按 MisfirePolicy 处理暂停期间的过期计划点。
+  rpc ResumeTask(ResumeTaskReq) returns (TaskOperationReply);
+  // 停用任务（终态，保留历史）。
+  rpc DisableTask(DisableTaskReq) returns (TaskOperationReply);
+  // 立即触发一次执行，或补跑指定计划时刻。
+  rpc TriggerTask(TriggerTaskReq) returns (TriggerTaskReply);
+  // 拉取到期任务清单（只读，不占租约）。
+  rpc ListDueTasks(ListDueTasksReq) returns (ListDueTasksReply);
+  // 抢占某个计划时刻（同事务写租约与执行记录）。
+  rpc AcquireLease(AcquireLeaseReq) returns (AcquireLeaseReply);
+  // 心跳续租，栅栏令牌不一致时返回租约已失效。
+  rpc RenewLease(RenewLeaseReq) returns (RenewLeaseReply);
+  // 释放租约并以 SKIPPED/CANCELED 终结执行记录。
+  rpc ReleaseLease(ReleaseLeaseReq) returns (EmptyReply);
+  // 上报执行结果（幂等，可带游标 CAS）。
+  rpc ReportTaskResult(ReportTaskResultReq) returns (ReportTaskResultReply);
+  // 查询单条执行记录。
+  rpc GetTaskRun(GetTaskRunReq) returns (GetTaskRunReply);
+  // 分页查询执行记录。
+  rpc ListTaskRuns(ListTaskRunsReq) returns (ListTaskRunsReply);
+  // 人工重试已终结的执行（同计划时刻追加 attempt）。
+  rpc RetryRun(RetryRunReq) returns (RetryRunReply);
+  // 查询单个游标。
+  rpc GetCheckpoint(GetCheckpointReq) returns (GetCheckpointReply);
+  // 分页查询游标。
+  rpc ListCheckpoints(ListCheckpointsReq) returns (ListCheckpointsReply);
+  // 独立推进游标（CAS）。
+  rpc SaveCheckpoint(SaveCheckpointReq) returns (SaveCheckpointReply);
+  // 查询单个任务级租约。
+  rpc GetLease(GetLeaseReq) returns (GetLeaseReply);
+  // 分页查询租约（含已过期可抢占项）。
+  rpc ListLeases(ListLeasesReq) returns (ListLeasesReply);
+  // 分页查询任务变更审计。
+  rpc ListTaskAudits(ListTaskAuditsReq) returns (ListTaskAuditsReply);
+  // 调度健康度（积压、运行中、退避、近一小时失败、过期租约）。
+  rpc GetSchedulerHealth(GetSchedulerHealthReq) returns (GetSchedulerHealthReply);
+}

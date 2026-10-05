@@ -1,6 +1,6 @@
 package repository
 
-// 本文件覆盖 Outbox 发布器的投递逻辑：user.profile_updated 通过 account 的
+// 本文件覆盖 Outbox 发布器的投递逻辑：user.profile.updated 通过 account 的
 // DelCache RPC 成功投递、RPC 失败时退避重试、超过最大次数标记失败。
 
 import (

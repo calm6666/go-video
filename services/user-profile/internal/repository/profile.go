@@ -73,7 +73,7 @@ func (r *Repository) BaseInfo(ctx context.Context, mid int64) (*rpc.BaseInfoRepl
 	}
 	cacheOK := true
 	var payload baseCachePayload
-	if err := r.cache.getJSON(ctx, keyBase(mid), &payload); err != nil {
+	if err := r.cache.GetJSON(ctx, keyBase(mid), &payload); err != nil {
 		cacheOK = false
 		logx.Errorf("user-profile/profile: get base cache mid=%d err=%v", mid, err)
 	}
@@ -95,7 +95,7 @@ func (r *Repository) BaseInfo(ctx context.Context, mid int64) (*rpc.BaseInfoRepl
 	if cacheOK {
 		p := payload
 		_ = r.async.Do(ctx, func(c context.Context) {
-			r.cache.setJSON(c, keyBase(mid), p, cacheTTLBase)
+			r.cache.SetJSON(c, keyBase(mid), p, cacheTTLBase)
 		})
 	}
 	return toBaseReply(&payload.baseCacheValue), nil
@@ -113,7 +113,7 @@ func (r *Repository) BatchBaseInfo(ctx context.Context, mids []int64) (map[int64
 	miss := make([]int64, 0, len(mids))
 	for _, mid := range mids {
 		var payload baseCachePayload
-		if err := r.cache.getJSON(ctx, keyBase(mid), &payload); err != nil {
+		if err := r.cache.GetJSON(ctx, keyBase(mid), &payload); err != nil {
 			logx.Errorf("user-profile/profile: batch base cache mid=%d err=%v", mid, err)
 		}
 		if payload.Cached {
@@ -139,7 +139,7 @@ func (r *Repository) BatchBaseInfo(ctx context.Context, mids []int64) (map[int64
 			result[mid] = toBaseReply(&payload.baseCacheValue)
 			p := payload
 			_ = r.async.Do(ctx, func(c context.Context) {
-				r.cache.setJSON(c, keyBase(mid), p, cacheTTLBase)
+				r.cache.SetJSON(c, keyBase(mid), p, cacheTTLBase)
 			})
 		}
 	}
@@ -225,7 +225,7 @@ func (r *Repository) setBaseTx(ctx context.Context, mid int64, action string, fn
 	if err != nil {
 		return err
 	}
-	if err := r.cache.delBaseCache(ctx, mid); err != nil {
+	if err := r.delBaseCache(ctx, mid); err != nil {
 		logx.Errorf("user-profile/profile: del base cache mid=%d err=%v", mid, err)
 	}
 	return nil
@@ -286,7 +286,7 @@ func (r *Repository) SetBase(ctx context.Context, base *model.UserBase) error {
 	if err := r.baseModel.SetBase(ctx, base); err != nil {
 		return err
 	}
-	return r.cache.delBaseCache(ctx, base.Mid)
+	return r.delBaseCache(ctx, base.Mid)
 }
 
 // NickUpdated 查询是否已首次修改昵称（参考 service.NickUpdated）。
@@ -335,14 +335,14 @@ func (r *Repository) Exps(ctx context.Context, mids []int64) (map[int64]*rpc.Lev
 
 // exp 单用户经验值（缓存→DB，参考 dao.Exp）。
 func (r *Repository) exp(ctx context.Context, mid int64) (int64, error) {
-	if v, ok := r.cache.getInt(ctx, keyExp(mid)); ok {
+	if v, ok := r.cache.GetInt(ctx, keyExp(mid)); ok {
 		return v, nil
 	}
 	exp, err := r.expModel.FindOne(ctx, mid)
 	if err != nil {
 		return 0, err
 	}
-	r.cache.setInt(ctx, keyExp(mid), exp, cacheTTLExp)
+	r.cache.SetInt(ctx, keyExp(mid), exp, cacheTTLExp)
 	return exp, nil
 }
 
@@ -351,7 +351,7 @@ func (r *Repository) exps(ctx context.Context, mids []int64) (map[int64]int64, e
 	result := make(map[int64]int64, len(mids))
 	miss := make([]int64, 0, len(mids))
 	for _, mid := range mids {
-		if v, ok := r.cache.getInt(ctx, keyExp(mid)); ok {
+		if v, ok := r.cache.GetInt(ctx, keyExp(mid)); ok {
 			result[mid] = v
 		} else {
 			miss = append(miss, mid)
@@ -369,7 +369,7 @@ func (r *Repository) exps(ctx context.Context, mids []int64) (map[int64]int64, e
 		result[mid] = exp
 		e := exp
 		_ = r.async.Do(ctx, func(c context.Context) {
-			r.cache.setInt(c, keyExp(mid), e, cacheTTLExp)
+			r.cache.SetInt(c, keyExp(mid), e, cacheTTLExp)
 		})
 	}
 	return result, nil
@@ -404,7 +404,7 @@ func (r *Repository) SetExp(ctx context.Context, mid int64, count float64, opera
 		return err
 	}
 	r.addExpLog(ctx, mid, exp/model.ExpMulti, target/model.ExpMulti, operate, reason, ip)
-	return r.cache.delExpCache(ctx, mid)
+	return r.delExpCache(ctx, mid)
 }
 
 // UpdateExp 增加经验值（参考 service.UpdateExp：count=0 直接返回）。
@@ -430,7 +430,7 @@ func (r *Repository) UpdateExp(ctx context.Context, mid int64, count float64, op
 		}
 	}
 	r.addExpLog(ctx, mid, exp/model.ExpMulti, (exp+delta)/model.ExpMulti, operate, reason, ip)
-	return r.cache.delExpCache(ctx, mid)
+	return r.delExpCache(ctx, mid)
 }
 
 // addExpLog 写入经验变更日志（参考 dao.AddExplog：异步失败仅记日志）。
@@ -459,7 +459,7 @@ func (r *Repository) ExpLog(ctx context.Context, mid int64) ([]*rpc.UserLogReply
 
 // Stat 查询当日经验奖励统计（参考 service.Stat）。
 func (r *Repository) Stat(ctx context.Context, mid int64) (*rpc.ExpStatReply, error) {
-	login, watch, share, coin, err := r.cache.statCache(ctx, mid, int64(time.Now().Day()))
+	login, watch, share, coin, err := r.statCache(ctx, mid, int64(time.Now().Day()))
 	if err != nil {
 		return nil, err
 	}

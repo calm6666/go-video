@@ -1,0 +1,531 @@
+syntax = "proto3";
+
+package spm.v1;
+
+option go_package = "go-video/services/spm/rpc";
+
+// spm：用户行为分析与推荐特征计算的所有者（AGENTS.md §7）。
+//
+// 硬边界（AGENTS.md §7，违反即返工）
+//   * SPM 在本项目只代表用户行为分析链路：采集 -> 指标 -> 热度/完播率/留存/兴趣/推荐特征。
+//   * 本契约不提供任何广告位参数、广告投放、商业化报表或「广告推荐」相关字段与方法；
+//     不得新增 ad_slot / campaign / billing / revenue 之类的语义。
+//   * 本契约不提供「手工修改推荐结果」的接口：推荐链路只能
+//     `spm 指标 -> feature-store 特征 -> recommend-recall/rank` 正向流动，
+//     任何服务都不能反过来把排序结果写回 spm。
+//   * 会员、订单、支付、投币、创作者分成不属于本期范围，因此本契约的指标集合里
+//     不存在任何变现类口径。
+//
+// 数据所有权（AGENTS.md §5）
+//   * 本服务拥有 10 张自有表，库名 go_video_spm：
+//     spm_behavior_event（脱敏行为事实，唯一事实源）、spm_metric_definition（口径注册表）、
+//     spm_metric_window、spm_user_interest、spm_retention_cohort、spm_window_watermark
+//     （四张可从事实重算的投影，不是事实源）、
+//     spm_aggregation_job（作业与租约）、spm_content_projection（content.published.v1 的
+//     本地只读投影，只投影 subject/content_type/zone/state 等榜单过滤必需的最小列）、
+//     spm_consumer_offset（消费状态机与位点）、spm_dead_letter（死信留档）。
+//   * 行为事件只从 MQ（event-collector 投递的 behavior.* topic 与领域原始事件）进入，
+//     本契约不提供事件明细写入口，
+//     避免任何服务绕过 event-collector 的限流、采样与脱敏直接灌数据。
+//   * 跨服务只传主键：content_id/content_type、aid、mid、zone_id、catalog_item_id。
+//     不复制视频标题、用户昵称等可变主资料（那些归 video / catalog / user-profile）。
+//     注意上游事件给的是 content_id + content_type 这一对，而不是 aid + zone_id：
+//     UGC 的 content_id 就是 aid，PGC 的 content_id 是 catalog 的 episode_id；
+//     分区（zone_id）与作品级 item_id 都不在行为事件里，只能由消费者 mapping 阶段
+//     查 spm_content_projection 补齐，补不到就是 0（未知），本契约不猜测。
+//
+// 消费的事件词汇（与 common/eventenvelope 和 event-collector 契约逐字对齐）
+//   * 信封字段固定为 event_id / event_type / schema_version / occurred_at / producer /
+//     trace_id / aggregate_type / aggregate_id / payload：
+//     - event_type 必须是小写点分串（eventenvelope.Validate 拒绝大写、首尾点、连续点），
+//       因此写 `behavior.play` 而不是 `Behavior.Play`；
+//     - schema_version 必须 > 0；
+//     - occurred_at 是 **RFC3339 字符串**（不是 Unix 秒）。落到本契约的所有
+//       int64 时间列/字段（如 MetricPoint.event_time）都必须先转成 Unix 秒，
+//       解析失败的事件按坏消息处理，不能退化成「用当前时间顶上」。
+//   * topic 名由 eventenvelope.Topic(event_type, schema_version) 派生，
+//     即 `<event_type>.v<schema_version>`，例如 behavior.play + 1 -> behavior.play.v1。
+//     本契约的 ListConsumerStateReq.topic / ListDeadLettersReq.topic 都用这个形态。
+//   * 通道一：event-collector 归一化行为事件，event_type = behavior.<category>，
+//     category 取自 rpc.BehaviorCategory 全集：play / click / search / skip / like /
+//     favorite / follow / share / quality / exposure。行为明细字段（position_ms、
+//     duration_ms、result_index、target_mid、session_id…）在 payload 里，
+//     设备与 IP 只以 device_hash / ip_segment 摘要到达（明文在采集端就已丢弃）。
+//   * 通道二：领域服务原始事件 playback.heartbeat、engagement.action、search.query
+//     （docs/api-and-events.md §5 与各生产者 README）。
+//   * 通道三：content.published 只用于维护 spm_content_projection，不参与行为计数。
+//   * 事件入口只有 MQ：本契约不提供事件明细写 RPC，也不接受任何调用方直接写
+//     spm_behavior_event。
+//
+// 口径版本化
+//   * 每个指标由 (metric_key, metric_version) 唯一确定。口径变更（公式、分母定义、
+//     去重窗口）必须新增一个 metric_version，禁止原地改写已有版本，
+//     否则历史窗口数据会被静默重新解释（见 UpsertMetricDefinition 的不可变约束）。
+//
+// 隐私（AGENTS.md §7 第 1 条、docs/data-design.md §6）
+//   * 本契约所有响应都不返回行为明细原文，只返回聚合值与脱敏后的兴趣权重；
+//     不提供「按 mid 列出其全部行为事件」的读接口。
+//   * 落库侧只允许 mid、aid、zone_id 与设备/会话的哈希摘要；明文设备号、手机号、
+//     原始 IP 一律禁止入库（消费者在 mapping 阶段丢弃）。
+//
+// 通用约定
+//   * 时间统一 Unix 秒（int64）。
+//   * 分页统一 pn（从 1 开始）/ ps（服务端上限见各方法注释），响应回带 total。
+//   * 写接口全部要求 request_id 幂等键；重复提交返回首次结果，不产生第二次写入。
+
+// 聚合主体类型。跨服务只传主键，因此这里只声明「主键的语义」。
+enum SubjectType {
+  SUBJECT_TYPE_UNSPECIFIED = 0; // 未指定，任何请求出现即拒绝
+  SUBJECT_TYPE_AID = 1;         // 稿件（video 服务的 aid）
+  SUBJECT_TYPE_ZONE = 2;        // 分区（video/catalog 的 zone_id）
+  SUBJECT_TYPE_MID = 3;         // 用户（account 的 mid，用于创作者维度指标）
+  SUBJECT_TYPE_CATALOG_ITEM = 4; // 版权内容条目（catalog 的 item_id）
+}
+
+// 统计窗口粒度。window_start 必须是该粒度的左边界（由服务端规整并回显）。
+enum WindowType {
+  WINDOW_TYPE_UNSPECIFIED = 0; // 未指定，任何请求出现即拒绝
+  WINDOW_TYPE_5_MIN = 1;       // 实时窗口：5 分钟
+  WINDOW_TYPE_HOUR = 2;        // 实时窗口：1 小时
+  WINDOW_TYPE_DAY = 3;         // 天级窗口（离线回填与留存口径的默认粒度）
+  WINDOW_TYPE_WEEK = 4;        // 自然周
+  WINDOW_TYPE_TOTAL = 5;       // 全量累计（window_start 固定为 0）
+}
+
+// 指标写入来源。写回通道只接受计算链路，不接受人工覆盖：
+// 「运营觉得某个稿件该火」不是指标数据源（AGENTS.md §7 第 3 条）。
+enum MetricSource {
+  METRIC_SOURCE_UNSPECIFIED = 0; // 未指定，拒绝
+  METRIC_SOURCE_REALTIME = 1;    // 本服务实时窗口聚合器（读 spm_behavior_event）
+  METRIC_SOURCE_OFFLINE = 2;     // 离线回填作业（外部分析引擎，见 README「契约缺口」）
+  METRIC_SOURCE_RECOMPUTE = 3;   // 从事实表重算的修复链路（RecomputeMetrics）
+}
+
+// 指标口径版本状态。没有 DELETE 语义：历史窗口的解释依赖口径定义持续可查。
+enum DefinitionState {
+  DEFINITION_STATE_UNSPECIFIED = 0; // 未指定
+  DEFINITION_STATE_DRAFT = 1;       // 已登记但未参与对外读
+  DEFINITION_STATE_ACTIVE = 2;      // 可被读接口取到
+  DEFINITION_STATE_RETIRED = 3;     // 只保留口径说明，不再写入
+}
+
+// 聚合作业类型。
+enum JobType {
+  JOB_TYPE_UNSPECIFIED = 0;   // 未指定，拒绝
+  JOB_TYPE_REALTIME = 1;      // 实时窗口聚合（本服务内部调度或 cron 触发）
+  JOB_TYPE_OFFLINE_BACKFILL = 2; // 离线回填（含历史窗口重算）
+  JOB_TYPE_RECOMPUTE = 3;     // 由 RecomputeMetrics 派生的修复作业
+}
+
+// 作业状态机：PENDING → RUNNING → SUCCEEDED / FAILED / CANCELLED，终态不可回退。
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  JOB_STATE_PENDING = 1;
+  JOB_STATE_RUNNING = 2;
+  JOB_STATE_SUCCEEDED = 3;
+  JOB_STATE_FAILED = 4;
+  JOB_STATE_CANCELLED = 5;
+}
+
+// 消费状态（docs/api-and-events.md §6 要求的最小状态集合）。
+enum ConsumerState {
+  CONSUMER_STATE_UNSPECIFIED = 0;
+  CONSUMER_STATE_RECEIVED = 1;
+  CONSUMER_STATE_PROCESSING = 2;
+  CONSUMER_STATE_SUCCEEDED = 3;
+  CONSUMER_STATE_RETRY = 4;
+  CONSUMER_STATE_DEAD_LETTER = 5;
+}
+
+// 空响应
+message EmptyReply {}
+
+// --- 指标值 ---
+
+// MetricPoint 一个「主体 × 指标口径版本 × 窗口」的取值。
+// 比率类指标必须同时给出 numerator/denominator，否则跨窗口合并只能靠加权平均近似，
+// 会让完播率等口径在回填后对不上（这是重算链路的正确性前提）。
+message MetricPoint {
+  string metric_key = 1;     // 指标键，如 play_finish_rate
+  int32 metric_version = 2;  // 口径版本
+  SubjectType subject_type = 3; // 主体类型
+  int64 subject_id = 4;      // 主体主键（aid/zone_id/mid/catalog_item_id）
+  WindowType window_type = 5; // 窗口粒度
+  int64 window_start = 6;    // 窗口左边界（Unix 秒，已按粒度规整）
+  double value = 7;          // 指标值（计数类同样落在这一列）
+  int64 numerator = 8;       // 分子（比率类必填，计数类填 0）
+  int64 denominator = 9;     // 分母（比率类必填，计数类填 0）
+  int64 sample_count = 10;   // 参与聚合的样本数（事件条数）
+  int64 event_time = 11;     // 该窗口最后一次推进时间（Unix 秒）
+}
+
+message GetMetricReq {
+  SubjectType subject_type = 1; // 必填
+  int64 subject_id = 2;         // 必填
+  string metric_key = 3;        // 必填
+  int32 metric_version = 4;     // 0 = 使用当前 ACTIVE 版本
+  WindowType window_type = 5;   // 必填
+  int64 window_start = 6;       // 0 = 最近一个已闭合窗口
+}
+
+message GetMetricReply {
+  MetricPoint point = 1;
+  bool found = 2; // false 时 point 为零值：口径没有该窗口数据，不伪造 0
+}
+
+message BatchGetMetricsReq {
+  // 单个主体的一组指标；subject 维度批量由调用方分多次请求。
+  message Key {
+    string metric_key = 1;
+    int32 metric_version = 2; // 0 = ACTIVE 版本
+  }
+  SubjectType subject_type = 1;          // 必填
+  int64 subject_id = 2;                  // 必填
+  repeated Key keys = 3;                 // 最多 50 个口径
+  WindowType window_type = 4;            // 必填
+  int64 window_start_from = 5;           // 起始窗口（含），0 = 最近窗口
+  int32 window_count = 6;                // 连续窗口数，1..30
+}
+
+message BatchGetMetricsReply {
+  // key = "<metric_key>@v<metric_version>:<window_start>"，缺数据的窗口不出现。
+  map<string, MetricPoint> points = 1;
+}
+
+message ListHotSubjectsReq {
+  // 只读榜单投影：按指标值倒序取主体主键，供推荐召回/分区页使用。
+  SubjectType subject_type = 1;  // 必填
+  string metric_key = 2;         // 必填
+  int32 metric_version = 3;      // 0 = ACTIVE 版本
+  WindowType window_type = 4;    // 必填
+  int64 window_start = 5;        // 0 = 最近一个已闭合窗口
+  int64 zone_id = 6;             // 0 = 不限分区（仅 subject_type=AID/CATALOG_ITEM 时有意义）
+  int32 pn = 7;                  // 从 1 开始
+  int32 ps = 8;                  // 每页大小，上限 100
+}
+
+message ListHotSubjectsReply {
+  message HotSubject {
+    int64 subject_id = 1;    // 主体主键
+    double value = 2;        // 指标值
+    int64 numerator = 3;
+    int64 denominator = 4;
+    int32 rank = 5;          // 该窗口内的名次（从 1 开始）
+  }
+  repeated HotSubject subjects = 1;
+  int64 total = 2;
+  int64 window_start = 3;    // 实际使用的窗口左边界
+  int32 metric_version = 4;  // 实际使用的口径版本
+}
+
+// --- 用户兴趣（脱敏后的画像投影） ---
+
+message GetUserInterestReq {
+  int64 mid = 1;          // 必填
+  int32 metric_version = 2; // 0 = ACTIVE 版本
+  int32 top_n = 3;        // 返回权重最高的 N 个兴趣标签，上限 100
+}
+
+message GetUserInterestReply {
+  message Interest {
+    string interest_key = 1;  // 兴趣键：zone:<id> / tag:<id> / up:<mid> 等受控词表
+    double weight = 2;        // 归一化权重
+    int64 sample_count = 3;   // 支撑该兴趣的样本数
+    int64 event_time = 4;     // 最近一次更新时间（Unix 秒）
+  }
+  repeated Interest interests = 1;
+  int32 metric_version = 2;
+  bool stale = 3; // true = 画像已过期（超过留存窗口），调用方应按冷启动策略处理
+}
+
+// --- 留存 ---
+
+message GetRetentionReq {
+  // cohort 维度：注册日 / 首次播放日 / 指定行为首日。
+  enum CohortType {
+    COHORT_TYPE_UNSPECIFIED = 0;
+    COHORT_TYPE_REGISTER_DAY = 1; // 按注册日分桶
+    COHORT_TYPE_FIRST_PLAY_DAY = 2; // 按首次播放日分桶
+  }
+  CohortType cohort_type = 1; // 必填
+  int64 cohort_date = 2;      // 分桶日（Unix 秒，服务端按天规整）
+  int32 max_day = 3;          // 取到第 N 日留存，1..90
+  int32 metric_version = 4;   // 0 = ACTIVE 版本
+  int64 zone_id = 5;          // 0 = 全站
+}
+
+message GetRetentionReply {
+  message RetentionPoint {
+    int32 day_offset = 1;   // 第 N 日（0 = cohort 当日）
+    int64 cohort_size = 2;  // 分桶规模
+    int64 retained = 3;     // 第 N 日仍活跃数
+    double rate = 4;        // retained / cohort_size
+  }
+  repeated RetentionPoint points = 1;
+  int32 metric_version = 2;
+  int64 cohort_date = 3;    // 实际使用的分桶日
+}
+
+// --- 指标写入与修复 ---
+
+message WriteMetricWindowReq {
+  // 聚合链路写回窗口指标（本服务内部聚合器、离线回填引擎、重算作业）。
+  // 幂等：uniq(subject_type, subject_id, metric_key, metric_version, window_type,
+  // window_start) 命中时整行覆盖并保留 mtime 单调性——同窗口的重放必须是幂等覆盖，
+  // 不能累加。晚于已写入 event_time 的迟到数据默认拒绝（allow_late_write=false）。
+  repeated MetricPoint points = 1; // 单次上限 500
+  MetricSource source = 2;         // 必填，且只能是计算链路来源
+  string request_id = 3;           // 幂等键，必填
+  bool allow_late_write = 4;       // 回填历史窗口时置 true
+}
+
+message WriteMetricWindowReply {
+  int32 written = 1;      // 实际写入行数
+  int32 rejected = 2;     // 因口径未登记/版本不 ACTIVE/迟到被拒的行数
+  repeated string rejected_keys = 3; // 被拒行的 "<subject_type>:<subject_id>:<metric_key>" 摘要
+}
+
+message RecomputeMetricsReq {
+  // 计数/指标漂移的唯一修复入口（docs/data-design.md §5）：从 spm_behavior_event
+  // 事实表按指定口径版本重算窗口，而不是人工改线上缓存。
+  SubjectType subject_type = 1; // 必填
+  int64 subject_id = 2;         // 必填
+  string metric_key = 3;        // 必填
+  int32 metric_version = 4;     // 必填（显式版本，避免悄悄按新版本改写历史）
+  WindowType window_type = 5;   // 必填
+  int64 window_start_from = 6;  // 起始窗口（含）
+  int64 window_start_to = 7;    // 结束窗口（含），0 = 当前时间
+  string request_id = 8;        // 幂等键，必填
+  string operator = 9;          // 触发者（system/cron/admin:<id>），仅留痕用
+}
+
+message RecomputeMetricsReply {
+  int64 job_id = 1;        // 生成的修复作业，进度由 GetAggregationJob 查询
+  bool reused = 2;         // true = request_id 命中已有作业
+  int32 windows_planned = 3; // 计划重算的窗口数
+}
+
+// --- 指标口径注册表 ---
+
+message MetricDefinition {
+  string metric_key = 1;         // 指标键
+  int32 metric_version = 2;      // 口径版本，>= 1
+  string name = 3;               // 展示名
+  string formula = 4;            // 口径公式说明（人读，必须写清分子/分母/去重键）
+  string unit = 5;               // 单位：count / ratio / seconds / score
+  repeated WindowType supported_windows = 6; // 允许的窗口粒度
+  string source_event_types = 7; // 依赖的事件类型，CSV，必须落在 model.SupportedEventType
+                                 // 白名单内，如 "playback.heartbeat,behavior.exposure"
+  DefinitionState state = 8;
+  string description = 9;        // 变更说明：为什么需要新版本
+  string created_by = 10;        // 登记人
+  int64 ctime = 11;              // Unix 秒
+  int64 mtime = 12;              // Unix 秒
+}
+
+message UpsertMetricDefinitionReq {
+  // 只能「新增版本」：命中已存在的 (metric_key, metric_version) 时，
+  // 若公式/单位/窗口与登记值不一致返回 ErrMetricVersionImmutable，绝不覆盖。
+  MetricDefinition definition = 1; // 必填，metric_version >= 1
+  string operator = 2;             // 必填
+  string request_id = 3;           // 幂等键，必填
+}
+
+message UpsertMetricDefinitionReply {
+  bool created = 1;      // true = 新增了口径版本
+  bool reused = 2;       // true = request_id 命中已有请求，definition 未变
+  MetricDefinition definition = 3;
+}
+
+message UpdateMetricDefinitionStateReq {
+  string metric_key = 1;      // 必填
+  int32 metric_version = 2;   // 必填
+  DefinitionState state = 3;  // 目标状态（不允许回到 UNSPECIFIED）
+  string operator = 4;        // 必填
+  string reason = 5;          // 必填：状态变更理由
+  string request_id = 6;      // 幂等键，必填
+}
+
+message UpdateMetricDefinitionStateReply {
+  MetricDefinition definition = 1;
+  bool reused = 2;
+}
+
+message GetMetricDefinitionReq {
+  string metric_key = 1;     // 必填
+  int32 metric_version = 2;  // 0 = 当前 ACTIVE 版本
+}
+
+message GetMetricDefinitionReply {
+  MetricDefinition definition = 1;
+  bool found = 2;
+}
+
+message ListMetricDefinitionsReq {
+  string metric_key = 1;         // 空 = 不限
+  DefinitionState state = 2;     // UNSPECIFIED = 不限
+  int32 pn = 3;
+  int32 ps = 4;                  // 上限 100
+}
+
+message ListMetricDefinitionsReply {
+  repeated MetricDefinition definitions = 1;
+  int64 total = 2;
+}
+
+// --- 聚合作业 ---
+
+message SubmitAggregationJobReq {
+  JobType job_type = 1;           // 必填
+  SubjectType subject_type = 2;   // 0 = 全部主体
+  int64 subject_id = 3;           // 0 = 不限主体
+  string metric_key = 4;          // 空 = 该作业类型下的全部指标
+  int32 metric_version = 5;       // 0 = ACTIVE 版本
+  WindowType window_type = 6;     // 必填
+  int64 window_start_from = 7;    // 起始窗口（含）
+  int64 window_start_to = 8;      // 结束窗口（含），0 = 当前时间
+  string request_id = 9;          // 幂等键，必填
+  string operator = 10;           // 触发者
+  string reason = 11;             // 触发原因（回填范围说明、故障修复单号等）
+}
+
+message SubmitAggregationJobReply {
+  int64 job_id = 1;
+  bool reused = 2;
+  AggregationJob job = 3;
+}
+
+message AggregationJob {
+  int64 job_id = 1;
+  JobType job_type = 2;
+  JobState state = 3;
+  SubjectType subject_type = 4;
+  int64 subject_id = 5;
+  string metric_key = 6;
+  int32 metric_version = 7;
+  WindowType window_type = 8;
+  int64 window_start_from = 9;
+  int64 window_start_to = 10;
+  int32 windows_total = 11;   // 计划窗口数
+  int32 windows_done = 12;    // 已完成窗口数
+  int32 windows_failed = 13;  // 失败窗口数
+  string request_id = 14;
+  string operator = 15;
+  string reason = 16;
+  string last_error = 17;     // 截断保存，不含堆栈与 SQL
+  int64 ctime = 18;
+  int64 mtime = 19;
+  int64 finished_at = 20;
+}
+
+message GetAggregationJobReq {
+  int64 job_id = 1;      // 与 request_id 二选一
+  string request_id = 2; // 幂等回放用
+}
+
+message GetAggregationJobReply {
+  AggregationJob job = 1;
+  bool found = 2;
+}
+
+message ListAggregationJobsReq {
+  JobType job_type = 1;   // UNSPECIFIED = 不限
+  JobState state = 2;     // UNSPECIFIED = 不限
+  int64 since = 3;        // 0 = 不限时间
+  int32 pn = 4;
+  int32 ps = 5;           // 上限 100
+}
+
+message ListAggregationJobsReply {
+  repeated AggregationJob jobs = 1;
+  int64 total = 2;
+}
+
+// --- 消费链路可观测（只读） ---
+
+message ListConsumerStateReq {
+  // 按 topic 汇总消费状态，回答「事件消费到哪了、有没有堆积」。
+  string topic = 1;        // 空 = 全部
+  ConsumerState state = 2; // UNSPECIFIED = 全部
+  int32 pn = 3;
+  int32 ps = 4;            // 上限 100
+}
+
+message ListConsumerStateReply {
+  message Row {
+    string topic = 1;
+    ConsumerState state = 2;
+    int64 count = 3;            // 该状态的事件条数
+    int64 oldest_ctime = 4;     // 最早一条的接收时间（Unix 秒）
+    int64 last_msg_offset = 5;  // 该 topic 已处理到的最大位点
+    int64 last_event_time = 6;  // 该 topic 最近一次推进时间
+  }
+  repeated Row rows = 1;
+  int64 total = 2;
+}
+
+message ListDeadLettersReq {
+  string topic = 1;      // 空 = 全部
+  string state = 2;      // open/replayed/ignored，空 = 全部
+  int64 since = 3;       // 0 = 不限
+  int32 pn = 4;
+  int32 ps = 5;          // 上限 100
+}
+
+message ListDeadLettersReply {
+  message DeadLetter {
+    int64 id = 1;
+    string event_id = 2;      // 信封不可解析时为空串
+    string event_type = 3;
+    string topic = 4;
+    string payload_digest = 5;  // sha256:<hex>
+    string payload_preview = 6; // 脱敏前缀，不含行为原文与标识符
+    string reason = 7;
+    string state = 8;
+    int64 ctime = 9;
+  }
+  repeated DeadLetter items = 1;
+  int64 total = 2;
+}
+
+// Spm 用户行为分析与推荐特征计算服务。
+// 事件入口是 MQ（见 services/spm/README.md「消费链路」），gRPC 面只做
+// 指标读、口径登记、作业编排与可观测；不提供行为明细写、不提供推荐结果覆盖。
+service Spm {
+  // 读取单主体单口径单窗口的指标值
+  rpc GetMetric(GetMetricReq) returns (GetMetricReply);
+  // 批量读取主体的一组指标/多个窗口（单次上限 50 口径 × 30 窗口）
+  rpc BatchGetMetrics(BatchGetMetricsReq) returns (BatchGetMetricsReply);
+  // 热度榜投影（只读，按指标值倒序分页）
+  rpc ListHotSubjects(ListHotSubjectsReq) returns (ListHotSubjectsReply);
+  // 用户兴趣画像（脱敏权重，不返回行为明细）
+  rpc GetUserInterest(GetUserInterestReq) returns (GetUserInterestReply);
+  // 留存曲线
+  rpc GetRetention(GetRetentionReq) returns (GetRetentionReply);
+
+  // 聚合链路写回窗口指标（幂等覆盖，来源受 MetricSource 白名单约束）
+  rpc WriteMetricWindow(WriteMetricWindowReq) returns (WriteMetricWindowReply);
+  // 从事实表重算指标（计数/指标漂移的修复入口，派生 JOB_TYPE_RECOMPUTE 作业）
+  rpc RecomputeMetrics(RecomputeMetricsReq) returns (RecomputeMetricsReply);
+
+  // 登记指标口径新版本（已存在版本不可变）
+  rpc UpsertMetricDefinition(UpsertMetricDefinitionReq) returns (UpsertMetricDefinitionReply);
+  // 变更口径状态（DRAFT/ACTIVE/RETIRED），不删除历史口径
+  rpc UpdateMetricDefinitionState(UpdateMetricDefinitionStateReq) returns (UpdateMetricDefinitionStateReply);
+  // 查询单个口径
+  rpc GetMetricDefinition(GetMetricDefinitionReq) returns (GetMetricDefinitionReply);
+  // 口径列表（分页）
+  rpc ListMetricDefinitions(ListMetricDefinitionsReq) returns (ListMetricDefinitionsReply);
+
+  // 提交实时/离线聚合作业（request_id 幂等）
+  rpc SubmitAggregationJob(SubmitAggregationJobReq) returns (SubmitAggregationJobReply);
+  // 查询作业（按 job_id 或 request_id）
+  rpc GetAggregationJob(GetAggregationJobReq) returns (GetAggregationJobReply);
+  // 作业列表（分页）
+  rpc ListAggregationJobs(ListAggregationJobsReq) returns (ListAggregationJobsReply);
+
+  // 消费状态汇总（位点与堆积）
+  rpc ListConsumerState(ListConsumerStateReq) returns (ListConsumerStateReply);
+  // 死信留档查询（只读；重放属于 services/cron 的待接线项）
+  rpc ListDeadLetters(ListDeadLettersReq) returns (ListDeadLettersReply);
+}

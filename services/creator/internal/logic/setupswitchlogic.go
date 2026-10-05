@@ -35,7 +35,7 @@ func (l *SetUpSwitchLogic) SetUpSwitch(in *rpc.UpSwitchReq) (*rpc.EmptyReply, er
 	if in.State != 0 && in.State != 1 {
 		return nil, errInvalidSwitchState
 	}
-	if err := l.svcCtx.Repository.SetUpSwitch(l.ctx, int32(in.Mid), in.From, in.State); err != nil {
+	if err := l.svcCtx.Repository.SetUpSwitch(l.ctx, in.Mid, in.From, in.State); err != nil {
 		l.Errorf("creator/SetUpSwitch: mid=%d from=%d state=%d err=%v", in.Mid, in.From, in.State, err)
 		return nil, err
 	}

@@ -1,0 +1,230 @@
+syntax = "proto3";
+
+package searchindexer.v1;
+
+option go_package = "go-video/services/search-indexer/rpc";
+
+// 说明：本契约定义 search-indexer（搜索索引构建）服务的对外 RPC。
+//
+// 数据所有权（AGENTS.md §5）：本服务只拥有「索引投影」相关表
+// （search_index_task / search_index_version / search_consumer_offset /
+//  search_dead_letter），不拥有稿件、媒资、目录、版权等主数据。
+// 因此 ContentDoc 的字段只能来自：
+//   1) 上游领域事件 payload（content.published.v1、engagement.action.v1）；
+//   2) 上游服务通过本 RPC 显式推送的事实快照（回填/重建）。
+// 禁止本服务直连 video/catalog/user-profile 等服务的 MySQL 表或 Redis 业务 key。
+//
+// 索引是投影而非事实源：所有写操作按 doc_revision（毫秒级事实版本）做
+// last-write-wins，旧版本永远不能覆盖新版本；重建走「新索引 + 别名切换」，
+// 查询别名（search-query 读取）在切换前后始终可用，实现零停机重建。
+
+// 空响应
+message EmptyReply {}
+
+// 内容类型（索引按内容类型区分字段来源与所有者）
+enum ContentType {
+  CONTENT_TYPE_UNSPECIFIED = 0; // 未指定（拒绝写入）
+  CONTENT_TYPE_UGC_VIDEO = 1;   // UGC/PUGC 稿件，所有者 video
+  CONTENT_TYPE_PGC_EPISODE = 2; // 版权内容剧集，所有者 catalog/rights
+  CONTENT_TYPE_LIVE_ROOM = 3;   // 直播间，所有者 live-room
+}
+
+// 内容在索引中的可见状态（与 AGENTS.md §8 投稿状态机的可检索子集对齐）
+enum ContentState {
+  CONTENT_STATE_UNSPECIFIED = 0; // 未指定（拒绝写入）
+  CONTENT_STATE_PENDING = 1;     // 已入库但未过审：仅运营侧可见，不参与公共检索
+  CONTENT_STATE_PUBLISHED = 2;   // 已发布：可检索
+  CONTENT_STATE_OFFLINE = 3;     // 下架：保留投影但不检索命中
+  CONTENT_STATE_EXPIRED = 4;     // 版权窗口过期：不检索命中
+  CONTENT_STATE_DELETED = 5;     // 删除：必须移除投影（见 DeleteContentDoc）
+}
+
+// HeatSnapshot 社区互动热度快照。
+// 注意：点赞/收藏/分享属于社区能力，不包含投币、订单、广告等商业化字段（AGENTS.md §1）。
+message HeatSnapshot {
+  int64 view_count = 1;      // 播放量快照（来自 SPM 事件，不由本服务计算）
+  int64 like_count = 2;      // 点赞数快照（engagement 事件）
+  int64 favorite_count = 3;  // 收藏数快照
+  int64 share_count = 4;     // 分享数快照
+  int64 comment_count = 5;   // 评论数快照
+  int64 danmaku_count = 6;   // 弹幕数快照
+  int32 heat_score = 7;      // 归一化热度分值 [0,1000]，由上游/SPM 计算后推送
+  int64 heat_revision = 8;   // 热度快照版本（Unix 毫秒），用于热度字段 last-write-wins
+}
+
+// ContentDoc 一条内容在搜索索引中的完整投影。
+// 字段来源约束：只允许事件 payload 或上游 RPC 推送；本服务不自行补齐事实字段。
+message ContentDoc {
+  int64 content_id = 1;              // 内容主键（aid / episode_id / room_id）
+  ContentType content_type = 2;      // 内容类型
+  string title = 3;                  // 标题
+  string description = 4;            // 简介（已在上游做敏感词/链接清洗）
+  string cover_url = 5;              // 封面 URL（只存 CDN 地址，不存对象存储密钥）
+  int64 author_mid = 6;              // 作者用户 ID（受控 ID，不含手机号/身份证等敏感信息）
+  string author_name = 7;            // 作者昵称快照（事实源仍是 user-profile）
+  int32 typeid = 8;                  // 分区 ID
+  string type_name = 9;              // 分区名快照
+  repeated string tags = 10;         // 标签
+  int64 duration_sec = 11;           // 时长（秒）
+  int64 publish_at = 12;             // 发布时间（Unix 秒，定时发布时为计划时间）
+  int64 ctime = 13;                  // 内容创建时间（Unix 秒）
+  ContentState state = 14;           // 可见状态
+  int64 doc_revision = 15;           // 事实版本（Unix 毫秒，来自 mtime 或版本号），必填且单调递增
+  HeatSnapshot heat = 16;            // 热度快照
+  int64 rights_expire_at = 17;       // 版权窗口结束时间（PGC），0 表示不适用
+  string language = 18;              // 主语言（如 zh-CN）
+  repeated string subtitle_langs = 19; // 字幕语言列表
+  bool sensitive = 20;               // 审核敏感标记（查询侧降权，不删除）
+  int32 schema_version = 21;         // 文档结构版本，默认 1
+}
+
+// --- 写入单篇投影 ---
+
+message UpsertContentDocReq {
+  int64 content_id = 1;      // 内容主键（与 doc.content_id 必须一致）
+  ContentDoc doc = 2;        // 上游推送的最新事实快照；为空时返回明确错误，不做「猜测式」重建
+  string request_id = 3;     // 幂等键（可选，仅用于日志与审计串联）
+  string source = 4;         // 触发来源标记：rpc / event / backfill / rebuild
+  bool force_overwrite = 5;  // 仅运维回填使用：跳过 revision 防旧覆盖新校验，默认 false
+}
+
+message UpsertContentDocReply {
+  int64 content_id = 1;   // 内容主键
+  string index = 2;       // 实际写入的物理索引名
+  string outcome = 3;     // written / skipped_stale / created
+  int64 doc_revision = 4; // 写入后索引中生效的版本
+  int64 took_ms = 5;      // 本次写入耗时（毫秒）
+}
+
+// --- 删除投影 ---
+
+message DeleteContentDocReq {
+  int64 content_id = 1;        // 内容主键
+  ContentType content_type = 2; // 内容类型（用于分索引/校验）
+  string reason = 3;           // 删除原因：offline / expired / deleted / copyright_takedown
+  bool purge = 4;              // true 物理删除文档；false 仅把 state 置为不可检索
+}
+
+message DeleteContentDocReply {
+  bool deleted = 1;   // 是否真实删除了文档（false 表示仅降级为不可检索或未命中）
+  string index = 2;   // 操作的物理索引名
+  string outcome = 3; // deleted / marked / not_found
+}
+
+// --- 重建任务 ---
+
+message SubmitRebuildTaskReq {
+  string scope = 1;        // 重建范围：full / partition / content_type
+  string scope_value = 2;  // partition 时为 typeid 区间 "1000-1999"；content_type 时为类型枚举值 1/2/3
+  string alias = 3;        // 查询别名，空表示默认别名（OpenSearch.IndexPrefix）
+  string request_id = 4;   // 幂等键（必填）：同 request_id 重复提交返回同一 task_id
+  string operator = 5;     // 提交人（管理员账号或 cron job 名）
+  reserved 6, 7;           // 曾计划开放 source_index/slice_size；重建数据来源固定为别名当前 active 索引，切片大小由服务端配置，避免任务表无列可存
+}
+
+message SubmitRebuildTaskReply {
+  string task_id = 1;      // 任务 ID（ULID）
+  string target_index = 2; // 预分配的新物理索引名
+  string state = 3;        // pending / running
+  bool duplicated = 4;     // true 表示命中 request_id 幂等，返回的是既有任务
+}
+
+// RebuildTask 重建任务投影（对应 search_index_task 表）。
+message RebuildTask {
+  string task_id = 1;      // 任务 ID
+  string scope = 2;        // full / partition / content_type
+  string scope_value = 3;  // 范围取值
+  string state = 4;        // pending / running / succeeded / failed / canceled
+  string cursor_value = 5; // 续跑游标（content_id 区间下界）
+  int64 total = 6;         // 预计总量
+  int64 processed = 7;     // 已处理
+  int64 failed = 8;        // 失败数
+  string target_index = 9; // 目标索引
+  string alias = 10;       // 目标别名
+  string operator = 11;    // 提交人
+  string request_id = 12;  // 幂等键
+  int64 ctime = 13;        // 创建时间（Unix 秒）
+  int64 mtime = 14;        // 修改时间（Unix 秒）
+  int64 started_at = 15;   // 开始执行时间（Unix 秒）
+  int64 finished_at = 16;  // 结束时间（Unix 秒）
+  string last_error = 17;  // 最近一次失败原因（脱敏）
+  int64 dlq_count = 18;    // 观测值：当前待处理死信总数（重建期间事件消费失败的积压量）
+}
+
+message GetRebuildTaskReq {
+  string task_id = 1; // 任务 ID
+}
+
+message ListRebuildTasksReq {
+  string state = 1;  // 按状态过滤，空表示全部
+  string cursor = 2; // 上一页返回的 next_cursor，空表示从头开始
+  int32 limit = 3;   // 页大小，默认 20，最大 100（cursor 优先，避免深分页）
+}
+
+message ListRebuildTasksReply {
+  repeated RebuildTask tasks = 1; // 任务列表（按 ctime 倒序）
+  string next_cursor = 2;         // 下一页游标，空表示结束
+}
+
+// --- 别名切换（零停机重建的关键步骤） ---
+
+message SwitchAliasReq {
+  string alias = 1;                 // 查询别名，空表示默认别名（OpenSearch.IndexPrefix）
+  string target_index = 2;          // 新索引（必须先完成重建并校验），必须以 <alias>_ 开头
+  string expected_current = 3;      // 乐观校验：调用方认为当前指向的索引，必须匹配；空表示首次挂载别名
+  bool skip_health_check = 4;       // 跳过目标索引 doc 数健康校验（仅紧急回滚使用）
+  string operator = 5;              // 操作人
+}
+
+message SwitchAliasReply {
+  string alias = 1;          // 别名
+  string previous_index = 2; // 切换前指向
+  string current_index = 3;  // 切换后指向
+  int64 doc_count = 4;       // 新索引 doc 数
+  string record_state = 5;   // 版本记录状态：active / history
+}
+
+// --- 索引健康 ---
+
+message GetIndexHealthReq {
+  string alias = 1; // 指定别名；空表示返回全部已登记别名
+}
+
+// AliasStatus 单个别名的健康投影。
+message AliasStatus {
+  string alias = 1;          // 别名
+  string active_index = 2;   // 当前指向的物理索引
+  string schema_version = 3; // 索引结构版本（如 v1）
+  int64 doc_count = 4;       // doc 数（读不到为 -1）
+  bool index_exists = 5;     // 物理索引是否存在
+  string health = 6;         // green / yellow / red / missing
+  string state = 7;          // 版本记录状态：active / retiring / history
+}
+
+message GetIndexHealthReply {
+  repeated AliasStatus aliases = 1; // 各别名状态
+  int64 retry_pending = 2;          // 待重试事件数（search_consumer_offset state=retry）
+  int64 dead_letter = 3;            // 死信数量（search_dead_letter）
+  string overall_state = 4;         // ok / degraded / down
+}
+
+// SearchIndexer 搜索索引构建服务。
+// 调用方：services/operation（管理后台重建/切换）、services/cron（回填）、
+// 以及本服务 internal/consumer（事件消费走同一 Repository 写入路径）。
+service SearchIndexer {
+  // 按 content_id 写入/覆盖一条内容投影（上游显式触发或回填）。
+  // doc 必须携带 doc_revision；旧版本默认被拒绝，保证乱序/迟到事件不破坏终态。
+  rpc UpsertContentDoc(UpsertContentDocReq) returns (UpsertContentDocReply);
+  // 下架/删除时移除或降级投影，并说明 CDN/搜索投影一致性处理。
+  rpc DeleteContentDoc(DeleteContentDocReq) returns (DeleteContentDocReply);
+  // 提交全量/分区重建任务（request_id 幂等），返回 task_id 与预分配目标索引。
+  rpc SubmitRebuildTask(SubmitRebuildTaskReq) returns (SubmitRebuildTaskReply);
+  // 查询单个重建任务进度。
+  rpc GetRebuildTask(GetRebuildTaskReq) returns (RebuildTask);
+  // 分页查询重建任务（cursor + 状态过滤）。
+  rpc ListRebuildTasks(ListRebuildTasksReq) returns (ListRebuildTasksReply);
+  // 把查询别名从旧索引切到新版本索引（expected_current 乐观校验，失败返回明确错误）。
+  rpc SwitchAlias(SwitchAliasReq) returns (SwitchAliasReply);
+  // 返回各别名/索引的 doc 数与健康状态，以及重试/死信积压。
+  rpc GetIndexHealth(GetIndexHealthReq) returns (GetIndexHealthReply);
+}

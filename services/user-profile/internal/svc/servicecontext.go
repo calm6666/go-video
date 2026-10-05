@@ -20,7 +20,7 @@ type ServiceContext struct {
 
 // NewServiceContext 构造 ServiceContext。
 func NewServiceContext(c config.Config) *ServiceContext {
-	rds := redis.MustNewRedis(c.Redis)
+	rds := redis.MustNewRedis(c.CacheRedis)
 	conn := sqlx.NewMysql(c.DataSource)
 
 	repo := repository.New(rds, conn, c)

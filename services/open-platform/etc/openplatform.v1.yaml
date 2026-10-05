@@ -1,0 +1,59 @@
+Name: openplatform.v1.rpc
+# 8151：批次 D1 分配给 open-platform 的端口（与 private-message 8150 同批，避开 8110+ 已用区间）。
+# 不能用 8080——那是 gateway/app 的 HTTP 监听端口。
+ListenOn: 0.0.0.0:8151
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: openplatform.v1.rpc
+
+# 业务缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会触发 conflict key redis）
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL DSN（仅本地示例）：用户名保留、口令一律留空。
+# 本服务存的是凭证哈希与 HMAC pepper 派生材料，示例配置不得携带任何可用口令；
+# 生产与本地真实口令都从配置中心/Secret 注入，或按 docs/commands.md §8 用
+# scripts/migrate.ps1 的 -OverrideUser/-OverridePassword 临时传入。
+DataSource: root@tcp(127.0.0.1:3306)/go_video_open_platform?charset=utf8mb4&parseTime=true&loc=Local
+
+# 凭证 TTL 与配额/回调参数
+OpenPlatform:
+  # 授权码必须短期：只允许 (0,600] 秒
+  AuthCodeTTLSeconds: 60
+  AccessTokenTTLSeconds: 3600
+  RefreshTokenTTLSeconds: 2592000
+  # 新签发 secret 的有效期（天），0 表示长期有效、靠轮换与吊销
+  SecretValidDays: 0
+  RotationGraceSeconds: 3600
+  PageSize: 20
+  MaxPageSize: 50
+  MaxRedirectURIs: 5
+  MaxRedirectURIBytes: 512
+  MaxWebhookEndpointsPerApp: 20
+  WebhookMaxAttempts: 6
+  WebhookRetryBaseSeconds: 30
+  WebhookRetryMaxSeconds: 3600
+  WebhookLeaseSeconds: 60
+  WebhookHTTPTimeoutMS: 5000
+  WebhookPayloadMaxBytes: 32768
+  # 投递正文保留天数：到期清空 payload 列，只留摘要与投递结论
+  WebhookPayloadRetentionDays: 30
+  TokenRetentionDays: 90
+  AuthCodeMaxPerUserPerHour: 30
+  QuotaRecomputeLookbackSeconds: 7200
+  # token 校验结果缓存：撤销位点比对仍走 DB，因此缓存只延后「拒绝」，不延后「允许」
+  IntrospectCacheSeconds: 5
+  PostQps: 400
+  PostBurst: 100
+
+# 服务端秘密：只从 Secret/Vault 注入，示例配置必须留空（AGENTS.md §4）。
+# 留空时验签与哈希路径返回 model.ErrSecretVerificationUnavailable，
+# 不会退化成「无 pepper 比较」或直接放行。
+Security:
+  CredentialPepper: ""
+  WebhookMasterPepper: ""
+  KeyVersion: 1
+  SignatureSkewSeconds: 300
+  NonceTTLSeconds: 600

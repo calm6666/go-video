@@ -1,0 +1,332 @@
+syntax = "proto3";
+
+package tradeorder.v1;
+
+option go_package = "go-video/services/trade-order/rpc";
+
+// 商业订单域契约。
+//
+// 数据所有权（§5）：订单事实与履约指令只属于本服务。payment 只写资金台账，
+// membership 只写会员授予，两者都不得回写订单状态；本服务通过 RPC 驱动它们。
+//
+// 状态机（只允许下列迁移，其他一律拒绝）：
+//   CREATED → PAYING → PAID → FULFILLING → FULFILLED
+//   CREATED/PAYING → CANCELLED
+//   PAID/FULFILLING → FAILED              （受理成功但无法履约，等人工或 cron 重试）
+//   FULFILLED → REFUND_REQUESTED → REFUND_APPROVED → REFUNDED
+//   REFUND_REQUESTED → FULFILLED          （驳回退款，回到原状态）
+//
+// 沙箱语义：本服务不碰钱。金额一律以服务端重算为准（下单时向 membership 取套餐价，
+// 客户端上报的 amount_minor 只做一致性校验，不作为扣款依据）；pay_method 只有
+// BALANCE 与 SANDBOX_CHANNEL 两档，都不产生真实资金移动。
+// 需要真实渠道才成立的能力（渠道回调、原路退回、发票、对账单下载）不开接口。
+
+// 空响应
+message EmptyReply {}
+
+enum OrderBizType {
+  ORDER_BIZ_TYPE_UNSPECIFIED = 0;
+  ORDER_BIZ_TYPE_MEMBERSHIP = 1; // 买会员：履约调 membership.GrantMembership
+  ORDER_BIZ_TYPE_COIN_PACK = 2;  // 买硬币包：履约调 coin.GrantCoin（发的是社区硬币，不是钱）
+}
+
+enum OrderState {
+  ORDER_STATE_UNSPECIFIED = 0;
+  ORDER_STATE_CREATED = 1;
+  ORDER_STATE_PAYING = 2;
+  ORDER_STATE_PAID = 3;
+  ORDER_STATE_FULFILLING = 4;
+  ORDER_STATE_FULFILLED = 5;
+  ORDER_STATE_CANCELLED = 6;
+  ORDER_STATE_FAILED = 7;
+  ORDER_STATE_REFUND_REQUESTED = 8;
+  ORDER_STATE_REFUND_APPROVED = 9;
+  ORDER_STATE_REFUNDED = 10;
+  ORDER_STATE_REFUND_REJECTED = 11;
+}
+
+enum PayMethod {
+  PAY_METHOD_UNSPECIFIED = 0;
+  PAY_METHOD_BALANCE = 1;        // 余额支付（payment 扣台账）
+  PAY_METHOD_SANDBOX_CHANNEL = 2; // 沙箱渠道（payment 直接置 PAID）
+}
+
+// 履约结果。区别于订单状态：履约是「该给的东西给到没有」。
+enum FulfillState {
+  FULFILL_STATE_UNSPECIFIED = 0;
+  FULFILL_STATE_PENDING = 1;
+  FULFILL_STATE_SUCCEEDED = 2;
+  FULFILL_STATE_FAILED = 3;
+}
+
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0;
+  PLATFORM_ANDROID = 1;
+  PLATFORM_IOS = 2;
+  PLATFORM_HARMONY = 3;
+  PLATFORM_DESKTOP = 4;
+  PLATFORM_WEB = 5;
+}
+
+message OrderInfo {
+  string order_no = 1;
+  int64 mid = 2;
+  OrderBizType biz_type = 3;
+  int64 plan_id = 4;         // 会员套餐或硬币包 SKU
+  string plan_code = 5;
+  string title = 6;          // 下单时快照的商品名（改价改名不影响历史单）
+  int32 quantity = 7;        // 份数
+  int32 duration_days = 8;   // 会员单：本次总时长（单价时长 × 份数）
+  int32 coin_amount = 9;     // 硬币包：本次发放硬币数
+  int64 unit_price_minor = 10; // 服务端重算的单价快照
+  int64 amount_minor = 11;     // 应付=实付总额
+  int64 refunded_minor = 12;
+  string currency = 13;
+  PayMethod pay_method = 14;
+  OrderState state = 15;
+  FulfillState fulfill_state = 16;
+  int32 fulfill_attempts = 17;
+  string fulfill_detail = 18; // 最近一次失败摘要（不写堆栈、不写 PII）
+  string payment_no = 19;
+  string grant_ref = 20;      // 履约产物引用：会员 grant_id 或硬币 flow_id
+  int64 expire_at = 21;       // 未支付关单时间
+  string client_trace_id = 22;
+  Platform platform = 23;
+  string request_id = 24;     // 建单幂等键
+  int64 version = 25;         // CAS
+  int64 created_at = 26;
+  int64 updated_at = 27;
+  int64 paid_at = 28;
+  int64 fulfilled_at = 29;
+  int64 closed_at = 30;
+}
+
+// 状态流转台账：每次迁移一行，含操作者与理由。
+message OrderEventInfo {
+  int64 event_id = 1;
+  string order_no = 2;
+  OrderState from_state = 3;
+  OrderState to_state = 4;
+  string operator = 5;   // "user" / 运营工号 / "cron" / "system"
+  string reason = 6;
+  int64 ctime = 7;
+}
+
+// --- 建单与读取 ---
+
+message CreateOrderReq {
+  int64 mid = 1;
+  OrderBizType biz_type = 2;
+  int64 plan_id = 3;
+  string plan_code = 4;  // 与 plan_id 二选一，服务端以套餐表为准
+  int32 quantity = 5;    // <=0 视为 1；上限由服务侧配置裁剪
+  PayMethod pay_method = 6;
+  int64 amount_minor = 7;   // 客户端上报值：与服务端重算不一致即拒绝（防前端改价）
+  string request_id = 8;    // 必填幂等键
+  Platform platform = 9;
+  string client_trace_id = 10;
+  string title = 11;        // 可空；服务端优先用套餐名快照
+}
+
+message CreateOrderReply {
+  bool duplicated = 1;      // 命中 request_id 重放：返回首次订单，未重复建单
+  OrderInfo order = 2;
+  // 沙箱下建单即受理，受理结果在这里给全，避免客户端再查一次。
+  bool accepted = 3;
+  string reject_reason = 4; // accepted=false 时的可读结论（余额不足等），不是错误码
+}
+
+message GetOrderReq {
+  string order_no = 1;
+  int64 mid = 2; // 非 0 时校验归属，越权返回 not-found 语义而不是 FORBIDDEN
+}
+
+message GetOrderReply {
+  bool found = 1;
+  OrderInfo order = 2;
+}
+
+message ListMyOrdersReq {
+  int64 mid = 1;
+  OrderState state = 2;      // UNSPECIFIED 不过滤
+  OrderBizType biz_type = 3;
+  int64 page = 4;
+  int64 size = 5;
+}
+
+message ListMyOrdersReply {
+  repeated OrderInfo orders = 1;
+  int64 total = 2;
+  int64 page = 3;
+  int64 size = 4;
+}
+
+message ListOrdersReq {
+  // 运营面：mid=0 且 filters 非空才允许全表扫，无界扫描必须拒绝。
+  int64 mid = 1;
+  OrderState state = 2;
+  OrderBizType biz_type = 3;
+  PayMethod pay_method = 4;
+  string order_no = 5;
+  string payment_no = 6;
+  int64 from_ts = 7;
+  int64 to_ts = 8;
+  int64 page = 9;
+  int64 size = 10;
+  int64 max_window_seconds = 11; // 0 表示用服务侧默认窗口
+}
+
+message ListOrdersReply {
+  repeated OrderInfo orders = 1;
+  int64 total = 2;
+  int64 page = 3;
+  int64 size = 4;
+}
+
+message ListOrderEventsReq {
+  string order_no = 1;
+  int64 page = 2;
+  int64 size = 3;
+}
+
+message ListOrderEventsReply {
+  repeated OrderEventInfo events = 1;
+  int64 total = 2;
+  int64 page = 3;
+  int64 size = 4;
+}
+
+// --- 生命周期 ---
+
+// 取消（未支付前）。已支付订单要走退款，不能靠取消把钱吞掉。
+message CancelOrderReq {
+  string order_no = 1;
+  int64 mid = 2;        // 用户自助取消时校验归属
+  string operator = 3;  // 运营取消时必填；与 mid 二者取其一作为主体
+  string request_id = 4;
+  string reason = 5;    // 必填
+}
+
+message CancelOrderReply {
+  bool duplicated = 1;
+  OrderInfo order = 2;
+}
+
+// 绑定支付结论并把订单推进到 PAID。幂等：已 PAID 及之后返回 duplicated=true。
+// 供 cron/对账补偿使用（沙箱下建单链路已内联推进，这一步只兜「受理成功但订单没推进」的卡单）。
+message BindPaymentReq {
+  string order_no = 1;
+  string payment_no = 2;
+  int64 amount_minor = 3; // 与订单金额校验，不一致拒绝
+  string operator = 4;
+  string request_id = 5;
+}
+
+message BindPaymentReply {
+  bool duplicated = 1;
+  OrderInfo order = 2;
+}
+
+// 执行履约（幂等，可重试）。PAID/FULFILLING 状态才受理；
+// 会员单调 membership.GrantMembership，硬币包单调 coin.GrantCoin，
+// 成功后订单置 FULFILLED 并把 grant/flow 引用写进 grant_ref。
+message FulfillOrderReq {
+  string order_no = 1;
+  string operator = 2;    // "system" / "cron" / 运营工号
+  string request_id = 3;
+}
+
+message FulfillOrderReply {
+  bool fulfilled = 1;
+  bool duplicated = 2;    // 已履约，未重复发放
+  OrderInfo order = 3;
+  string detail = 4;      // 失败原因摘要；成功时可为空
+}
+
+// cron：扫描卡在 PAYING/PAID/FULFILLING 且超时的订单。
+message ListStuckOrdersReq {
+  int64 older_than_seconds = 1; // 更新至今超过该秒数才算卡单
+  repeated OrderState states = 2;
+  int64 limit = 3;
+}
+
+message ListStuckOrdersReply {
+  repeated OrderInfo orders = 1;
+}
+
+// --- 退款 ---
+
+// 申请退款（用户或运营代提）。只允许对 FULFILLED/PAID 的单发起。
+message RequestRefundReq {
+  string order_no = 1;
+  int64 mid = 2;
+  string operator = 3;
+  int64 amount_minor = 4; // 0 表示全额；部分退款由服务侧按已消耗时长折算上限
+  string reason = 5;      // 必填
+  string request_id = 6;
+}
+
+message RequestRefundReply {
+  bool duplicated = 1;
+  OrderInfo order = 2;
+}
+
+// 审批通过：先调 payment 退款（退回余额），再按业务回收权益
+// （会员单调 membership.RevokeMembership 扣回未使用时长，硬币包单扣回未消耗硬币）。
+// 回收失败不撤销已退的款，但订单停在 REFUND_APPROVED 并把差异写进 fulfill_detail。
+message ApproveRefundReq {
+  string order_no = 1;
+  string operator = 2;    // 必填：审批人只能由网关按会话渲染
+  string request_id = 3;
+  string reason = 4;      // 必填
+  int64 expected_version = 5; // 订单 CAS：防止审批与用户取消并发
+}
+
+message ApproveRefundReply {
+  bool duplicated = 1;
+  OrderInfo order = 2;
+  string refund_no = 3;
+  string revoke_detail = 4; // 权益回收结论（含「已退但未回收」这种部分成功）
+}
+
+message RejectRefundReq {
+  string order_no = 1;
+  string operator = 2;
+  string request_id = 3;
+  string reason = 4; // 必填
+}
+
+message RejectRefundReply {
+  bool duplicated = 1;
+  OrderInfo order = 2;
+}
+
+// TradeOrder 商业订单服务。
+service TradeOrder {
+  // 下单（服务端重算金额，沙箱下内联受理）
+  rpc CreateOrder(CreateOrderReq) returns (CreateOrderReply);
+  // 订单详情（带归属校验）
+  rpc GetOrder(GetOrderReq) returns (GetOrderReply);
+  // 我的订单
+  rpc ListMyOrders(ListMyOrdersReq) returns (ListMyOrdersReply);
+  // 运营面订单查询（有界窗口）
+  rpc ListOrders(ListOrdersReq) returns (ListOrdersReply);
+  // 订单状态流转台账
+  rpc ListOrderEvents(ListOrderEventsReq) returns (ListOrderEventsReply);
+
+  // 取消未支付订单
+  rpc CancelOrder(CancelOrderReq) returns (CancelOrderReply);
+  // 绑定支付结论（补偿推进）
+  rpc BindPayment(BindPaymentReq) returns (BindPaymentReply);
+  // 执行/重试履约
+  rpc FulfillOrder(FulfillOrderReq) returns (FulfillOrderReply);
+  // cron：卡单扫描
+  rpc ListStuckOrders(ListStuckOrdersReq) returns (ListStuckOrdersReply);
+
+  // 申请退款
+  rpc RequestRefund(RequestRefundReq) returns (RequestRefundReply);
+  // 审批通过并回收权益
+  rpc ApproveRefund(ApproveRefundReq) returns (ApproveRefundReply);
+  // 驳回退款
+  rpc RejectRefund(RejectRefundReq) returns (RejectRefundReply);
+}

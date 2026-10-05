@@ -25,80 +25,2357 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 	)
 
 	server.AddRoutes(
-		[]rest.Route{
-			{
-				// 接收资料变更通知，失效缓存
-				Method:  http.MethodPost,
-				Path:    "/cache/clear",
-				Handler: cacheClearHandler(serverCtx),
-			},
-			{
-				// 失效指定用户的缓存
-				Method:  http.MethodGet,
-				Path:    "/cache/del",
-				Handler: cacheDelHandler(serverCtx),
-			},
-		},
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 接收资料变更通知，失效缓存
+					Method:  http.MethodPost,
+					Path:    "/cache/clear",
+					Handler: cacheClearHandler(serverCtx),
+				},
+				{
+					// 失效指定用户的缓存
+					Method:  http.MethodGet,
+					Path:    "/cache/del",
+					Handler: cacheDelHandler(serverCtx),
+				},
+			}...,
+		),
 		rest.WithPrefix("/admin/account"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 设置经验值（仅运营）
+					Method:  http.MethodPost,
+					Path:    "/exp/set",
+					Handler: expSetHandler(serverCtx),
+				},
+				{
+					// 增加经验值
+					Method:  http.MethodPost,
+					Path:    "/exp/update",
+					Handler: expUpdateHandler(serverCtx),
+				},
+				{
+					// 撤销节操值变更
+					Method:  http.MethodPost,
+					Path:    "/moral/undo",
+					Handler: moralUndoHandler(serverCtx),
+				},
+				{
+					// 变更单个用户节操值
+					Method:  http.MethodPost,
+					Path:    "/moral/update",
+					Handler: moralUpdateHandler(serverCtx),
+				},
+				{
+					// 批量变更节操值
+					Method:  http.MethodPost,
+					Path:    "/morals/update",
+					Handler: moralsUpdateHandler(serverCtx),
+				},
+				{
+					// 添加用户属性变更审核
+					Method:  http.MethodPost,
+					Path:    "/property/review/add",
+					Handler: propertyReviewHandler(serverCtx),
+				},
+				{
+					// 按证件号批量查询 mid
+					Method:  http.MethodGet,
+					Path:    "/realname/mid/by/card",
+					Handler: realnameMidByCardHandler(serverCtx),
+				},
+				{
+					// 查询脱敏实名信息
+					Method:  http.MethodGet,
+					Path:    "/realname/stripped/info",
+					Handler: realnameStrippedHandler(serverCtx),
+				},
+				{
+					// 查询用户登录日志
+					Method:  http.MethodGet,
+					Path:    "/web/login/log",
+					Handler: loginLogHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/x/member"),
 	)
 
 	server.AddRoutes(
 		[]rest.Route{
 			{
-				// 设置经验值（仅运营）
-				Method:  http.MethodPost,
-				Path:    "/exp/set",
-				Handler: expSetHandler(serverCtx),
-			},
-			{
-				// 增加经验值
-				Method:  http.MethodPost,
-				Path:    "/exp/update",
-				Handler: expUpdateHandler(serverCtx),
-			},
-			{
-				// 撤销节操值变更
-				Method:  http.MethodPost,
-				Path:    "/moral/undo",
-				Handler: moralUndoHandler(serverCtx),
-			},
-			{
-				// 变更单个用户节操值
-				Method:  http.MethodPost,
-				Path:    "/moral/update",
-				Handler: moralUpdateHandler(serverCtx),
-			},
-			{
-				// 批量变更节操值
-				Method:  http.MethodPost,
-				Path:    "/morals/update",
-				Handler: moralsUpdateHandler(serverCtx),
-			},
-			{
-				// 添加用户属性变更审核
-				Method:  http.MethodPost,
-				Path:    "/property/review/add",
-				Handler: propertyReviewHandler(serverCtx),
-			},
-			{
-				// 按证件号批量查询 mid
+				// 分页查询稿件（按 mid/typeid/state 过滤）
 				Method:  http.MethodGet,
-				Path:    "/realname/mid/by/card",
-				Handler: realnameMidByCardHandler(serverCtx),
+				Path:    "/submissions",
+				Handler: listVideoSubmissionsHandler(serverCtx),
 			},
 			{
-				// 查询脱敏实名信息
+				// 查询稿件详情
 				Method:  http.MethodGet,
-				Path:    "/realname/stripped/info",
-				Handler: realnameStrippedHandler(serverCtx),
-			},
-			{
-				// 查询用户登录日志
-				Method:  http.MethodGet,
-				Path:    "/web/login/log",
-				Handler: loginLogHandler(serverCtx),
+				Path:    "/submissions/:aid",
+				Handler: getVideoSubmissionHandler(serverCtx),
 			},
 		},
-		rest.WithPrefix("/x/member"),
+		rest.WithPrefix("/admin/video"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 推进稿件状态机（校验合法转换，禁止直接置为 PUBLISHED）
+					Method:  http.MethodPost,
+					Path:    "/submissions/:aid/transition",
+					Handler: transitionVideoSubmissionHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/video"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 分页查询作品
+				Method:  http.MethodGet,
+				Path:    "/works",
+				Handler: listCatalogWorksHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/catalog"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 运营创建集
+					Method:  http.MethodPost,
+					Path:    "/episodes",
+					Handler: createCatalogEpisodeHandler(serverCtx),
+				},
+				{
+					// 下架集
+					Method:  http.MethodPost,
+					Path:    "/episodes/:epid/offline",
+					Handler: offlineCatalogEpisodeHandler(serverCtx),
+				},
+				{
+					// 上架集（状态流转到 PUBLISHED，需 rights 校验）
+					Method:  http.MethodPost,
+					Path:    "/episodes/:epid/publish",
+					Handler: publishCatalogEpisodeHandler(serverCtx),
+				},
+				{
+					// 运营创建季
+					Method:  http.MethodPost,
+					Path:    "/seasons",
+					Handler: createCatalogSeasonHandler(serverCtx),
+				},
+				{
+					// 运营创建作品
+					Method:  http.MethodPost,
+					Path:    "/works",
+					Handler: createCatalogWorkHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/catalog"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 分页查询版权合同
+				Method:  http.MethodGet,
+				Path:    "/contracts",
+				Handler: listRightsContractsHandler(serverCtx),
+			},
+			{
+				// 分页查询播放窗口
+				Method:  http.MethodGet,
+				Path:    "/windows",
+				Handler: listRightsWindowsHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/rights"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 运营创建版权合同
+					Method:  http.MethodPost,
+					Path:    "/contracts",
+					Handler: createRightsContractHandler(serverCtx),
+				},
+				{
+					// 运营创建播放窗口
+					Method:  http.MethodPost,
+					Path:    "/windows",
+					Handler: createRightsWindowHandler(serverCtx),
+				},
+				{
+					// 手动过期播放窗口
+					Method:  http.MethodPost,
+					Path:    "/windows/:window_id/expire",
+					Handler: expireRightsWindowHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/rights"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 查询审核结论（按任务 ID）
+				Method:  http.MethodGet,
+				Path:    "/results/:task_id",
+				Handler: getModerationResultHandler(serverCtx),
+			},
+			{
+				// 分页查询审核任务
+				Method:  http.MethodGet,
+				Path:    "/tasks",
+				Handler: listModerationTasksHandler(serverCtx),
+			},
+			{
+				// 查询审核任务详情
+				Method:  http.MethodGet,
+				Path:    "/tasks/:task_id",
+				Handler: getModerationTaskHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/moderation"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 处理申诉
+					Method:  http.MethodPost,
+					Path:    "/appeals",
+					Handler: processModerationAppealHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/moderation"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 分页查询转码任务（按 asset_id/state 过滤）
+				Method:  http.MethodGet,
+				Path:    "/tasks",
+				Handler: listTranscodeTasksHandler(serverCtx),
+			},
+			{
+				// 查询转码任务详情
+				Method:  http.MethodGet,
+				Path:    "/tasks/:task_id",
+				Handler: getTranscodeTaskHandler(serverCtx),
+			},
+			{
+				// 分页查询转码模板
+				Method:  http.MethodGet,
+				Path:    "/templates",
+				Handler: listTranscodeTemplatesHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/transcode"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 运营创建转码模板
+					Method:  http.MethodPost,
+					Path:    "/templates",
+					Handler: createTranscodeTemplateHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/transcode"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 查询单个媒资元数据
+				Method:  http.MethodGet,
+				Path:    "/:asset_id",
+				Handler: getAssetHandler(serverCtx),
+			},
+			{
+				// 分页查询媒资列表（按 mid/state 过滤）
+				Method:  http.MethodGet,
+				Path:    "/list",
+				Handler: listAssetsHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/asset"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 分页查询屏蔽词（scope/oid/only_enabled 过滤）
+				Method:  http.MethodGet,
+				Path:    "/block_words",
+				Handler: listBlockWordsHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/danmaku"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 屏蔽词新增/停用/删除（action 1/2/3，operator_mid 必填）
+					Method:  http.MethodPost,
+					Path:    "/block_word",
+					Handler: blockWordHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/danmaku"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 查询索引/别名健康与重试、死信积压
+				Method:  http.MethodGet,
+				Path:    "/health",
+				Handler: getIndexHealthHandler(serverCtx),
+			},
+			{
+				// 查询单个重建任务进度
+				Method:  http.MethodGet,
+				Path:    "/rebuild/:task_id",
+				Handler: getRebuildTaskHandler(serverCtx),
+			},
+			{
+				// 分页查询重建任务（cursor + state 过滤，limit 上限 100）
+				Method:  http.MethodGet,
+				Path:    "/rebuilds",
+				Handler: listRebuildTasksHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/search"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 切换查询别名到新版本索引（expected_current 乐观校验）
+					Method:  http.MethodPost,
+					Path:    "/alias/switch",
+					Handler: switchAliasHandler(serverCtx),
+				},
+				{
+					// 提交索引重建任务（request_id 幂等，scope full/partition/content_type）
+					Method:  http.MethodPost,
+					Path:    "/rebuild",
+					Handler: submitRebuildTaskHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/search"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 查询设备画像（只回传 device_hash）
+				Method:  http.MethodGet,
+				Path:    "/device/:device_id",
+				Handler: getRiskDeviceHandler(serverCtx),
+			},
+			{
+				// 分页查询黑白名单条目
+				Method:  http.MethodGet,
+				Path:    "/list_entries",
+				Handler: listRiskListEntriesHandler(serverCtx),
+			},
+			{
+				// 分页查询处罚记录
+				Method:  http.MethodGet,
+				Path:    "/punishments",
+				Handler: listPunishmentsHandler(serverCtx),
+			},
+			{
+				// 分页查询风控规则
+				Method:  http.MethodGet,
+				Path:    "/rules",
+				Handler: listRiskRulesHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/risk"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 调试用同步裁决一次受保护动作（返回可解释裁决与命中明细）
+					Method:  http.MethodPost,
+					Path:    "/check",
+					Handler: riskCheckHandler(serverCtx),
+				},
+				{
+					// 写入/更新设备画像与设备-账号关联
+					Method:  http.MethodPost,
+					Path:    "/device",
+					Handler: upsertRiskDeviceHandler(serverCtx),
+				},
+				{
+					// 新增/更新黑白名单条目
+					Method:  http.MethodPost,
+					Path:    "/list_entry",
+					Handler: upsertRiskListEntryHandler(serverCtx),
+				},
+				{
+					// 下发处罚（operator_id 与 idempotency_key 必填）
+					Method:  http.MethodPost,
+					Path:    "/punishment",
+					Handler: applyPunishmentHandler(serverCtx),
+				},
+				{
+					// 解除处罚（幂等，已终态返回当前状态）
+					Method:  http.MethodPost,
+					Path:    "/punishment/lift",
+					Handler: liftPunishmentHandler(serverCtx),
+				},
+				{
+					// 调试用行为上报（写滑窗计数，event_id 幂等）
+					Method:  http.MethodPost,
+					Path:    "/report",
+					Handler: riskReportHandler(serverCtx),
+				},
+				{
+					// 新增/更新风控规则（版本递增，operator_id 必填）
+					Method:  http.MethodPost,
+					Path:    "/rule",
+					Handler: upsertRiskRuleHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/risk"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 管理员登录（PBKDF2 校验 + 防爆破锁定 + 可选二次校验），签发后台 token
+				Method:  http.MethodPost,
+				Path:    "/login",
+				Handler: adminLoginHandler(serverCtx),
+			},
+			{
+				// 权限判定调试入口（token 或 admin_id + resource + action，返回判定与命中角色）
+				Method:  http.MethodPost,
+				Path:    "/permission/verify",
+				Handler: verifyAdminPermissionHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/operation"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 分页查询管理操作审计索引（正文证据在被操作的领域服务）
+					Method:  http.MethodPost,
+					Path:    "/audit/list",
+					Handler: listAuditIndexHandler(serverCtx),
+				},
+				{
+					// 读取运营配置（默认走缓存，refresh=true 强制回源）
+					Method:  http.MethodPost,
+					Path:    "/config/get",
+					Handler: getOpsConfigHandler(serverCtx),
+				},
+				{
+					// 写入运营配置（expect_version 乐观锁，冲突需重新拉取）
+					Method:  http.MethodPost,
+					Path:    "/config/save",
+					Handler: saveOpsConfigHandler(serverCtx),
+				},
+				{
+					// 按管理员角色并集返回可见菜单（后台 Web 专用）
+					Method:  http.MethodPost,
+					Path:    "/menu/get",
+					Handler: getMenuHandler(serverCtx),
+				},
+				{
+					// 新建/更新菜单节点（menu_id 为 0 表示新建）
+					Method:  http.MethodPost,
+					Path:    "/menu/save",
+					Handler: saveMenuHandler(serverCtx),
+				},
+				{
+					// 创建权限点（resource + action 唯一）
+					Method:  http.MethodPost,
+					Path:    "/permission/create",
+					Handler: createPermissionHandler(serverCtx),
+				},
+				{
+					// 分页查询权限点（domain 为空表示全部域）
+					Method:  http.MethodPost,
+					Path:    "/permission/list",
+					Handler: listPermissionsHandler(serverCtx),
+				},
+				{
+					// 全量覆盖管理员角色（空数组表示清空）
+					Method:  http.MethodPost,
+					Path:    "/role/assign",
+					Handler: assignRolesHandler(serverCtx),
+				},
+				{
+					// 创建角色并绑定权限点
+					Method:  http.MethodPost,
+					Path:    "/role/create",
+					Handler: createRoleHandler(serverCtx),
+				},
+				{
+					// 删除角色（仍有成员时 operation 拒绝）
+					Method:  http.MethodPost,
+					Path:    "/role/delete",
+					Handler: deleteRoleHandler(serverCtx),
+				},
+				{
+					// 分页查询角色
+					Method:  http.MethodPost,
+					Path:    "/role/list",
+					Handler: listRolesHandler(serverCtx),
+				},
+				{
+					// 取消任务（仅 pending/running 可取消）
+					Method:  http.MethodPost,
+					Path:    "/task/cancel",
+					Handler: cancelAdminTaskHandler(serverCtx),
+				},
+				{
+					// 查询任务与步骤明细（task_id 或 request_id）
+					Method:  http.MethodPost,
+					Path:    "/task/get",
+					Handler: getAdminTaskHandler(serverCtx),
+				},
+				{
+					// 分页查询管理任务（state/task_type/operator_id 过滤）
+					Method:  http.MethodPost,
+					Path:    "/task/list",
+					Handler: listAdminTasksHandler(serverCtx),
+				},
+				{
+					// 推进任务（逐步骤调用下游 RPC，由 cron 或人工触发）
+					Method:  http.MethodPost,
+					Path:    "/task/run",
+					Handler: runAdminTaskHandler(serverCtx),
+				},
+				{
+					// 提交批量运营任务（op.request_id 幂等，步骤最多 1000）
+					Method:  http.MethodPost,
+					Path:    "/task/submit",
+					Handler: submitAdminTaskHandler(serverCtx),
+				},
+				{
+					// 创建管理员账号（初始口令只进不出，响应永不返回散列）
+					Method:  http.MethodPost,
+					Path:    "/user/create",
+					Handler: createAdminUserHandler(serverCtx),
+				},
+				{
+					// 禁用管理员账号（同时吊销全部会话）
+					Method:  http.MethodPost,
+					Path:    "/user/disable",
+					Handler: disableAdminUserHandler(serverCtx),
+				},
+				{
+					// 分页查询管理员账号（state/keyword 过滤，ps 上限 100）
+					Method:  http.MethodPost,
+					Path:    "/user/list",
+					Handler: listAdminUsersHandler(serverCtx),
+				},
+				{
+					// 更新管理员账号（备注/状态/重置口令，重置口令会吊销会话）
+					Method:  http.MethodPost,
+					Path:    "/user/update",
+					Handler: updateAdminUserHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/operation"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 分页查询目标下的根评论（含被折叠/待审状态，运营可见全量）
+				Method:  http.MethodGet,
+				Path:    "/list",
+				Handler: adminListCommentsHandler(serverCtx),
+			},
+			{
+				// 分页查询某根评论下的楼中楼
+				Method:  http.MethodGet,
+				Path:    "/replies",
+				Handler: adminListCommentRepliesHandler(serverCtx),
+			},
+			{
+				// 目标下的评论计数快照
+				Method:  http.MethodGet,
+				Path:    "/stats",
+				Handler: adminCommentStatsHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/comment"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 运营删除评论（admin=true，由 comment 服务写审计）
+					Method:  http.MethodPost,
+					Path:    "/delete",
+					Handler: adminDeleteCommentHandler(serverCtx),
+				},
+				{
+					// 运营置顶/取消置顶评论
+					Method:  http.MethodPost,
+					Path:    "/pin",
+					Handler: adminPinCommentHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/comment"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 分页查询死信（事件 ID/状态/topic 过滤）
+				Method:  http.MethodGet,
+				Path:    "/deadletter/list",
+				Handler: listNotifyDeadLettersHandler(serverCtx),
+			},
+			{
+				// 分页查询投递记录（mid/channel/state/biz_key/时间窗过滤）
+				Method:  http.MethodGet,
+				Path:    "/delivery/list",
+				Handler: listNotifyDeliveriesHandler(serverCtx),
+			},
+			{
+				// 查询单条投递记录与供应商回执
+				Method:  http.MethodGet,
+				Path:    "/delivery/status",
+				Handler: getNotifyDeliveryStatusHandler(serverCtx),
+			},
+			{
+				// 分页查询模板（code/channel/language/state 过滤）
+				Method:  http.MethodGet,
+				Path:    "/template/list",
+				Handler: listNotifyTemplatesHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/notification"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 重投死信（按 operator 记审计，返回新投递任务 ID）
+					Method:  http.MethodPost,
+					Path:    "/deadletter/retry",
+					Handler: retryNotifyDeadLetterHandler(serverCtx),
+				},
+				{
+					// 发布指定草稿版本（operator 必填，写审计）
+					Method:  http.MethodPost,
+					Path:    "/template/publish",
+					Handler: publishNotifyTemplateHandler(serverCtx),
+				},
+				{
+					// 模板渲染预览（不落库，缺变量时返回 missing_vars）
+					Method:  http.MethodPost,
+					Path:    "/template/render",
+					Handler: renderNotifyTemplateHandler(serverCtx),
+				},
+				{
+					// 新增/更新通知模板（publish=false 存草稿，true 直接发布新版本）
+					Method:  http.MethodPost,
+					Path:    "/template/upsert",
+					Handler: upsertNotifyTemplateHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/notification"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 分页查询分组下的 UP 主
+				Method:  http.MethodGet,
+				Path:    "/group/mids",
+				Handler: adminUpGroupMidsHandler(serverCtx),
+			},
+			{
+				// 查询全部 UP 主特殊分组（按分组 ID 升序投影）
+				Method:  http.MethodGet,
+				Path:    "/groups",
+				Handler: adminUpGroupsHandler(serverCtx),
+			},
+			{
+				// 查询高能联盟 UP 主签约信息
+				Method:  http.MethodGet,
+				Path:    "/high-ally-ups",
+				Handler: adminHighAllyUpsHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/creator"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 运营删除任意弹幕（admin=true，reason 落 op_log 审计）
+					Method:  http.MethodPost,
+					Path:    "/delete",
+					Handler: adminDeleteDanmakuHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/danmaku"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 下发系统/运营站内信（同事务写主体与收件行，idempotency_key 幂等）
+					Method:  http.MethodPost,
+					Path:    "/message/send",
+					Handler: adminSendInboxMessageHandler(serverCtx),
+				},
+				{
+					// 重算某用户未读快照并回填缓存（计数漂移修复工具，幂等）
+					Method:  http.MethodGet,
+					Path:    "/unread/recompute",
+					Handler: adminRecomputeInboxUnreadHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/inbox"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 分页查询归档批次（chain_key/state/时间过滤）
+				Method:  http.MethodPost,
+				Path:    "/archive/list",
+				Handler: auditListArchivesHandler(serverCtx),
+			},
+			{
+				// 哈希链完整性自证（按 chain_key + seq 区间重放，可增量续验）
+				Method:  http.MethodPost,
+				Path:    "/chain/verify",
+				Handler: auditVerifyChainHandler(serverCtx),
+			},
+			{
+				// 按 entry_id 或 event_id 取单条审计（found=false 表示不存在，不报 NotFound）
+				Method:  http.MethodPost,
+				Path:    "/entry/get",
+				Handler: auditGetEntryHandler(serverCtx),
+			},
+			{
+				// 分页检索审计条目（时间范围 + 至少一个收窄维度，由 audit 强制）
+				Method:  http.MethodPost,
+				Path:    "/entry/list",
+				Handler: auditListEntriesHandler(serverCtx),
+			},
+			{
+				// 查询导出任务（含短期签名下载地址与到期时间）
+				Method:  http.MethodPost,
+				Path:    "/export/get",
+				Handler: auditGetExportHandler(serverCtx),
+			},
+			{
+				// 分页查询导出任务（operator/state/创建时间过滤）
+				Method:  http.MethodPost,
+				Path:    "/export/list",
+				Handler: auditListExportsHandler(serverCtx),
+			},
+			{
+				// 分页查询保留期策略（state=0 表示全部）
+				Method:  http.MethodPost,
+				Path:    "/retention/list",
+				Handler: auditListRetentionHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/audit"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 归档一条哈希链的指定区间（先落 manifest 再标记热表，不物理删除）
+					Method:  http.MethodPost,
+					Path:    "/archive/run",
+					Handler: auditArchiveHandler(serverCtx),
+				},
+				{
+					// 提交审计导出任务（request_id 幂等，导出不走同步大查询）
+					Method:  http.MethodPost,
+					Path:    "/export/create",
+					Handler: auditCreateExportHandler(serverCtx),
+				},
+				{
+					// 手动推进一个导出任务（正常由 services/cron 驱动，这里是运营兜底）
+					Method:  http.MethodPost,
+					Path:    "/export/run",
+					Handler: auditRunExportHandler(serverCtx),
+				},
+				{
+					// 新建/更新保留期策略（expect_version 乐观锁，0 表示新建）
+					Method:  http.MethodPost,
+					Path:    "/retention/save",
+					Handler: auditSaveRetentionHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/audit"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 分页查询配置项（scope/keyword/state 过滤，ps 上限 100）
+				Method:  http.MethodPost,
+				Path:    "/config/list",
+				Handler: opsConfigListConfigsHandler(serverCtx),
+			},
+			{
+				// 分页查询某配置键的不可变版本历史（含当前正式版本号）
+				Method:  http.MethodPost,
+				Path:    "/config/versions",
+				Handler: opsConfigListVersionsHandler(serverCtx),
+			},
+			{
+				// 分页查询灰度规则（cfg_key/version/state 过滤）
+				Method:  http.MethodPost,
+				Path:    "/rollout/list",
+				Handler: opsListRolloutRulesHandler(serverCtx),
+			},
+			{
+				// 分页查询推荐位定义（page/state/platform 过滤）
+				Method:  http.MethodPost,
+				Path:    "/slot/list",
+				Handler: opsListSlotsHandler(serverCtx),
+			},
+			{
+				// 分页查询客户端开关（platform/switch_key/enabled 过滤）
+				Method:  http.MethodPost,
+				Path:    "/switch/list",
+				Handler: opsListSwitchesHandler(serverCtx),
+			},
+			{
+				// 专题详情（with_items=true 时附带条目，未命中返回 found=false）
+				Method:  http.MethodPost,
+				Path:    "/topic/get",
+				Handler: opsGetTopicHandler(serverCtx),
+			},
+			{
+				// 分页查询专题（state/zone/tag/keyword 过滤，online_only 附加生效窗口判定）
+				Method:  http.MethodPost,
+				Path:    "/topic/list",
+				Handler: opsListTopicsHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/ops"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 主动失效运行时缓存（target config/topic/slot/all，递增 epoch 并写审计）
+					Method:  http.MethodPost,
+					Path:    "/cache/refresh",
+					Handler: opsRefreshCacheHandler(serverCtx),
+				},
+				{
+					// 发布配置新版本（expect_version 乐观锁，可一并挂灰度规则，写 audit）
+					Method:  http.MethodPost,
+					Path:    "/config/publish",
+					Handler: opsPublishConfigHandler(serverCtx),
+				},
+				{
+					// 回滚到历史版本（生成新版本而不是删历史，change_type=rollback）
+					Method:  http.MethodPost,
+					Path:    "/config/rollback",
+					Handler: opsRollbackConfigHandler(serverCtx),
+				},
+				{
+					// 新建/更新灰度规则（按 cfg_key+version+name upsert）
+					Method:  http.MethodPost,
+					Path:    "/rollout/save",
+					Handler: opsSaveRolloutRuleHandler(serverCtx),
+				},
+				{
+					// 启停灰度规则（软状态切换，保留放量证据）
+					Method:  http.MethodPost,
+					Path:    "/rollout/state",
+					Handler: opsSetRolloutStateHandler(serverCtx),
+				},
+				{
+					// 全量覆盖坑位条目与排期（最多 200 条，position 不重复且不超过 capacity）
+					Method:  http.MethodPost,
+					Path:    "/slot/items/save",
+					Handler: opsSaveSlotItemsHandler(serverCtx),
+				},
+				{
+					// 新建/更新推荐位定义（code 唯一，capacity 上限由 ops-config 判定）
+					Method:  http.MethodPost,
+					Path:    "/slot/save",
+					Handler: opsSaveSlotHandler(serverCtx),
+				},
+				{
+					// 新建/更新客户端开关（按 switch_key + platform upsert）
+					Method:  http.MethodPost,
+					Path:    "/switch/save",
+					Handler: opsSaveSwitchHandler(serverCtx),
+				},
+				{
+					// 全量覆盖专题条目（最多 500 条，position 从 1 连续）
+					Method:  http.MethodPost,
+					Path:    "/topic/items/save",
+					Handler: opsSaveTopicItemsHandler(serverCtx),
+				},
+				{
+					// 新建/更新专题（zone_ids/tag_ids 全量覆盖引用，expect_version 乐观锁）
+					Method:  http.MethodPost,
+					Path:    "/topic/save",
+					Handler: opsSaveTopicHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/ops"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 游标分页任务变更审计（register/update/pause/resume/disable/trigger/retry/replay）
+				Method:  http.MethodPost,
+				Path:    "/audit/list",
+				Handler: cronListTaskAuditsHandler(serverCtx),
+			},
+			{
+				// 单个游标（未推进过返回 found=false 而不是错误）
+				Method:  http.MethodPost,
+				Path:    "/checkpoint/get",
+				Handler: cronGetCheckpointHandler(serverCtx),
+			},
+			{
+				// 游标分页增量游标（按 task_key,scope_key 升序）
+				Method:  http.MethodPost,
+				Path:    "/checkpoint/list",
+				Handler: cronListCheckpointsHandler(serverCtx),
+			},
+			{
+				// 调度健康度：积压、运行中、退避、近一小时失败、过期租约
+				Method:  http.MethodPost,
+				Path:    "/health/get",
+				Handler: cronSchedulerHealthHandler(serverCtx),
+			},
+			{
+				// 单个任务租约（fence_token 与 takeover_count 是抢占证据）
+				Method:  http.MethodPost,
+				Path:    "/lease/get",
+				Handler: cronGetLeaseHandler(serverCtx),
+			},
+			{
+				// 游标分页租约（only_expired=true 排查实例崩溃）
+				Method:  http.MethodPost,
+				Path:    "/lease/list",
+				Handler: cronListLeasesHandler(serverCtx),
+			},
+			{
+				// 单条执行记录（attempt/fence_token/lease_owner 全可见）
+				Method:  http.MethodPost,
+				Path:    "/run/get",
+				Handler: cronGetTaskRunHandler(serverCtx),
+			},
+			{
+				// 游标分页执行记录（按 planned_at,run_id 倒序）
+				Method:  http.MethodPost,
+				Path:    "/run/list",
+				Handler: cronListTaskRunsHandler(serverCtx),
+			},
+			{
+				// 单个任务定义（含 next_fire_at/last_error 与乐观锁 version）
+				Method:  http.MethodPost,
+				Path:    "/task/get",
+				Handler: cronGetTaskHandler(serverCtx),
+			},
+			{
+				// 游标分页任务定义（state/task_group/handler 过滤）
+				Method:  http.MethodPost,
+				Path:    "/task/list",
+				Handler: cronListTasksHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/cron"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 独立推进增量游标（expected_version CAS；值单调性由处理器保证）
+					Method:  http.MethodPost,
+					Path:    "/checkpoint/save",
+					Handler: cronSaveCheckpointHandler(serverCtx),
+				},
+				{
+					// 人工重试已终结执行（同计划时刻追加 attempt，保持幂等上下文）
+					Method:  http.MethodPost,
+					Path:    "/run/retry",
+					Handler: cronRetryRunHandler(serverCtx),
+				},
+				{
+					// 停用任务（终态，保留历史，只能重新注册恢复）
+					Method:  http.MethodPost,
+					Path:    "/task/disable",
+					Handler: cronDisableTaskHandler(serverCtx),
+				},
+				{
+					// 暂停任务（可恢复；重复暂停 changed=false）
+					Method:  http.MethodPost,
+					Path:    "/task/pause",
+					Handler: cronPauseTaskHandler(serverCtx),
+				},
+				{
+					// 注册任务定义（task_key 唯一；重复注册幂等返回 created=false）
+					Method:  http.MethodPost,
+					Path:    "/task/register",
+					Handler: cronRegisterTaskHandler(serverCtx),
+				},
+				{
+					// 恢复任务（暂停期间过期点按 MisfirePolicy 处理）
+					Method:  http.MethodPost,
+					Path:    "/task/resume",
+					Handler: cronResumeTaskHandler(serverCtx),
+				},
+				{
+					// 立即触发一次执行，或补跑指定计划时刻
+					Method:  http.MethodPost,
+					Path:    "/task/trigger",
+					Handler: cronTriggerTaskHandler(serverCtx),
+				},
+				{
+					// 修改任务定义（expected_version 乐观锁；state 不在此处改）
+					Method:  http.MethodPost,
+					Path:    "/task/update",
+					Handler: cronUpdateTaskHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/cron"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 房间主播绑定分页（含已解绑历史行）
+				Method:  http.MethodGet,
+				Path:    "/anchor/list",
+				Handler: liveAnchorListHandler(serverCtx),
+			},
+			{
+				// 分区字典（含停用项，终端面裁掉的运营字段在此可见）
+				Method:  http.MethodGet,
+				Path:    "/area/list",
+				Handler: liveAreaListHandler(serverCtx),
+			},
+			{
+				// 房间详情：按 room_id 或房主 mid，可附带配置与进行中场次
+				Method:  http.MethodGet,
+				Path:    "/room",
+				Handler: liveRoomGetHandler(serverCtx),
+			},
+			{
+				// 禁播台账（含运营内部 reason 与解除留痕）
+				Method:  http.MethodGet,
+				Path:    "/room/bans",
+				Handler: liveRoomBansHandler(serverCtx),
+			},
+			{
+				// 房间分页检索（状态/分区/房主过滤）
+				Method:  http.MethodPost,
+				Path:    "/room/list",
+				Handler: liveRoomListHandler(serverCtx),
+			},
+			{
+				// 单场直播：按 session_id，或按房间取最近第 offset+1 场
+				Method:  http.MethodGet,
+				Path:    "/session",
+				Handler: liveSessionGetHandler(serverCtx),
+			},
+			{
+				// 场次 cursor 分页（session_id 倒序，next_cursor 空表示到底）
+				Method:  http.MethodPost,
+				Path:    "/session/list",
+				Handler: liveSessionListHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/live"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 新建/修改直播分区（area_id=0 新建；名称唯一与停用占用校验在服务侧）
+					Method:  http.MethodPost,
+					Path:    "/area/upsert",
+					Handler: liveAreaUpsertHandler(serverCtx),
+				},
+				{
+					// 禁播：进入 BANNED 并终止场次（临时禁播需 duration_seconds）
+					Method:  http.MethodPost,
+					Path:    "/room/ban",
+					Handler: liveRoomBanHandler(serverCtx),
+				},
+				{
+					// 解除禁播：BANNED→READY，ban_id=0 表示解除当前生效记录
+					Method:  http.MethodPost,
+					Path:    "/room/ban/lift",
+					Handler: liveRoomBanLiftHandler(serverCtx),
+				},
+				{
+					// 运营下架/关闭房间（admin=true，强制终止进行中场次并留审计）
+					Method:  http.MethodPost,
+					Path:    "/room/close",
+					Handler: liveRoomCloseHandler(serverCtx),
+				},
+				{
+					// 改直播配置（整段覆盖；live-room 无运营主体位，只认生效房主，见类型注释）
+					Method:  http.MethodPost,
+					Path:    "/setting/update",
+					Handler: liveRoomSettingUpdateHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/live"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 节点分配台账（容量对账与排障；按流或按节点查）
+				Method:  http.MethodGet,
+				Path:    "/assignment/list",
+				Handler: liveNodeAssignmentListHandler(serverCtx),
+			},
+			{
+				// 流状态事件（按 seq 游标对账；后台只读，不能代写事件）
+				Method:  http.MethodGet,
+				Path:    "/event/list",
+				Handler: liveStreamEventListHandler(serverCtx),
+			},
+			{
+				// 断流与重连记录（含每次中断的起止、重连尝试数与关联事件 ID）
+				Method:  http.MethodGet,
+				Path:    "/interruption/list",
+				Handler: liveStreamInterruptionListHandler(serverCtx),
+			},
+			{
+				// 接入节点列表（health_score 降序，含摘流/离线节点）
+				Method:  http.MethodGet,
+				Path:    "/node/list",
+				Handler: liveIngestNodeListHandler(serverCtx),
+			},
+			{
+				// 单流状态：按 stream_id 或房间的当前非终态流
+				Method:  http.MethodGet,
+				Path:    "/stream",
+				Handler: liveStreamGetHandler(serverCtx),
+			},
+			{
+				// 流健康：当前判定 + 窗口聚合 + 最近采样点
+				Method:  http.MethodGet,
+				Path:    "/stream/health",
+				Handler: liveStreamHealthHandler(serverCtx),
+			},
+			{
+				// 推流密钥元数据（只有末 4 位辨认串与 Vault 引用，永不含明文）
+				Method:  http.MethodGet,
+				Path:    "/stream/key",
+				Handler: liveStreamKeyGetHandler(serverCtx),
+			},
+			{
+				// 推流密钥台账（key_id 倒序，含轮转链与吊销原因）
+				Method:  http.MethodGet,
+				Path:    "/stream/key/list",
+				Handler: liveStreamKeyListHandler(serverCtx),
+			},
+			{
+				// 流列表巡检（开播巡检/断流扫描；admin 作用域由网关声明，见类型注释）
+				Method:  http.MethodPost,
+				Path:    "/stream/list",
+				Handler: liveStreamListHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/live"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 重试失败的流状态事件（outbox 运营补偿；request_id 幂等）
+					Method:  http.MethodPost,
+					Path:    "/event/retry",
+					Handler: liveFailedEventRetryHandler(serverCtx),
+				},
+				{
+					// 节点注册/元数据修改（派生字段由服务维护，后台只声明节点属性）
+					Method:  http.MethodPost,
+					Path:    "/node/upsert",
+					Handler: liveIngestNodeUpsertHandler(serverCtx),
+				},
+				{
+					// 强制断流（处置动作：IDLE/PUBLISHING/INTERRUPTED → STOPPED，级联释放配额）
+					Method:  http.MethodPost,
+					Path:    "/stream/close",
+					Handler: liveStreamCloseHandler(serverCtx),
+				},
+				{
+					// 吊销推流密钥（不可逆终态，可按需级联停止进行中的流）
+					Method:  http.MethodPost,
+					Path:    "/stream/key/revoke",
+					Handler: liveStreamKeyRevokeHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/live"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 广播审计流水（按房间；只有载荷摘要，没有正文）
+				Method:  http.MethodGet,
+				Path:    "/broadcast/log",
+				Handler: liveBroadcastLogListHandler(serverCtx),
+			},
+			{
+				// 房间在线连接列表（Redis 视图；不回显重连票据）
+				Method:  http.MethodGet,
+				Path:    "/connection/list",
+				Handler: liveRoomConnectionListHandler(serverCtx),
+			},
+			{
+				// 某作用域生效的接入/广播配额（含继承链解析结果）
+				Method:  http.MethodGet,
+				Path:    "/quota",
+				Handler: liveAccessQuotaGetHandler(serverCtx),
+			},
+			{
+				// 房间路由分页（按节点/状态过滤，含排空中与已下线）
+				Method:  http.MethodGet,
+				Path:    "/route/list",
+				Handler: liveRoomRouteListHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/live"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 房间内公告/系统事件下发（运营身份由网关声明，可丢弃但原因必须可解释）
+					Method:  http.MethodPost,
+					Path:    "/broadcast/send",
+					Handler: liveBroadcastSendHandler(serverCtx),
+				},
+				{
+					// 强制下线（可撤销重连票据并写禁止重连窗口）
+					Method:  http.MethodPost,
+					Path:    "/connection/kick",
+					Handler: liveConnectionKickHandler(serverCtx),
+				},
+				{
+					// 新建/更新接入与广播配额（修改者取会话身份，版本 CAS）
+					Method:  http.MethodPost,
+					Path:    "/quota/upsert",
+					Handler: liveAccessQuotaUpsertHandler(serverCtx),
+				},
+				{
+					// 排空房间路由（expected_version 乐观校验，节点优雅下线）
+					Method:  http.MethodPost,
+					Path:    "/route/drain",
+					Handler: liveRoomRouteDrainHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/live"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 在线召回参数与有 CURRENT 版本的池摘要
+				Method:  http.MethodGet,
+				Path:    "/pool/config",
+				Handler: getRecallConfigHandler(serverCtx),
+			},
+			{
+				// 池快照：读某个池某个版本的条目（version=0 表示当前生效版本）
+				Method:  http.MethodGet,
+				Path:    "/pool/snapshot",
+				Handler: getPoolSnapshotHandler(serverCtx),
+			},
+			{
+				// 池版本台账（含生成批次与产出方，回滚可行性检查带 include_retired）
+				Method:  http.MethodGet,
+				Path:    "/pool/version/list",
+				Handler: listPoolVersionsHandler(serverCtx),
+			},
+			{
+				// 排序决策回放（按 decision_id 或 request_id）
+				Method:  http.MethodGet,
+				Path:    "/rank/decision",
+				Handler: getRankDecisionHandler(serverCtx),
+			},
+			{
+				// 排序决策摘要分页（实验/模型/场景过滤，可只看降级）
+				Method:  http.MethodPost,
+				Path:    "/rank/decision/list",
+				Handler: listRankDecisionsHandler(serverCtx),
+			},
+			{
+				// 在线排序参数与当前生效的模型/特征/实验
+				Method:  http.MethodGet,
+				Path:    "/rank/runtime-config",
+				Handler: getRankRuntimeConfigHandler(serverCtx),
+			},
+			{
+				// 回放一次在线召回请求（按 request_id 或 snapshot_id）
+				Method:  http.MethodGet,
+				Path:    "/recall/log",
+				Handler: getRecallRequestLogHandler(serverCtx),
+			},
+			{
+				// 召回请求日志分页（按用户/场景/时间窗）
+				Method:  http.MethodPost,
+				Path:    "/recall/log/list",
+				Handler: listRecallRequestLogsHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/recommend"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 分批写入池条目到指定版本（is_last_batch 置 READY；幂等键命中重放不重复写）
+					Method:  http.MethodPost,
+					Path:    "/pool/item/upsert",
+					Handler: upsertPoolItemsHandler(serverCtx),
+				},
+				{
+					// 分批清理过期池版本（dry_run 先核数；keep_versions 下限由服务守护）
+					Method:  http.MethodPost,
+					Path:    "/pool/version/prune",
+					Handler: prunePoolVersionsHandler(serverCtx),
+				},
+				{
+					// 原子切换池的当前生效版本（READY→CURRENT，写审计并发 recall.pool.published 事件）
+					Method:  http.MethodPost,
+					Path:    "/pool/version/publish",
+					Handler: publishPoolVersionHandler(serverCtx),
+				},
+				{
+					// 回滚池版本到历史版本（运营回滚开关，与 publish 同一响应形态）
+					Method:  http.MethodPost,
+					Path:    "/pool/version/rollback",
+					Handler: rollbackPoolVersionHandler(serverCtx),
+				},
+				{
+					// 实验状态迁移（RUNNING/PAUSED/STOPPED，与模型状态分属不同权限点）
+					Method:  http.MethodPost,
+					Path:    "/rank/experiment/state",
+					Handler: setExperimentStateHandler(serverCtx),
+				},
+				{
+					// 新建/修改实验变体（分桶区间与 hash_seed 变更需 reason 说明）
+					Method:  http.MethodPost,
+					Path:    "/rank/experiment/upsert",
+					Handler: upsertExperimentHandler(serverCtx),
+				},
+				{
+					// 登记/更新特征配置版本（feature_keys 清单与缺失值策略）
+					Method:  http.MethodPost,
+					Path:    "/rank/feature-config/upsert",
+					Handler: upsertFeatureConfigHandler(serverCtx),
+				},
+				{
+					// 切换模型版本状态（READY/ACTIVE/RETIRED；激活即回滚开关，需 reason）
+					Method:  http.MethodPost,
+					Path:    "/rank/model/state",
+					Handler: setModelVersionStateHandler(serverCtx),
+				},
+				{
+					// 登记/更新模型版本元数据（版本不可变，元数据变更 revision+1）
+					Method:  http.MethodPost,
+					Path:    "/rank/model/upsert",
+					Handler: upsertModelVersionHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/recommend"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 房间当前可分发档位（默认只在线，include_offline 带历史）
+				Method:  http.MethodGet,
+				Path:    "/output/list",
+				Handler: liveMediaOutputListHandler(serverCtx),
+			},
+			{
+				// 单个录制任务（last_seq/gap_count 是断点续录与时间轴空洞的读数）
+				Method:  http.MethodGet,
+				Path:    "/record",
+				Handler: liveMediaRecordGetHandler(serverCtx),
+			},
+			{
+				// 录制任务分页（房间/场次/状态过滤）
+				Method:  http.MethodPost,
+				Path:    "/record/list",
+				Handler: liveMediaRecordListHandler(serverCtx),
+			},
+			{
+				// 录制切片 keyset 分页（MISSING/CORRUPT 缺口必须看得见，否则回放像完整的）
+				Method:  http.MethodPost,
+				Path:    "/record/segment/list",
+				Handler: liveMediaRecordSegmentListHandler(serverCtx),
+			},
+			{
+				// 单个回放任务（asset_id/aid/bvid 只是引用，发布状态事实源在 video）
+				Method:  http.MethodGet,
+				Path:    "/replay",
+				Handler: liveMediaReplayGetHandler(serverCtx),
+			},
+			{
+				// 回放资产引用分页（含 video 侧审核/发布投影与回收标记）
+				Method:  http.MethodPost,
+				Path:    "/replay/asset/list",
+				Handler: liveMediaReplayAssetListHandler(serverCtx),
+			},
+			{
+				// 回放任务分页（房间/场次/状态过滤）
+				Method:  http.MethodPost,
+				Path:    "/replay/list",
+				Handler: liveMediaReplayListHandler(serverCtx),
+			},
+			{
+				// 单个回收任务（scanned/deleted/skipped 是先登记后执行的凭证）
+				Method:  http.MethodGet,
+				Path:    "/retention",
+				Handler: liveMediaRetentionGetHandler(serverCtx),
+			},
+			{
+				// 回收任务分页（回收对象/状态/房间过滤）
+				Method:  http.MethodPost,
+				Path:    "/retention/list",
+				Handler: liveMediaRetentionListHandler(serverCtx),
+			},
+			{
+				// 单个直播转码任务（state/attempt/heartbeat/version 全可见）
+				Method:  http.MethodGet,
+				Path:    "/transcode",
+				Handler: liveMediaTranscodeGetHandler(serverCtx),
+			},
+			{
+				// 转码任务分页（房间/场次/状态/模板过滤）
+				Method:  http.MethodPost,
+				Path:    "/transcode/list",
+				Handler: liveMediaTranscodeListHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/live"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 下线一个档位（断流/到期/人工；只影响观众侧可用性，与回放发布状态无关）
+					Method:  http.MethodPost,
+					Path:    "/output/offline",
+					Handler: liveMediaOutputOfflineHandler(serverCtx),
+				},
+				{
+					// 登记/刷新一个码率档位的分发输出（(room,session,level,protocol) 唯一）
+					Method:  http.MethodPost,
+					Path:    "/output/upsert",
+					Handler: liveMediaOutputUpsertHandler(serverCtx),
+				},
+				{
+					// 登记录制任务（PENDING，request_id 幂等）
+					Method:  http.MethodPost,
+					Path:    "/record/start",
+					Handler: liveMediaRecordStartHandler(serverCtx),
+				},
+				{
+					// 停止录制（RECORDING→STOPPING，最后一片落库后 STOPPED 才能拼回放）
+					Method:  http.MethodPost,
+					Path:    "/record/stop",
+					Handler: liveMediaRecordStopHandler(serverCtx),
+				},
+				{
+					// 回填回放产物与 asset/稿件的引用（只存引用，不推进稿件状态）
+					Method:  http.MethodPost,
+					Path:    "/replay/asset/bind",
+					Handler: liveMediaReplayAssetBindHandler(serverCtx),
+				},
+				{
+					// 手工刷新 video 侧审核/发布投影（source 固定 manual；方向单一，不反向推进稿件）
+					Method:  http.MethodPost,
+					Path:    "/replay/content/state",
+					Handler: liveMediaReplayContentStateHandler(serverCtx),
+				},
+				{
+					// 提交回放拼接任务（只登记与校验切片区间，不拼接、不发布）
+					Method:  http.MethodPost,
+					Path:    "/replay/submit",
+					Handler: liveMediaReplaySubmitHandler(serverCtx),
+				},
+				{
+					// 提交回收任务（超期切片/回放产物/残留档位，先登记后执行；purge=true 才真删）
+					Method:  http.MethodPost,
+					Path:    "/retention/submit",
+					Handler: liveMediaRetentionSubmitHandler(serverCtx),
+				},
+				{
+					// 取消转码任务（PENDING|STOPPING→CANCELLED 终态，只能重新登记）
+					Method:  http.MethodPost,
+					Path:    "/transcode/cancel",
+					Handler: liveMediaTranscodeCancelHandler(serverCtx),
+				},
+				{
+					// 重试失败的转码任务（FAILED→PENDING，attempt+1，受 max_attempts 限制）
+					Method:  http.MethodPost,
+					Path:    "/transcode/retry",
+					Handler: liveMediaTranscodeRetryHandler(serverCtx),
+				},
+				{
+					// 登记直播转码任务（PENDING，request_id 幂等；不在此拉起 FFmpeg）
+					Method:  http.MethodPost,
+					Path:    "/transcode/start",
+					Handler: liveMediaTranscodeStartHandler(serverCtx),
+				},
+				{
+					// 请求停止转码（RUNNING→STOPPING，Worker 收尾后 STOPPED）
+					Method:  http.MethodPost,
+					Path:    "/transcode/stop",
+					Handler: liveMediaTranscodeStopHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/live"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 按 batch_id 精读接收批次（计数、状态、整批首要拒绝原因）
+				Method:  http.MethodGet,
+				Path:    "/batch",
+				Handler: collectorBatchGetHandler(serverCtx),
+			},
+			{
+				// 批次台账游标翻页（来源/状态/mid/设备摘要/IP 段/时间窗）
+				Method:  http.MethodPost,
+				Path:    "/batch/list",
+				Handler: collectorBatchListHandler(serverCtx),
+			},
+			{
+				// 投递死信游标翻页（topic/state/时间窗；reason 是稳定枚举）
+				Method:  http.MethodPost,
+				Path:    "/dead-letter/list",
+				Handler: collectorDeadLetterListHandler(serverCtx),
+			},
+			{
+				// 按 event_id 精读单条事件（投递状态以 Outbox 真值覆盖）
+				Method:  http.MethodGet,
+				Path:    "/event",
+				Handler: collectorEventGetHandler(serverCtx),
+			},
+			{
+				// 事件台账游标翻页（校验结论与投递状态是两个独立维度）
+				Method:  http.MethodPost,
+				Path:    "/event/list",
+				Handler: collectorEventListHandler(serverCtx),
+			},
+			{
+				// 采集与投递健康度：积压、限流、盐可用性与生效策略版本
+				Method:  http.MethodGet,
+				Path:    "/health",
+				Handler: collectorHealthHandler(serverCtx),
+			},
+			{
+				// 当前生效的采样与脱敏策略（无 ACTIVE 时由服务明确报错，不回空策略）
+				Method:  http.MethodGet,
+				Path:    "/policy/active",
+				Handler: collectorPolicyActiveHandler(serverCtx),
+			},
+			{
+				// 策略版本游标翻页（含 ARCHIVED：历史批次的归因依据）
+				Method:  http.MethodGet,
+				Path:    "/policy/list",
+				Handler: collectorPolicyListHandler(serverCtx),
+			},
+			{
+				// 单事件干跑校验：回缺失字段与归一化 event_type/topic，不落库不投递
+				Method:  http.MethodPost,
+				Path:    "/schema/validate",
+				Handler: collectorValidateSchemaHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/collector"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 重放投递死信（重新入队，不重新采样/脱敏；已是终态的计入 skipped）
+					Method:  http.MethodPost,
+					Path:    "/dead-letter/replay",
+					Handler: collectorDeadLetterReplayHandler(serverCtx),
+				},
+				{
+					// 推进到期未发送事件（轮次幂等；行层租约才是重复投递的围栏）
+					Method:  http.MethodPost,
+					Path:    "/delivery/retry",
+					Handler: collectorDeliveryRetryHandler(serverCtx),
+				},
+				{
+					// 切换生效策略版本（旧 ACTIVE 转 ARCHIVED；expected_current_version 做乐观校验）
+					Method:  http.MethodPost,
+					Path:    "/policy/activate",
+					Handler: collectorPolicyActivateHandler(serverCtx),
+				},
+				{
+					// 新建/修改策略草稿（state 不可声明，服务按 DRAFT 落；ACTIVE 不可原地改）
+					Method:  http.MethodPost,
+					Path:    "/policy/upsert",
+					Handler: collectorPolicyUpsertHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/collector"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 举报台账游标翻页（状态/被举报人过滤；读取主体由 operator_mid 承载）
+				Method:  http.MethodPost,
+				Path:    "/report/list",
+				Handler: privateMessageReportListHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/private-message"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 处置举报（驳回/撤回/转处罚/升级人审；重复提交回首次结论，replayed=true）
+					Method:  http.MethodPost,
+					Path:    "/report/handle",
+					Handler: privateMessageReportHandleHandler(serverCtx),
+				},
+				{
+					// 留存到期清理（先 dry_run 看影响面，purge=true 才真删正文，审计行保留）
+					Method:  http.MethodPost,
+					Path:    "/retention/purge",
+					Handler: privateMessageRetentionPurgeHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/private-message"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 权益码目录（enabled_only 可只看启用项）
+				Method:  http.MethodPost,
+				Path:    "/entitlement/list",
+				Handler: membershipEntitlementListHandler(serverCtx),
+			},
+			{
+				// 到期区间扫描（只读：核对 cron 将终结谁，后台不代为置过期）
+				Method:  http.MethodPost,
+				Path:    "/expiring/list",
+				Handler: membershipExpiringListHandler(serverCtx),
+			},
+			{
+				// 授予/变更台账分页（mid=0 为跨用户查；追溯每一行时长是谁动的）
+				Method:  http.MethodPost,
+				Path:    "/grant/list",
+				Handler: membershipGrantListHandler(serverCtx),
+			},
+			{
+				// 单用户会员身份 + 当前档位可得权益码（found=false 表示从未开通）
+				Method:  http.MethodPost,
+				Path:    "/member/get",
+				Handler: membershipMemberGetHandler(serverCtx),
+			},
+			{
+				// 套餐分页（含草稿与已下架；后台口径，不等于终端在售列表）
+				Method:  http.MethodPost,
+				Path:    "/plan/list",
+				Handler: membershipPlanListHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/membership"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 权益码新增/开关（关掉即全站该能力判否，故与套餐权限点分离）
+					Method:  http.MethodPost,
+					Path:    "/entitlement/upsert",
+					Handler: membershipEntitlementUpsertHandler(serverCtx),
+				},
+				{
+					// 运营手工开通/延长会员（沙箱台账之外的独立来源；不扣钱，reason 必填）
+					Method:  http.MethodPost,
+					Path:    "/grant",
+					Handler: membershipGrantHandler(serverCtx),
+				},
+				{
+					// 收回会员（立即失效或按天扣回；重复提交回首次结论）
+					Method:  http.MethodPost,
+					Path:    "/grant/revoke",
+					Handler: membershipGrantRevokeHandler(serverCtx),
+				},
+				{
+					// 套餐上下架（只允许合法迁移；改价必须走新草稿，reason 必填）
+					Method:  http.MethodPost,
+					Path:    "/plan/state",
+					Handler: membershipPlanStateHandler(serverCtx),
+				},
+				{
+					// 新建/修改套餐草稿（无 state 位，改完不会自动生效）
+					Method:  http.MethodPost,
+					Path:    "/plan/upsert",
+					Handler: membershipPlanUpsertHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/membership"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 渠道能力自述：sandbox_only 与每渠道 real_money（恒 false），让「没有真实资金」可查询
+				Method:  http.MethodPost,
+				Path:    "/channel/describe",
+				Handler: paymentChannelDescribeHandler(serverCtx),
+			},
+			{
+				// 资金流水分页（只增台账；充值/消费/退款/运营调整四类）
+				Method:  http.MethodPost,
+				Path:    "/flow/list",
+				Handler: paymentFlowListHandler(serverCtx),
+			},
+			{
+				// 支付台账分页（按状态/支付方式/时间窗）
+				Method:  http.MethodPost,
+				Path:    "/payment/list",
+				Handler: paymentListHandler(serverCtx),
+			},
+			{
+				// 充值台账分页（mid=0 跨用户）
+				Method:  http.MethodPost,
+				Path:    "/recharge/list",
+				Handler: paymentRechargeListHandler(serverCtx),
+			},
+			{
+				// 退款台账分页（只回退款单，不发起退款）
+				Method:  http.MethodPost,
+				Path:    "/refund/list",
+				Handler: paymentRefundListHandler(serverCtx),
+			},
+			{
+				// 余额查询（frozen_minor 恒 0，可用余额只看 balance_minor）
+				Method:  http.MethodPost,
+				Path:    "/wallet/get",
+				Handler: paymentWalletGetHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/payment"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 余额差错更正（唯一直接改资金台账的后台口；必须 idempotency_key + operator + reason）
+					Method:  http.MethodPost,
+					Path:    "/balance/adjust",
+					Handler: paymentBalanceAdjustHandler(serverCtx),
+				},
+				{
+					// 结算沙箱充值单（置 SUCCESS 并入账；只动本地台账，无渠道回调）
+					Method:  http.MethodPost,
+					Path:    "/recharge/settle",
+					Handler: paymentRechargeSettleHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/payment"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 状态流转台账（每次迁移一行，含操作者与理由）
+				Method:  http.MethodPost,
+				Path:    "/event/list",
+				Handler: orderEventListHandler(serverCtx),
+			},
+			{
+				// 订单详情（mid 非 0 时服务校验归属，越权按 not-found 回）
+				Method:  http.MethodPost,
+				Path:    "/get",
+				Handler: orderGetHandler(serverCtx),
+			},
+			{
+				// 订单分页（有界窗口；mid=0 且无过滤条件时由服务拒绝全表扫）
+				Method:  http.MethodPost,
+				Path:    "/list",
+				Handler: orderListHandler(serverCtx),
+			},
+			{
+				// 卡单扫描（只读：核对哪些单停在 PAYING/PAID/FULFILLING 超时，后台不代为推进）
+				Method:  http.MethodPost,
+				Path:    "/stuck/list",
+				Handler: orderStuckListHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/order"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 审批通过退款（先退余额再回收权益；部分成功原样投影在 revoke_detail）
+					Method:  http.MethodPost,
+					Path:    "/refund/approve",
+					Handler: orderRefundApproveHandler(serverCtx),
+				},
+				{
+					// 驳回退款（订单回原状态，不动钱不动权益；reason 必填）
+					Method:  http.MethodPost,
+					Path:    "/refund/reject",
+					Handler: orderRefundRejectHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/order"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 硬币账户（含今日额度；无账户时 found=false 且余额 0）
+				Method:  http.MethodPost,
+				Path:    "/account/get",
+				Handler: coinAccountGetHandler(serverCtx),
+			},
+			{
+				// 硬币流水台账分页（区分投币/撤币/硬币包/运营发放，正入负出）
+				Method:  http.MethodPost,
+				Path:    "/flow/list",
+				Handler: coinFlowListHandler(serverCtx),
+			},
+			{
+				// 生效投币参数（日限/单片上限/取消窗口/初始余额；只读，后台不改这套规则）
+				Method:  http.MethodPost,
+				Path:    "/toss/config",
+				Handler: coinTossConfigHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/coin"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 发放/扣回硬币（正负皆可；只接受 ORDER_PACK/ADMIN_GRANT，不产生资金流水）
+					Method:  http.MethodPost,
+					Path:    "/grant",
+					Handler: coinGrantHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/coin"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 参与名单分页（ENROLLED/LEFT/SUSPENDED；含本人确认过的规则版本）
+				Method:  http.MethodPost,
+				Path:    "/enrollment/list",
+				Handler: revenueEnrollmentListHandler(serverCtx),
+			},
+			{
+				// 计量台账分页（某周期某内容某来源的折算结果；应计金额，未支付）
+				Method:  http.MethodPost,
+				Path:    "/metric/list",
+				Handler: revenueMetricListHandler(serverCtx),
+			},
+			{
+				// 分成规则读取（version>0 按历史版本读，结算争议复核用）
+				Method:  http.MethodPost,
+				Path:    "/rule/get",
+				Handler: revenueRuleGetHandler(serverCtx),
+			},
+			{
+				// 分成规则分页（后台可见全部状态；含 ARCHIVED，历史周期按它复核）
+				Method:  http.MethodPost,
+				Path:    "/rule/list",
+				Handler: revenueRuleListHandler(serverCtx),
+			},
+			{
+				// 结算单详情（含按来源拆的分项，让作者侧质疑时能一行行对）
+				Method:  http.MethodPost,
+				Path:    "/settlement/get",
+				Handler: revenueSettlementGetHandler(serverCtx),
+			},
+			{
+				// 结算单分页（payout_state 恒 NOT_PAYABLE：本期无出金通道）
+				Method:  http.MethodPost,
+				Path:    "/settlement/list",
+				Handler: revenueSettlementListHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/creator-revenue"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 暂停/恢复参与（违规暂停期间不结算；加入与退出归创作者本人，不开后台口）
+					Method:  http.MethodPost,
+					Path:    "/enrollment/state",
+					Handler: revenueEnrollmentStateHandler(serverCtx),
+				},
+				{
+					// 规则状态迁移（DRAFT→ACTIVE→ARCHIVED；ACTIVE 不可原地改价）
+					Method:  http.MethodPost,
+					Path:    "/rule/state",
+					Handler: revenueRuleStateHandler(serverCtx),
+				},
+				{
+					// 新建/修改分成规则草稿（无 state 位，改完不会自动生效；reason 必填）
+					Method:  http.MethodPost,
+					Path:    "/rule/upsert",
+					Handler: revenueRuleUpsertHandler(serverCtx),
+				},
+				{
+					// 确认结算单（金额冻结；只是认账，**不是钱已付出**，payout_state 恒 NOT_PAYABLE）
+					Method:  http.MethodPost,
+					Path:    "/settlement/confirm",
+					Handler: revenueSettlementConfirmHandler(serverCtx),
+				},
+				{
+					// 生成/重算周期结算单（mid=0 全量；force_void_confirmed 是危险位且必须带 reason）
+					Method:  http.MethodPost,
+					Path:    "/settlement/generate",
+					Handler: revenueSettlementGenerateHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/creator-revenue"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 消费链路状态汇总（回答「事件消费到哪了、有没有堆积」）
+				Method:  http.MethodPost,
+				Path:    "/consumer-state/list",
+				Handler: spmConsumerStateListHandler(serverCtx),
+			},
+			{
+				// 死信台账（只读；重放属 event-collector，本域没有重放口）
+				Method:  http.MethodPost,
+				Path:    "/dead-letter/list",
+				Handler: spmDeadLetterListHandler(serverCtx),
+			},
+			{
+				// 单口径读（metric_version=0 = 当前 ACTIVE 版本）
+				Method:  http.MethodPost,
+				Path:    "/definition/get",
+				Handler: spmMetricDefinitionGetHandler(serverCtx),
+			},
+			{
+				// 口径目录分页（含 DRAFT/RETIRED：历史窗口要靠旧口径解释）
+				Method:  http.MethodPost,
+				Path:    "/definition/list",
+				Handler: spmMetricDefinitionListHandler(serverCtx),
+			},
+			{
+				// 热点榜（回显实际使用的窗口与口径版本）
+				Method:  http.MethodPost,
+				Path:    "/hot-subject/list",
+				Handler: spmHotSubjectListHandler(serverCtx),
+			},
+			{
+				// 聚合作业进度（job_id 或 request_id 二选一）
+				Method:  http.MethodPost,
+				Path:    "/job/get",
+				Handler: spmAggregationJobGetHandler(serverCtx),
+			},
+			{
+				// 聚合作业列表（按类型/状态/时间筛）
+				Method:  http.MethodPost,
+				Path:    "/job/list",
+				Handler: spmAggregationJobListHandler(serverCtx),
+			},
+			{
+				// 同主体多口径 × 连续窗口批量读（回值是稳定序的列表）
+				Method:  http.MethodPost,
+				Path:    "/metric/batch-get",
+				Handler: spmMetricBatchGetHandler(serverCtx),
+			},
+			{
+				// 单窗口指标读（found=false 表示该口径无此窗口，不伪造 0）
+				Method:  http.MethodPost,
+				Path:    "/metric/get",
+				Handler: spmMetricGetHandler(serverCtx),
+			},
+			{
+				// cohort 留存曲线（注册日/首播日分桶）
+				Method:  http.MethodPost,
+				Path:    "/retention/get",
+				Handler: spmRetentionGetHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/spm"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 口径上下架（DRAFT/ACTIVE/RETIRED；retire 后不再写入但历史窗口仍可解释）
+					Method:  http.MethodPost,
+					Path:    "/definition/state",
+					Handler: spmMetricDefinitionStateHandler(serverCtx),
+				},
+				{
+					// 登记新口径版本（只能新增，改已登记版本服务回 ErrMetricVersionImmutable；无删除语义）
+					Method:  http.MethodPost,
+					Path:    "/definition/upsert",
+					Handler: spmMetricDefinitionUpsertHandler(serverCtx),
+				},
+				{
+					// 单用户兴趣画像（脱敏受控词表；stale=true 时调用方应按冷启动口径解释）
+					Method:  http.MethodPost,
+					Path:    "/interest/get",
+					Handler: spmUserInterestGetHandler(serverCtx),
+				},
+				{
+					// 提交聚合作业（实时/离线回填/重算；reason 说明回填范围或故障单号）
+					Method:  http.MethodPost,
+					Path:    "/job/submit",
+					Handler: spmAggregationJobSubmitHandler(serverCtx),
+				},
+				{
+					// 指标漂移修复重算（从事实表按指定口径版本重算，唯一正当的「改指标」路径）
+					Method:  http.MethodPost,
+					Path:    "/metric/recompute",
+					Handler: spmMetricRecomputeHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/spm"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 回填作业进度（job_id 或 request_id 二选一）
+				Method:  http.MethodPost,
+				Path:    "/backfill/get",
+				Handler: fsBackfillGetHandler(serverCtx),
+			},
+			{
+				// 回填作业列表（按 key/状态/时间筛）
+				Method:  http.MethodPost,
+				Path:    "/backfill/list",
+				Handler: fsBackfillListHandler(serverCtx),
+			},
+			{
+				// 单个特征定义读（version=0 = 当前 ACTIVE 版本；found=false 不伪造口径）
+				Method:  http.MethodPost,
+				Path:    "/definition/get",
+				Handler: fsDefinitionGetHandler(serverCtx),
+			},
+			{
+				// 特征定义目录分页（含 DRAFT/RETIRED，可按 scope/source/state/隐私上限过滤）
+				Method:  http.MethodPost,
+				Path:    "/definition/list",
+				Handler: fsDefinitionListHandler(serverCtx),
+			},
+			{
+				// 版本切换审计列表（谁在什么时候按什么理由切的；列表内读不出切换类别，见契约缺口）
+				Method:  http.MethodPost,
+				Path:    "/version-switch/list",
+				Handler: fsVersionSwitchListHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/feature-store"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 提交回填作业（补历史值；worker 未接线前只落 PENDING 台账）
+					Method:  http.MethodPost,
+					Path:    "/backfill/submit",
+					Handler: fsBackfillSubmitHandler(serverCtx),
+				},
+				{
+					// 隐私级别调整（独立入口独立留痕：只改谁能读，不改值语义）
+					Method:  http.MethodPost,
+					Path:    "/definition/privacy",
+					Handler: fsDefinitionPrivacyHandler(serverCtx),
+				},
+				{
+					// 注册特征版本（只能新增版本；注册一律 DRAFT 入库，不可变字段冲突服务直接拒）
+					Method:  http.MethodPost,
+					Path:    "/definition/register",
+					Handler: fsDefinitionRegisterHandler(serverCtx),
+				},
+				{
+					// 特征状态迁移（DRAFT/ACTIVE/RETIRED；上线前置条件由服务判）
+					Method:  http.MethodPost,
+					Path:    "/definition/state",
+					Handler: fsDefinitionStateHandler(serverCtx),
+				},
+				{
+					// 按主体擦除个体特征（隐私工单执行，物理删除不可逆；服务侧 operator 白名单再判一次）
+					Method:  http.MethodPost,
+					Path:    "/entity-feature/erase",
+					Handler: fsEntityFeatureEraseHandler(serverCtx),
+				},
+				{
+					// 按主体导出特征（隐私核对；可见级别受服务侧上限收敛）
+					Method:  http.MethodPost,
+					Path:    "/entity-feature/list",
+					Handler: fsEntityFeatureListHandler(serverCtx),
+				},
+				{
+					// 手动清理 TTL 过期值（cron 的补收敛入口；limit 上限与未来截止时间由服务判）
+					Method:  http.MethodPost,
+					Path:    "/retention/purge",
+					Handler: fsRetentionPurgeHandler(serverCtx),
+				},
+				{
+					// 切换对外生效的版本（乐观校验 + 追加式审计；回滚在审计里读不出来）
+					Method:  http.MethodPost,
+					Path:    "/version/switch",
+					Handler: fsVersionSwitchHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/feature-store"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// scope 目录读（可带 app_id 回该应用对每条的获批状态；契约无操作者位）
+				Method:  http.MethodPost,
+				Path:    "/scope/list",
+				Handler: openScopeListHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/admin/open-platform"),
+	)
+
+	server.AddRoutes(
+		rest.WithMiddlewares(
+			[]rest.Middleware{serverCtx.AdminPermission},
+			[]rest.Route{
+				{
+					// 单个应用详情（含回调白名单与密钥状态；不存在与无权看服务回同一错误，网关不折叠成 found=false）
+					Method:  http.MethodPost,
+					Path:    "/application/get",
+					Handler: openApplicationGetHandler(serverCtx),
+				},
+				{
+					// 应用台账分页（运营全量分支；按开发者筛属开发者侧，见契约缺口）
+					Method:  http.MethodPost,
+					Path:    "/application/list",
+					Handler: openApplicationListHandler(serverCtx),
+				},
+				{
+					// 推进应用状态机（只有状态：资料改动在运营通道被服务直接拒）
+					Method:  http.MethodPost,
+					Path:    "/application/state",
+					Handler: openApplicationStateHandler(serverCtx),
+				},
+				{
+					// 撤销授权（TOKEN/GRANT/USER_ALL 三种范围；必填组合由服务判，明文 hint 不进日志）
+					Method:  http.MethodPost,
+					Path:    "/authorization/revoke",
+					Handler: openAuthorizationRevokeHandler(serverCtx),
+				},
+				{
+					// 配额规则目录分页（服务侧 requireOperator；app_id=0 是全局兜底层级、api_code=「*」是通配规则本身）
+					Method:  http.MethodPost,
+					Path:    "/quota/policy/list",
+					Handler: openQuotaPolicyListHandler(serverCtx),
+				},
+				{
+					// 新增/更新配额规则（policy_id=0 = 唯一键新建；enabled=false 在本入口无路径——proto 未暴露停用方法）
+					Method:  http.MethodPost,
+					Path:    "/quota/policy/upsert",
+					Handler: openQuotaPolicyUpsertHandler(serverCtx),
+				},
+				{
+					// 从调用流水重算配额投影（dry_run 先看差异；投影重算幂等故契约无幂等键位）
+					Method:  http.MethodPost,
+					Path:    "/quota/recompute",
+					Handler: openQuotaRecomputeHandler(serverCtx),
+				},
+				{
+					// 配额用量读（按应用；投影可漂移，跨应用汇总不在本契约）
+					Method:  http.MethodPost,
+					Path:    "/quota/usage/list",
+					Handler: openQuotaUsageListHandler(serverCtx),
+				},
+				{
+					// scope 授予/回收（部分授予是正常结果，rejected 列表原样回；幂等键必填）
+					Method:  http.MethodPost,
+					Path:    "/scope/grant",
+					Handler: openScopeGrantHandler(serverCtx),
+				},
+				{
+					// 吊销应用密钥（secret_id=0 = 全部生效密钥；token 不受影响，要撤授权走 /authorization/revoke）
+					Method:  http.MethodPost,
+					Path:    "/secret/revoke",
+					Handler: openSecretRevokeHandler(serverCtx),
+				},
+				{
+					// 轮换应用密钥（新明文仅此一次返回且不进日志；旧密钥宽限期由服务落地）
+					Method:  http.MethodPost,
+					Path:    "/secret/rotate",
+					Handler: openSecretRotateHandler(serverCtx),
+				},
+				{
+					// 删除回调端点并抑制未投递任务（本域刻意没有新增/改地址入口）
+					Method:  http.MethodPost,
+					Path:    "/webhook/delete",
+					Handler: openWebhookDeleteHandler(serverCtx),
+				},
+				{
+					// 投递流水分页（只有 payload_digest 与脱敏错误；payload 正文不经本 RPC 外发）
+					Method:  http.MethodPost,
+					Path:    "/webhook/delivery/list",
+					Handler: openWebhookDeliveryListHandler(serverCtx),
+				},
+				{
+					// 死信重放（只重置既有记录的 attempt，不注入新事件）
+					Method:  http.MethodPost,
+					Path:    "/webhook/delivery/retry",
+					Handler: openWebhookDeliveryRetryHandler(serverCtx),
+				},
+				{
+					// 回调端点列表（地址属外部主体凭证面；软删行永远不回）
+					Method:  http.MethodPost,
+					Path:    "/webhook/list",
+					Handler: openWebhookListHandler(serverCtx),
+				},
+			}...,
+		),
+		rest.WithPrefix("/admin/open-platform"),
 	)
 }

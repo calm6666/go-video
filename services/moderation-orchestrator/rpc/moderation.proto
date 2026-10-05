@@ -1,0 +1,187 @@
+syntax = "proto3";
+
+package moderation.v1;
+
+option go_package = "go-video/services/moderation-orchestrator/rpc";
+
+// moderation-orchestrator 是审核编排服务，依据 AGENTS.md §8 稿件状态机：
+//   DRAFT → UPLOADING → UPLOADED → SCANNING → TRANSCODING
+//         → READY_FOR_REVIEW → APPROVED → SCHEDULED → PUBLISHED
+//                            └→ REJECTED/APPEAL
+// 本服务只负责创建任务、派发 worker、回写审核结论、申诉流程，
+// 不直接做 OCR/ASR/图像识别，不直接把稿件置为 PUBLISHED。
+// 内容所有者（video/catalog/comment/danmaku）消费 moderation.result.v1
+// 推进合法状态，禁止 worker 回调直接写 PUBLISHED。
+
+// 空响应
+message EmptyReply {}
+
+// 内容类型：本服务审核对象来源域
+enum ContentType {
+  CONTENT_TYPE_UNSPECIFIED = 0; // 未指定
+  CONTENT_TYPE_VIDEO = 1;        // 视频稿件（UGC/PGC 投稿）
+  CONTENT_TYPE_CATALOG = 2;      // 版权目录条目
+  CONTENT_TYPE_COMMENT = 3;      // 评论
+  CONTENT_TYPE_DANMAKU = 4;      // 弹幕
+  CONTENT_TYPE_LIVE = 5;         // 直播
+}
+
+// 任务状态机：未审核 → 审核中 → 已结论 → 申诉中
+enum TaskState {
+  TASK_STATE_UNSPECIFIED = 0;    // 未指定
+  TASK_STATE_PENDING = 1;        // 待处理（已入队，等 worker 拉取）
+  TASK_STATE_PROCESSING = 2;     // 处理中（worker 已开始识别）
+  TASK_STATE_DONE = 3;           // 已完成（已回写结论）
+  TASK_STATE_APPEALED = 4;       // 申诉中
+  TASK_STATE_APPEAL_DONE = 5;   // 申诉已处理
+  TASK_STATE_CANCELED = 9;       // 已撤销
+}
+
+// 审核结论
+enum Verdict {
+  VERDICT_UNSPECIFIED = 0; // 未指定
+  VERDICT_PASS = 1;        // 通过
+  VERDICT_REVIEW = 2;      // 转人审
+  VERDICT_REJECT = 3;      // 拒绝
+}
+
+// 审核任务
+message Task {
+  int64 task_id = 1;          // 任务 ID
+  int64 submission_id = 2;    // 提交对象 ID（稿件/评论/弹幕等的内容主键）
+  ContentType content_type = 3; // 内容类型
+  int64 mid = 4;              // 提交用户 ID
+  int64 up_mid = 5;          // UP 主 ID（视频场景下与 mid 可能相同）
+  string business = 6;        // 业务名（与 submission_id 共同定位对象）
+  string reason = 7;         // 提交审核原因（如：发布、举报、复审）
+  TaskState state = 8;        // 任务状态
+  int64 ctime = 9;            // 创建时间（Unix 秒）
+  int64 mtime = 10;           // 修改时间（Unix 秒）
+  int64 operator = 11;        // 操作人（运营 ID，0 表示系统）
+}
+
+// 审核结论
+message Result {
+  int64 task_id = 1;          // 关联任务 ID
+  Verdict verdict = 2;        // 结论
+  string reason = 3;          // 结论原因（关键词命中、模型分数等）
+  int64 worker_id = 4;        // worker 实例 ID（机审）
+  int64 reviewer = 5;         // 人审员 ID（人审）
+  int64 ctime = 6;            // 创建时间（Unix 秒）
+}
+
+// 申诉
+message Appeal {
+  int64 appeal_id = 1;        // 申诉 ID
+  int64 task_id = 2;          // 关联任务 ID
+  int64 mid = 3;              // 申诉人 ID
+  string content = 4;         // 申诉理由
+  Verdict final_verdict = 5;  // 最终结论（处理后）
+  string final_reason = 6;   // 处理说明
+  int64 handler = 7;          // 处理人（运营 ID）
+  int64 ctime = 8;            // 创建时间（Unix 秒）
+  int64 mtime = 9;            // 处理时间（Unix 秒）
+}
+
+// --- 提交审核（领域服务调用） ---
+
+message SubmitReq {
+  int64 submission_id = 1;    // 提交对象 ID
+  ContentType content_type = 2; // 内容类型
+  int64 mid = 3;              // 提交用户 ID
+  int64 up_mid = 4;           // UP 主 ID
+  string business = 5;        // 业务名
+  string reason = 6;          // 提交原因
+  string ip = 7;               // 调用方 IP
+}
+
+message TaskReply {
+  Task task = 1;
+}
+
+// --- 查询任务详情 ---
+
+message TaskReq {
+  int64 task_id = 1;          // 任务 ID
+  string ip = 2;               // 调用方 IP
+}
+
+// --- 查询审核结论 ---
+
+message ResultReq {
+  int64 task_id = 1;          // 任务 ID
+  string ip = 2;               // 调用方 IP
+}
+
+message ResultReply {
+  Result result = 1;
+}
+
+// --- 分页查询任务列表（运营后台） ---
+
+message ListTasksReq {
+  int64 mid = 1;              // 按提交用户过滤（0 不过滤）
+  ContentType content_type = 2; // 按内容类型过滤（0 不过滤）
+  TaskState state = 3;        // 按状态过滤（0 不过滤）
+  int32 pn = 4;               // 页码（从 1 开始）
+  int32 ps = 5;               // 每页大小（最大 50）
+  string ip = 6;               // 调用方 IP
+}
+
+message TasksReply {
+  repeated Task tasks = 1;     // 任务列表
+  int32 total = 2;             // 总数
+}
+
+// --- 提交申诉 ---
+
+message AppealReq {
+  int64 task_id = 1;          // 关联任务 ID
+  int64 mid = 2;              // 申诉人 ID
+  string content = 3;         // 申诉理由
+  string ip = 4;               // 调用方 IP
+}
+
+message AppealReply {
+  Appeal appeal = 1;
+}
+
+// --- 处理申诉（运营） ---
+
+message ProcessAppealReq {
+  int64 appeal_id = 1;        // 申诉 ID
+  int64 handler = 2;         // 处理人（运营 ID）
+  Verdict final_verdict = 3;  // 最终结论
+  string final_reason = 4;   // 处理说明
+  string ip = 5;               // 调用方 IP
+}
+
+// --- worker 回写结果 ---
+
+message WorkerResultReq {
+  int64 task_id = 1;          // 关联任务 ID
+  int64 worker_id = 2;        // worker 实例 ID
+  Verdict verdict = 3;        // 结论
+  string reason = 4;          // 结论原因
+  string ip = 5;               // 调用方 IP
+}
+
+// ModerationOrchestrator 审核编排服务。
+// 依据 AGENTS.md §5，本服务拥有审核任务、规则、结论、申诉数据；
+// 依据 §8，审核结论只能推进合法状态，不能直接写 PUBLISHED。
+service ModerationOrchestrator {
+  // 领域服务提交审核任务（创建 task 并入 MQ 待处理）
+  rpc SubmitForReview(SubmitReq) returns (TaskReply);
+  // 查询任务详情
+  rpc GetTask(TaskReq) returns (TaskReply);
+  // 查询审核结论
+  rpc GetResult(ResultReq) returns (ResultReply);
+  // 分页查询任务列表（运营后台用）
+  rpc ListTasks(ListTasksReq) returns (TasksReply);
+  // 提交申诉
+  rpc SubmitAppeal(AppealReq) returns (AppealReply);
+  // 处理申诉（运营）
+  rpc ProcessAppeal(ProcessAppealReq) returns (AppealReply);
+  // worker 调用，回写识别结果（由 moderation-worker 调用）
+  rpc SubmitWorkerResult(WorkerResultReq) returns (EmptyReply);
+}

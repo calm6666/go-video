@@ -15,8 +15,8 @@ import (
 type Config struct {
 	zrpc.RpcServerConf
 
-	// Redis 缓存连接（用于 Info/Card/Profile/Vip 的缓存层）。
-	Redis redis.RedisConf
+	// CacheRedis 业务缓存连接（用于 Info/Card/Profile/Vip 的缓存层）。
+	CacheRedis redis.RedisConf // 不能命名为 Redis：与 zrpc.RpcServerConf 内嵌字段同名会让配置加载失败
 
 	// MySQL 主库连接 DSN（account 服务自有 account、account_credential 表）。
 	DataSource string

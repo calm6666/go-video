@@ -1,0 +1,195 @@
+syntax = "proto3";
+
+package rights.v1;
+
+option go_package = "go-video/services/rights/rpc";
+
+// rights 服务：版权合同与播放窗口的领域服务。
+// 依据 AGENTS.md §1，本期只实现授权校验、合同/窗口 CRUD 和过期下架，
+// 不实现会员、订单、支付等商业化能力。
+// 依据 §5，rights 拥有 rights_contract 与 rights_window 两张表，
+// catalog/playback 通过本服务 RPC 校验可播放性，过期窗口不再返回可播放结果。
+
+// 合同状态
+enum ContractState {
+  CONTRACT_STATE_UNSPECIFIED = 0; // 未指定
+  CONTRACT_STATE_ACTIVE = 1;       // 生效中
+  CONTRACT_STATE_TERMINATED = 2;   // 已终止
+}
+
+// 窗口状态
+enum WindowState {
+  WINDOW_STATE_UNSPECIFIED = 0; // 未指定
+  WINDOW_STATE_ACTIVE = 1;       // 有效
+  WINDOW_STATE_EXPIRED = 2;       // 已过期
+  WINDOW_STATE_REVOKED = 3;       // 已撤权
+}
+
+// 内容类型
+enum ContentType {
+  CONTENT_TYPE_UNSPECIFIED = 0; // 未指定
+  CONTENT_TYPE_PGC = 1;          // 版权内容（电影/电视剧/番剧）
+  CONTENT_TYPE_UGC = 2;          // UGC 稿件
+}
+
+// --- 合同 ---
+
+// 合同实体
+message Contract {
+  int64 contract_id = 1;     // 合同 ID
+  int64 owner_id = 2;        // 版权方 ID
+  string title = 3;           // 合同标题
+  int64 sign_date = 4;        // 签订日期（Unix 秒）
+  int64 start_date = 5;       // 生效日期（Unix 秒）
+  int64 end_date = 6;         // 到期日期（Unix 秒）
+  repeated string regions = 7; // 授权地区代码列表
+  ContractState state = 8;   // 合同状态
+  int64 ctime = 9;            // 创建时间（Unix 秒）
+  int64 mtime = 10;           // 修改时间（Unix 秒）
+}
+
+// 创建合同请求
+message CreateContractReq {
+  int64 owner_id = 1;          // 版权方 ID
+  string title = 2;            // 合同标题
+  int64 sign_date = 3;         // 签订日期（Unix 秒）
+  int64 start_date = 4;        // 生效日期（Unix 秒）
+  int64 end_date = 5;          // 到期日期（Unix 秒）
+  repeated string regions = 6; // 授权地区代码列表
+  string operator = 7;         // 操作人（运营/系统）
+  string ip = 8;                // 调用方 IP
+}
+
+// 合同响应
+message ContractReply {
+  Contract contract = 1; // 合同详情
+}
+
+// 单个合同查询请求
+message ContractReq {
+  int64 contract_id = 1; // 合同 ID
+  string ip = 2;          // 调用方 IP
+}
+
+// 分页查询请求
+message ListReq {
+  int64 owner_id = 1;    // 版权方 ID（可选，0 表示不筛选）
+  ContractState state = 2; // 合同状态（可选）
+  int32 pn = 3;          // 页码（从 1 开始）
+  int32 ps = 4;          // 每页大小（最大 50）
+  string ip = 5;          // 调用方 IP
+}
+
+// 合同列表响应
+message ContractsReply {
+  int32 total = 1;              // 总数
+  repeated Contract contracts = 2; // 合同列表
+}
+
+// --- 窗口 ---
+
+// 窗口实体
+message Window {
+  int64 window_id = 1;     // 窗口 ID
+  int64 contract_id = 2;    // 关联合同 ID
+  int64 content_id = 3;     // 内容 ID
+  ContentType content_type = 4; // 内容类型
+  string region = 5;        // 授权地区代码
+  int64 start_time = 6;     // 窗口开始时间（Unix 秒）
+  int64 end_time = 7;       // 窗口结束时间（Unix 秒）
+  WindowState state = 8;   // 窗口状态
+  int64 ctime = 9;          // 创建时间（Unix 秒）
+  int64 mtime = 10;         // 修改时间（Unix 秒）
+}
+
+// 创建窗口请求
+message CreateWindowReq {
+  int64 contract_id = 1;        // 关联合同 ID
+  int64 content_id = 2;         // 内容 ID
+  ContentType content_type = 3; // 内容类型
+  string region = 4;            // 授权地区代码
+  int64 start_time = 5;         // 窗口开始时间（Unix 秒）
+  int64 end_time = 6;           // 窗口结束时间（Unix 秒）
+  string operator = 7;          // 操作人
+  string ip = 8;                 // 调用方 IP
+}
+
+// 窗口响应
+message WindowReply {
+  Window window = 1; // 窗口详情
+}
+
+// 单个窗口查询请求
+message WindowReq {
+  int64 window_id = 1; // 窗口 ID
+  string ip = 2;        // 调用方 IP
+}
+
+// 窗口列表查询请求
+message ListWindowsReq {
+  int64 content_id = 1;    // 内容 ID（可选）
+  int64 contract_id = 2;    // 合同 ID（可选）
+  ContentType content_type = 3; // 内容类型（可选）
+  WindowState state = 4;   // 窗口状态（可选）
+  int32 pn = 5;            // 页码
+  int32 ps = 6;            // 每页大小（最大 50）
+  string ip = 7;            // 调用方 IP
+}
+
+// 窗口列表响应
+message WindowsReply {
+  int32 total = 1;            // 总数
+  repeated Window windows = 2; // 窗口列表
+}
+
+// --- 可播放性校验 ---
+
+// 可播放性校验请求
+message CheckReq {
+  int64 content_id = 1;        // 内容 ID
+  ContentType content_type = 2; // 内容类型
+  string region = 3;           // 地区代码
+  string ip = 4;                // 调用方 IP
+}
+
+// 可播放性校验响应
+message CheckReply {
+  bool playable = 1;          // 是否可播放
+  int64 window_id = 2;        // 命中的窗口 ID（不可播放时为 0）
+  int64 end_time = 3;         // 命中窗口的结束时间（Unix 秒，供调用方做缓存 TTL 上限）
+}
+
+// --- 过期与即将过期 ---
+
+// 即将过期窗口查询请求
+message ListExpiringReq {
+  int32 within_seconds = 1; // 距离过期的秒数窗口（默认 3600）
+  int32 pn = 2;             // 页码
+  int32 ps = 3;             // 每页大小（最大 100）
+  string ip = 4;             // 调用方 IP
+}
+
+// rights 版权合同与播放窗口服务。
+// 依据 AGENTS.md §1，不实现会员、订单、支付、投币等商业化；
+// 依据 §5，rights 只写 rights_contract/rights_window，不复制 catalog 视频主数据；
+// 依据 §8，过期/撤权窗口不再返回可播放结果，由 cron 或运营通过 ExpireWindow 推进。
+service Rights {
+  // 运营创建合同
+  rpc CreateContract(CreateContractReq) returns (ContractReply);
+  // 查询单个合同
+  rpc GetContract(ContractReq) returns (ContractReply);
+  // 分页查询合同
+  rpc ListContracts(ListReq) returns (ContractsReply);
+  // 为内容创建时间窗口（关联合同）
+  rpc CreateWindow(CreateWindowReq) returns (WindowReply);
+  // 查询单个窗口
+  rpc GetWindow(WindowReq) returns (WindowReply);
+  // 按 content_id 或 contract_id 查询窗口
+  rpc ListWindows(ListWindowsReq) returns (WindowsReply);
+  // 校验内容在某地区是否可播放（窗口有效）
+  rpc CheckPlayable(CheckReq) returns (CheckReply);
+  // 手动过期窗口（运营/cron）
+  rpc ExpireWindow(WindowReq) returns (WindowReply);
+  // 查询即将过期的窗口（cron 用）
+  rpc ListExpiring(ListExpiringReq) returns (WindowsReply);
+}

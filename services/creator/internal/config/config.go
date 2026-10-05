@@ -14,8 +14,8 @@ import (
 type Config struct {
 	zrpc.RpcServerConf
 
-	// Redis 缓存连接（特殊属性/身份/开关/分组列表缓存）。
-	Redis redis.RedisConf
+	// CacheRedis 业务缓存连接（特殊属性/身份/开关/分组列表缓存）。
+	CacheRedis redis.RedisConf // 不能命名为 Redis：与 zrpc.RpcServerConf 内嵌字段同名会让配置加载失败
 
 	// MySQL 主库连接 DSN（creator 服务自有的 5 张表）。
 	DataSource string

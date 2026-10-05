@@ -16,7 +16,7 @@ type MemberOutbox struct {
 	ID int64 `db:"id"`
 	// EventID 事件唯一 ID（ULID，唯一索引）
 	EventID string `db:"event_id"`
-	// EventType 事件类型（user.profile_updated / user.moral_notice）
+	// EventType 事件类型（user.profile.updated / user.moral.notice）
 	EventType string `db:"event_type"`
 	// AggregateID 聚合根 ID（mid 十进制字符串）
 	AggregateID string `db:"aggregate_id"`

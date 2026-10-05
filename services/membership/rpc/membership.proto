@@ -1,0 +1,420 @@
+syntax = "proto3";
+
+package membership.v1;
+
+option go_package = "go-video/services/membership/rpc";
+
+// 会员域契约（AGENTS.md §1 商业化范围 2026-09-22 修订后纳入）。
+//
+// 数据所有权（§5）：本服务持有套餐目录、会员身份、权益判定口径与授予台账；
+// account 侧名片里的 vip 字段只是投影，事实源在这里。
+//
+// 资金语义（关键，别误读）：本服务不碰钱。开通会员的钱由 trade-order 建单、
+// payment 走**沙箱台账**受理，履约时才调 GrantMembership。因此
+// CheckEntitlement 的 granted=true 是「授予表里确实有没过期的一行」的真实读结论，
+// 不是硬编码返回真；没有授予记录就返回未开通。真实支付渠道、退款到卡、提现出金
+// 在本项目一概不开接口。
+
+// 空响应
+message EmptyReply {}
+
+// 会员类型
+enum VipType {
+  VIP_TYPE_UNSPECIFIED = 0;
+  VIP_TYPE_PREMIUM = 1;      // 大会员
+  VIP_TYPE_PREMIUM_PLUS = 2; // 超级大会员（权益取大会员的超集）
+}
+
+// 套餐售卖状态。DRAFT 不对外可见也不可下单；OFF_SALE 只对存量续费可见。
+enum PlanSaleState {
+  PLAN_SALE_STATE_UNSPECIFIED = 0;
+  PLAN_SALE_STATE_DRAFT = 1;
+  PLAN_SALE_STATE_ON_SALE = 2;
+  PLAN_SALE_STATE_OFF_SALE = 3;
+}
+
+// 客户端平台位掩码：决定套餐在哪个端可见、能用什么支付方式。
+// 不写死某个端的 UI 行为（§6），只提供可选性。
+enum PlanPlatform {
+  PLAN_PLATFORM_UNSPECIFIED = 0;
+  PLAN_PLATFORM_ANDROID = 1;
+  PLAN_PLATFORM_IOS = 2;
+  PLAN_PLATFORM_HARMONY = 3;
+  PLAN_PLATFORM_DESKTOP = 4;
+  PLAN_PLATFORM_WEB = 5;
+}
+
+// 授予来源。除 ADMIN_OPS/EXPERIENCE 外都应能回溯到一条 payment 流水。
+enum GrantSource {
+  GRANT_SOURCE_UNSPECIFIED = 0;
+  GRANT_SOURCE_SANDBOX_PURCHASE = 1; // 沙箱订单履约开通
+  GRANT_SOURCE_SANDBOX_AUTO_RENEW = 2; // 沙箱自动续费（cron 触发，不产生真实扣款）
+  GRANT_SOURCE_ADMIN_OPS = 3;        // 运营手工开通/延长（必须有 reason）
+  GRANT_SOURCE_EXPERIENCE = 4;       // 体验会员（活动发放）
+  GRANT_SOURCE_LEGACY_IMPORT = 5;    // 存量数据迁移
+}
+
+// 权益判定未通过的原因。是结论枚举，不是错误码：调用方要能区分「没买」和「过期」。
+enum EntitlementReason {
+  ENTITLEMENT_REASON_UNSPECIFIED = 0;
+  ENTITLEMENT_GRANTED = 1;      // 通过
+  ENTITLEMENT_NO_MEMBERSHIP = 2; // 从未开通
+  ENTITLEMENT_EXPIRED = 3;       // 曾开通但已过期
+  ENTITLEMENT_CODE_DISABLED = 4; // 权益码本身被下线（运营在本地关掉了）
+  ENTITLEMENT_CODE_UNKNOWN = 5;  // 权益码不存在（调用方传错，必须暴露而不是放行）
+  ENTITLEMENT_MID_INVALID = 6;   // mid 非正数（游客态由调用方自己判定为不通过）
+  ENTITLEMENT_TIER_NOT_ENOUGH = 7; // 是有效会员但档位不足（持有档 < 权益码要求档），客户端要能区分「没会员」和「档位不够」
+}
+
+// 套餐（SKU）。价格以最小货币单位（分）计，currency 固定 CNY 也仍要显式带上。
+message PlanInfo {
+  int64 plan_id = 1;
+  string plan_code = 2;             // 对外稳定编码，下单用它而不是 plan_id
+  string name = 3;
+  string description = 4;
+  VipType vip_type = 5;
+  int32 duration_days = 6;          // 单个售卖单位的时长（月卡=31、季卡=93、年卡=366）
+  int32 unit_count = 7;             // 一次购买包含几个 duration_days，年卡可为 12
+  int64 price_minor = 8;            // 原价（分）
+  int64 prom_price_minor = 9;       // 促销价（分）；0 表示无促销
+  string currency = 10;
+  repeated PlanPlatform platforms = 11; // 可见平台
+  bool auto_renew_supported = 12;       // 是否支持签约自动续费
+  PlanSaleState state = 13;
+  int64 version = 14;               // CAS 位
+  int64 ctime = 15;
+  int64 mtime = 16;
+  string created_by = 17;
+  string updated_by = 18;
+}
+
+// 权益码目录项：某个能力需要哪一档会员。
+message EntitlementInfo {
+  string code = 1;      // 例如 vip.high_bitrate / vip.early_access
+  string name = 2;
+  string description = 3;
+  VipType min_vip_type = 4; // 达到该档（含更高档）才通过
+  bool enabled = 5;
+  int64 version = 6;
+  int64 ctime = 7;
+  int64 mtime = 8;
+}
+
+// 用户会员身份（按 mid + vip_type 一行）。
+message MembershipInfo {
+  int64 mid = 1;
+  VipType vip_type = 2;
+  int64 start_at = 3;
+  int64 expire_at = 4;              // 到期时间（Unix 秒）；<= now 即已过期
+  bool auto_renew = 5;              // 自动续费签约位（沙箱：只记录意愿，不产生真实扣款协议）
+  string auto_renew_channel = 6;    // 签约渠道标识，未签约为空
+  int64 auto_renew_signed_at = 7;
+  GrantSource source = 8;           // 最近一次变更来源
+  int32 paid_month_count = 9;       // 累计付费月数快照
+  int64 version = 10;
+  int64 ctime = 11;
+  int64 mtime = 12;
+}
+
+// 授予/变更台账（谁、因为什么、动了多少天，必须可回溯）
+message GrantInfo {
+  int64 grant_id = 1;
+  int64 mid = 2;
+  VipType vip_type = 3;
+  string action = 4;                // GRANT / EXTEND / REVOKE / EXPIRE
+  int32 delta_days = 5;             // 本次影响的时长，收回为负
+  int64 plan_id = 6;                // 关联套餐，0 表示无（运营手工/迁移）
+  GrantSource source = 7;
+  string biz_order_no = 8;          // 订单号引用（跨服务只存主键，不建外键）
+  string payment_no = 9;            // 资金流水号引用
+  int64 before_expire_at = 10;
+  int64 after_expire_at = 11;
+  string operator = 12;             // 运营工号/服务身份；用户自助开通为 "user"
+  string request_id = 13;           // 幂等键
+  string reason = 14;               // 台账摘要：不含 PII 与凭据
+  int64 ctime = 15;
+}
+
+// --- 套餐读侧 ---
+
+message ListPlansReq {
+  PlanPlatform platform = 1; // 过滤：某端可见（UNSPECIFIED 表示不按平台过滤）
+  VipType vip_type = 2;      // 过滤档位，UNSPECIFIED 表示全部
+  bool on_sale_only = 3;     // 终端面 true；admin 面 false
+}
+
+message ListPlansReply {
+  repeated PlanInfo plans = 1;
+}
+
+message GetPlanReq {
+  int64 plan_id = 1;   // 与 plan_code 二选一
+  string plan_code = 2;
+}
+
+message GetPlanReply {
+  bool found = 1;
+  PlanInfo plan = 2;
+}
+
+// --- 套餐写侧（admin）---
+
+message UpsertPlanReq {
+  // plan_id/plan_code：plan_code 已存在则视为更新，否则新建。
+  int64 plan_id = 1;
+  string plan_code = 2;
+  string name = 3;
+  string description = 4;
+  VipType vip_type = 5;
+  int32 duration_days = 6;
+  int32 unit_count = 7;
+  int64 price_minor = 8;
+  int64 prom_price_minor = 9;
+  string currency = 10;
+  repeated PlanPlatform platforms = 11;
+  bool auto_renew_supported = 12;
+  int64 expected_version = 13; // 更新时的 CAS 位；新建传 0
+  string operator = 14;        // 由网关按会话渲染，不接受客户端自报
+  string request_id = 15;      // 幂等键
+  string reason = 16;          // 本次改档的理由（进套餐变更台账；空则记默认摘要）
+}
+
+// 上下架。只允许 DRAFT→ON_SALE、ON_SALE→OFF_SALE、OFF_SALE→ON_SALE；
+// 改价不走这里，必须新建 DRAFT 版本再切换，避免「改完价格对已下单用户追溯生效」。
+message SetPlanStateReq {
+  int64 plan_id = 1;
+  PlanSaleState target_state = 2;
+  int64 expected_version = 3;
+  string operator = 4;
+  string request_id = 5;
+  string reason = 6; // 上下架必须写理由，进变更台账
+}
+
+message ListPlansAdminReq {
+  int64 page = 1; // 从 1 开始
+  int64 size = 2;
+  PlanSaleState state = 3; // UNSPECIFIED 表示不过滤
+  VipType vip_type = 4;
+  string keyword = 5;      // 匹配 plan_code/name 前缀
+}
+
+message ListPlansAdminReply {
+  repeated PlanInfo plans = 1;
+  int64 total = 2;
+  int64 page = 3;
+  int64 size = 4;
+}
+
+// --- 会员身份读侧 ---
+
+message GetMembershipReq {
+  int64 mid = 1;
+  VipType vip_type = 2; // UNSPECIFIED 返回用户当前生效的最高档
+}
+
+message GetMembershipReply {
+  bool found = 1;              // 从未开通过
+  MembershipInfo membership = 2;
+  int64 server_now = 3;        // 让调用方无需自取时钟即可判过期
+  repeated EntitlementInfo granted_entitlements = 4; // 当前档位可得的权益码（只读投影，便于详情页一次拿全）
+}
+
+message CheckEntitlementReq {
+  int64 mid = 1;
+  string code = 2;
+}
+
+message CheckEntitlementReply {
+  bool granted = 1;
+  EntitlementReason reason = 2;
+  int64 expire_at = 3;      // 判定依据的那一行到期时间，未开通为 0
+  VipType vip_type = 4;     // 判定依据的档位
+}
+
+message CheckEntitlementsReq {
+  int64 mid = 1;
+  repeated string codes = 2; // 播放详情页一次问清多项能力
+}
+
+message EntitlementDecision {
+  string code = 1;
+  bool granted = 2;
+  EntitlementReason reason = 3;
+}
+
+message CheckEntitlementsReply {
+  repeated EntitlementDecision decisions = 1;
+  int64 expire_at = 2;
+  VipType vip_type = 3;
+}
+
+// --- 会员身份写侧 ---
+
+// 开通/续期。幂等由 request_id 唯一索引保证；同一 request_id 重放返回首次结果，
+// 第二次带不同参数不得静默改口径（返回冲突错误）。
+message GrantMembershipReq {
+  int64 mid = 1;
+  VipType vip_type = 2;
+  int64 plan_id = 3;        // 0 表示无套餐（运营手工发放）
+  int32 delta_days = 4;     // 本次增加的时长；REVOKE 走单独接口
+  GrantSource source = 5;
+  string biz_order_no = 6;
+  string payment_no = 7;
+  string operator = 8;
+  string request_id = 9;
+  string reason = 10;
+}
+
+message GrantMembershipReply {
+  bool duplicated = 1; // true 表示命中 request_id 重放，未再次加时长
+  MembershipInfo membership = 2;
+  int64 grant_id = 3;
+}
+
+// 收回（运营纠错/退款回收）。剩余时长清零或按天扣回，两种语义由参数区分。
+message RevokeMembershipReq {
+  int64 mid = 1;
+  VipType vip_type = 2;
+  bool clear_remaining = 3; // true 立即失效；false 只扣回 delta_days
+  int32 delta_days = 4;
+  string operator = 5;
+  string request_id = 6;
+  string reason = 7; // 必填：收回是有后果的动作，无理由不受理
+  // 追溯位：退款审批链路（trade-order → RevokeMembership）必须能说明「收回的是哪一单的权益」，
+  // 否则 mb_grant 上「退款回收」和「运营纠错」两类台账无法区分。三个字段可选，
+  // 全空即视为运营手工收回（source=ADMIN_OPS）。
+  int64 plan_id = 8;
+  string biz_order_no = 9;
+  string payment_no = 10;
+}
+
+message RevokeMembershipReply {
+  bool duplicated = 1;
+  MembershipInfo membership = 2;
+  int64 grant_id = 3;
+}
+
+// 自动续费签约/解约。沙箱语义：只翻转意愿位，不建立任何真实代扣协议。
+message SetAutoRenewReq {
+  int64 mid = 1;
+  VipType vip_type = 2;
+  bool on = 3;
+  string channel = 4;    // on=true 时的渠道标识（SANDBOX 之外的值一律拒绝）
+  string operator = 5;   // 用户自助时为 "user"
+  string request_id = 6;
+  string reason = 7;
+}
+
+message SetAutoRenewReply {
+  bool duplicated = 1;
+  MembershipInfo membership = 2;
+}
+
+// --- 台账与批处理 ---
+
+message ListGrantsReq {
+  int64 mid = 1;           // 0 表示跨用户查（admin 面）
+  VipType vip_type = 2;
+  GrantSource source = 3;
+  string biz_order_no = 4;
+  int64 from_ts = 5;
+  int64 to_ts = 6;
+  int64 page = 7;
+  int64 size = 8;
+}
+
+message ListGrantsReply {
+  repeated GrantInfo grants = 1;
+  int64 total = 2;
+  int64 page = 3;
+  int64 size = 4;
+}
+
+// cron 扫描到期区间（按 expire_at 索引，闭区间）。
+message ListExpiringMembershipsReq {
+  int64 from_expire_at = 1;
+  int64 to_expire_at = 2;
+  bool auto_renew_only = 3;
+  int64 limit = 4; // 单批上限，超限由服务侧裁剪而不是报错
+}
+
+message ListExpiringMembershipsReply {
+  repeated MembershipInfo memberships = 1;
+  int64 next_expire_at_cursor = 2; // 0 表示本区间已扫完
+}
+
+// cron 幂等置过期：只有 expire_at 确实早于 now 才生效，否则拒绝。
+message ExpireMembershipReq {
+  int64 mid = 1;
+  VipType vip_type = 2;
+  string operator = 3;    // 固定 "cron"
+  string request_id = 4;
+  string reason = 5;      // 进 EXPIRE 台账的理由（空则记默认摘要）
+}
+
+message ExpireMembershipReply {
+  bool skipped = 1;      // 未到期或已处理过
+  int64 grant_id = 2;
+  MembershipInfo membership = 3;
+}
+
+// --- 权益码目录（admin 写、内部读）---
+
+message UpsertEntitlementReq {
+  string code = 1;
+  string name = 2;
+  string description = 3;
+  VipType min_vip_type = 4;
+  bool enabled = 5;
+  int64 expected_version = 6;
+  string operator = 7;
+  string request_id = 8;
+}
+
+message ListEntitlementsReq {
+  bool enabled_only = 1;
+}
+
+message ListEntitlementsReply {
+  repeated EntitlementInfo entitlements = 1;
+}
+
+// Membership 会员身份、套餐与权益判定服务。
+service Membership {
+  // 终端套餐列表（只含在售且平台可见）
+  rpc ListPlans(ListPlansReq) returns (ListPlansReply);
+  // 单个套餐读取（下单前置校验用）
+  rpc GetPlan(GetPlanReq) returns (GetPlanReply);
+  // 运营面：新建或修改套餐草稿
+  rpc UpsertPlan(UpsertPlanReq) returns (PlanInfo);
+  // 运营面：上下架（带理由，写变更台账）
+  rpc SetPlanState(SetPlanStateReq) returns (PlanInfo);
+  // 运营面：分页查询全部套餐（含草稿与已下架）
+  rpc ListPlansAdmin(ListPlansAdminReq) returns (ListPlansAdminReply);
+
+  // 我的会员状态
+  rpc GetMembership(GetMembershipReq) returns (GetMembershipReply);
+  // 单项权益判定——全站唯一的会员权益口径出口
+  rpc CheckEntitlement(CheckEntitlementReq) returns (CheckEntitlementReply);
+  // 多项权益判定（播放详情页等一次问多项）
+  rpc CheckEntitlements(CheckEntitlementsReq) returns (CheckEntitlementsReply);
+
+  // 开通/续期（只由订单履约或运营授权调用）
+  rpc GrantMembership(GrantMembershipReq) returns (GrantMembershipReply);
+  // 收回（退款回收/运营纠错）
+  rpc RevokeMembership(RevokeMembershipReq) returns (RevokeMembershipReply);
+  // 自动续费签约位翻转（沙箱，不建真实代扣协议）
+  rpc SetAutoRenew(SetAutoRenewReq) returns (SetAutoRenewReply);
+
+  // 授予台账分页（运营面与用户面共用，mid=0 才有跨用户语义）
+  rpc ListGrants(ListGrantsReq) returns (ListGrantsReply);
+  // cron：扫描到期区间
+  rpc ListExpiringMemberships(ListExpiringMembershipsReq) returns (ListExpiringMembershipsReply);
+  // cron：幂等置过期
+  rpc ExpireMembership(ExpireMembershipReq) returns (ExpireMembershipReply);
+
+  // 权益码目录读取
+  rpc ListEntitlements(ListEntitlementsReq) returns (ListEntitlementsReply);
+  // 运营面：权益码新增/开关
+  rpc UpsertEntitlement(UpsertEntitlementReq) returns (EntitlementInfo);
+}

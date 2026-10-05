@@ -1,0 +1,40 @@
+# payment.v1 资金域 RPC（沙箱台账）
+# 键名与 services/payment/internal/config/config.go 一一对应，
+# 由 internal/config/config_load_test.go 钉住，改一边必须改另一边。
+Name: payment.v1.rpc
+ListenOn: 0.0.0.0:8161
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  # 注册键不带连字符，与 Name 一致（docs/commands.md 的 goctl 命名口径）
+  Key: payment.v1.rpc
+
+# 键名固定为 CacheRedis：zrpc.RpcServerConf 内嵌了同名 Redis 字段（限流用），
+# 业务缓存必须用 CacheRedis，否则配置加载报 "conflict key redis"。
+# 资金台账的判定一律走 MySQL，本项目的 Redis 只预留给读侧列表缓存。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL 主库 DSN（仅本地示例，生产从配置中心/Secret 注入，禁止提交真实凭据）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_payment?charset=utf8mb4&parseTime=true&loc=Local
+
+# 资金领域参数
+Payment:
+  # 唯一币种；请求带其他币种直接拒绝，不做隐式换汇
+  DefaultCurrency: CNY
+  # 单笔充值下限/上限（分）。MaxRechargeMinor=200000 即 2000 元，防手滑。
+  MinRechargeMinor: 1
+  MaxRechargeMinor: 200000
+  # 单次运营调整（AdjustBalance）绝对值上限（分）
+  MaxAdjustMinor: 1000000
+  # 列表接口单次返回上限
+  MaxPageSize: 100
+  # 跨用户（mid=0）查询的最大时间窗（秒），默认 30 天；超窗或不给窗口一律拒绝
+  MaxListWindowSeconds: 2592000
+  # 列表接口允许的最大 OFFSET，兜底深翻页
+  MaxListOffset: 10000
+  # 唯一可用渠道：SANDBOX 只改本地台账，不请求任何第三方支付，不产生真实资金移动。
+  # 写这里是为了让「沙箱」成为可配置可查证的事实，而不是只写在 README 里。
+  AllowedChannels:
+  - SANDBOX

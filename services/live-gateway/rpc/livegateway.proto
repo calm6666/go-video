@@ -1,0 +1,659 @@
+syntax = "proto3";
+
+package livegateway.v1;
+
+option go_package = "go-video/services/live-gateway/rpc";
+
+// live-gateway 服务：直播长连接（WebSocket）会话与房间广播的领域服务。
+//
+// 数据分层（本契约最重要的约束，AGENTS.md §5 + services/live-gateway/README.md）：
+//   * 主存储 Redis（易失、可重建）：连接租约、房间订阅集合、心跳计数、广播去重与限流窗口、
+//     重连票据的短期有效位。Redis 丢失只造成"客户端重连"，不造成业务事实丢失。
+//   * 业务库 MySQL go_video_live_gateway（只存需要审计/重建的少数表）：
+//     live_gw_room_route（房间→节点路由，重启后重建路由表）、
+//     live_gw_access_quota（接入与广播配额配置）、
+//     live_gw_broadcast_log（广播审计流水，只存摘要不存正文）、
+//     live_gw_reconnect_ticket（重连票据签发/使用的审计与撤销名单）。
+//   * 绝对不把逐条连接状态（每连接的在线表、心跳明细、订阅成员列表）写入 MySQL：
+//     这类数据高频、易失、可从 Redis 与客户端重连恢复，落库只会拖垮主库。
+//
+// 安全约束：广播消息可以丢弃（限流、无路由、订阅者离线），但绝不伪造权限：
+//   * 任何下发入口都必须先校验连接票据 / 租约的 (mid, room_id, 有效期) 三元组一致；
+//   * 权限来源是调用方（gateway/app 已完成登录鉴权）传入的 mid + 本服务的路由/配额配置，
+//     本服务不接受客户端自报的角色；
+//   * 校验失败一律返回明确的 deny/drop 原因，不返回"成功下发 0 人"来掩盖越权。
+//
+// 本期不实现真实 WebSocket 服务端：仓库无 websocket 依赖（AGENTS.md 禁止新增依赖），
+// 连接接入由 internal/connection 的 Manager 接口 + 显式 stub 承接，接入步骤见服务 README。
+//
+// 时间字段统一 Unix 秒（0 表示未设置），时长/间隔用毫秒或秒并在字段注释标明。
+// 跨服务只传主键：room_id（live-room）、mid、asset_id/aid 等；本契约不 import 其它服务 proto。
+
+// ---------------------------------------------------------------------------
+// 枚举
+// ---------------------------------------------------------------------------
+
+// 客户端平台（与 playback.Platform 编号保持一致，跨端排障不歧义；不支持小程序，AGENTS.md §1）。
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0; // 未指定
+  PLATFORM_ANDROID = 1;     // Android
+  PLATFORM_IOS = 2;         // iOS
+  PLATFORM_HARMONY = 3;     // HarmonyOS
+  PLATFORM_DESKTOP = 4;     // 电脑客户端
+}
+
+// 连接角色。注意：这是 live-gateway 下发权限的唯一依据，
+// 由调用方（已完成登录鉴权的 gateway/app 或内部服务）声明并由本服务对照房间归属校验，
+// 客户端自报角色一律按 VIEWER 处理。
+enum ConnRole {
+  CONN_ROLE_UNSPECIFIED = 0; // 未指定（按 VIEWER 处理并记录告警）
+  CONN_ROLE_VIEWER = 1;      // 观众
+  CONN_ROLE_ANCHOR = 2;      // 主播（room_id 必须等于其 own 的房间，否则拒绝）
+  CONN_ROLE_ROOM_ADMIN = 3;  // 房间管理员（房管）
+  CONN_ROLE_OPERATOR = 4;    // 运营（管理后台连接，只收系统事件）
+  CONN_ROLE_SERVICE = 5;     // 内部服务（如 live-ingest 转发的机器事件）
+}
+
+// 租约状态（Redis 为事实源；DB 仅在审计视图里出现同样的取值）。
+enum LeaseState {
+  LEASE_STATE_UNSPECIFIED = 0; // 未指定
+  LEASE_STATE_ACTIVE = 1;      // 有效（未过期）
+  LEASE_STATE_EXPIRED = 2;     // 已过期（TTL 到，客户端需重连）
+  LEASE_STATE_RELEASED = 3;    // 已释放（正常断开）
+  LEASE_STATE_KICKED = 4;      // 被强制下线（风控/审核/主播踢人）
+}
+
+// 重连票据状态（live_gw_reconnect_ticket.state）。
+enum TicketState {
+  TICKET_STATE_UNSPECIFIED = 0; // 未指定
+  TICKET_STATE_ISSUED = 1;      // 已签发，未使用
+  TICKET_STATE_USED = 2;        // 已换取新租约（一次性）
+  TICKET_STATE_REVOKED = 3;     // 已撤销（封禁/踢人/房间关闭）
+  TICKET_STATE_EXPIRED = 4;     // 已过期
+}
+
+// 房间路由状态（live_gw_room_route.state）。
+enum RouteState {
+  ROUTE_STATE_UNSPECIFIED = 0; // 未指定
+  ROUTE_STATE_SERVING = 1;     // 该节点承接房间广播
+  ROUTE_STATE_DRAINING = 2;    // 排空中（只出不进，节点优雅下线）
+  ROUTE_STATE_OFFLINE = 3;     // 已下线（无有效路由）
+}
+
+// 广播消息类别（live_gw_broadcast_log.kind）。
+// 只包含社区与运行事件：不含会员、投币、支付、广告等商业化消息（AGENTS.md §1）。
+enum BroadcastKind {
+  BROADCAST_KIND_UNSPECIFIED = 0; // 未指定
+  BROADCAST_KIND_DANMAKU = 1;     // 直播弹幕（由 danmaku 或客户端经 gateway/app 转发）
+  BROADCAST_KIND_ROOM_STATE = 2;  // 房间状态：开播、断流、下播
+  BROADCAST_KIND_SYSTEM = 3;      // 系统通知：公告、房间整改提示
+  BROADCAST_KIND_INTERACTION = 4; // 社区互动提示：点赞/收藏/分享计数（非商业化）
+  BROADCAST_KIND_MODERATION = 5;  // 审核/风控处置：禁言、封停、踢下线
+  BROADCAST_KIND_ANCHOR_TIP = 6;  // 主播提词（文本，不含任何付费提醒）
+}
+
+// 下发/丢弃原因。丢弃必须可解释：不得用"成功"掩盖越权或配置缺失。
+enum DropReason {
+  DROP_REASON_UNSPECIFIED = 0;    // 未指定
+  DROP_REASON_OK = 1;             // 未丢弃（正常下发）
+  DROP_REASON_NO_ROUTE = 2;       // 房间无在线节点路由
+  DROP_REASON_NO_SUBSCRIBER = 3;  // 房间无订阅者（消息可丢弃，不报错）
+  DROP_REASON_PERMISSION_DENIED = 4; // 越权：角色无权发该类消息 / 票据三元组不匹配
+  DROP_REASON_BAD_TICKET = 5;     // 票据无效：过期、已撤销、与 mid/room 不匹配
+  DROP_REASON_RATE_LIMITED = 6;   // 超过配额（房间或发送者维度）
+  DROP_REASON_DUPLICATED = 7;     // 同一 message_id 重复投递（幂等丢弃）
+  DROP_REASON_PAYLOAD_TOO_LARGE = 8; // 载荷超过 Broadcast.MaxPayloadBytes
+  DROP_REASON_ROOM_CLOSED = 9;    // 房间已关闭/不可广播（由 live-room 判定，见已知缺口）
+  DROP_REASON_TRANSPORT_UNAVAILABLE = 10; // 下发通道未接线（stub，见已知缺口）
+}
+
+// 单播投递结果（SendToUser）。
+enum DeliveryResult {
+  DELIVERY_RESULT_UNSPECIFIED = 0; // 未指定
+  DELIVERY_RESULT_SENT = 1;        // 已投递到该用户的连接
+  DELIVERY_RESULT_NO_LEASE = 2;    // 该用户在该房间无有效租约
+  DELIVERY_RESULT_DENIED = 3;      // 发送者越权
+  DELIVERY_RESULT_TRANSPORT_UNAVAILABLE = 4; // 下发通道未接线（stub）
+}
+
+// 配额作用域（live_gw_access_quota.scope）。
+enum QuotaScope {
+  QUOTA_SCOPE_UNSPECIFIED = 0; // 未指定
+  QUOTA_SCOPE_GLOBAL = 1;      // 全局默认（scope_id=0）
+  QUOTA_SCOPE_NODE = 2;        // 单个网关节点（scope_id=node_id 的哈希）
+  QUOTA_SCOPE_ROOM = 3;        // 单个房间（scope_id=room_id，大房间提额）
+  QUOTA_SCOPE_USER = 4;        // 单个用户（scope_id=mid，风控降配）
+}
+
+// ---------------------------------------------------------------------------
+// 公共结构
+// ---------------------------------------------------------------------------
+
+// 空响应
+message EmptyReply {}
+
+// 统一分页参数：pn 从 1 开始，ps 上限 50（服务端夹取，不报错）。
+message PageParam {
+  int32 pn = 1; // 页码（从 1 开始，<=0 视为 1）
+  int32 ps = 2; // 每页大小（最大 50，<=0 或超限取默认 20）
+}
+
+// 统一分页响应头部。
+message PageResult {
+  int32 total = 1; // 符合条件的总行数
+}
+
+// 客户端标识（脱敏：不存 IP 明文、不存设备指纹原值）。
+message ClientInfo {
+  Platform platform = 1;      // 客户端平台
+  string app_version = 2;     // 客户端版本号
+  string device_id_hash = 3;  // 设备标识摘要（sha256 hex 前 32 位），禁止明文
+  string network_type = 4;    // wifi/4g/5g 等接入类型（仅排障，不参与权限判定）
+}
+
+// 连接租约（主存储在 Redis；返回体即客户端重连凭据）。
+message LeaseInfo {
+  string lease_id = 1;         // 租约 ID（ULID）
+  string conn_id = 2;          // 连接标识（客户端生成，(node,conn) 维度唯一）
+  int64 room_id = 3;           // 房间 ID
+  int64 mid = 4;               // 用户 ID（0 表示游客）
+  ConnRole role = 5;           // 角色（本服务判定结果，不是客户端自报值）
+  string node_id = 6;          // 承载该连接的网关节点标识
+  LeaseState state = 7;        // 状态
+  int64 issued_at = 8;         // 签发时间（Unix 秒）
+  int64 expire_at = 9;         // 过期时间（Unix 秒）
+  int32 ttl_seconds = 10;      // 当前剩余 TTL（秒）
+  int64 renew_count = 11;      // 续租次数（断线重连排障用）
+  int64 last_heartbeat_at = 12; // 最近一次心跳（Unix 秒）
+  string reconnect_ticket = 13; // 随租约下发的重连票据（一次性，见 IssueReconnectTicket）
+  string trace_id = 14;
+}
+
+// ---------------------------------------------------------------------------
+// 连接租约与心跳
+// ---------------------------------------------------------------------------
+
+message AcquireConnectionLeaseReq {
+  int64 room_id = 1;           // 必填
+  int64 mid = 2;               // 登录用户；0 表示游客（是否允许由配额配置决定）
+  ConnRole claimed_role = 3;   // 调用方声明的角色；本服务对照房间归属校验后可能降级为 VIEWER
+  string conn_id = 4;          // 客户端连接标识（与 node_id 组成幂等键）
+  string node_id = 5;          // 承载连接的网关节点标识（由 WS 接入层传入）
+  ClientInfo client = 6;       // 客户端信息（脱敏）
+  int32 ttl_seconds = 7;       // 期望租约 TTL（0 用服务端默认；上限受配额配置夹取）
+  string request_id = 8;       // 幂等键：同 request_id 重放返回同一租约
+  string trace_id = 9;
+}
+
+message AcquireConnectionLeaseReply {
+  LeaseInfo lease = 1;          // 通过的租约
+  bool allowed = 2;             // 是否允许接入
+  DropReason deny_reason = 3;   // 拒绝原因（allowed=false 必填，不返回空成功）
+  string deny_detail = 4;       // 拒绝说明（脱敏）
+  int32 quota_room_conns = 5;   // 该房间当前连接数（Redis 计数，用于客户端提示）
+}
+
+message RenewConnectionLeaseReq {
+  string lease_id = 1;         // 必填
+  string conn_id = 2;
+  int64 room_id = 3;           // 必须与租约一致，否则视为越权
+  int64 mid = 4;               // 必须与租约一致
+  int32 ttl_seconds = 5;       // 0 表示用默认
+  string trace_id = 6;
+}
+
+message RenewConnectionLeaseReply {
+  bool renewed = 1;            // 是否续租成功
+  LeaseState state = 2;        // 当前状态
+  int64 expire_at = 3;         // 新过期时间（Unix 秒）
+  int32 ttl_seconds = 4;       // 新 TTL
+  DropReason deny_reason = 5;  // 失败原因（过期/被踢/三元组不匹配）
+}
+
+message ReleaseConnectionLeaseReq {
+  string lease_id = 1;
+  string conn_id = 2;
+  int64 room_id = 3;
+  int64 mid = 4;
+  string reason = 5;           // normal/shutdown/switch_room（仅审计，不影响释放）
+  string trace_id = 6;
+}
+
+message ConnectionLeaseReq {
+  string lease_id = 1;         // lease_id 与 (room_id, mid) 二选一：后者用于"该用户在该房间是否有连接"
+  string conn_id = 2;
+  int64 room_id = 3;
+  int64 mid = 4;
+}
+
+message ConnectionLeaseReply {
+  bool found = 1;              // 是否存在
+  LeaseInfo lease = 2;         // 命中时返回
+  int32 connection_count = 3;  // 该 (room,mid) 的连接数（多端同时在线场景）
+}
+
+message ReportClientHeartbeatReq {
+  string lease_id = 1;
+  string conn_id = 2;
+  int64 room_id = 3;
+  int64 mid = 4;
+  int64 client_time = 5;       // 客户端发送心跳时刻（Unix 秒，用于时钟漂移观测）
+  int32 seq = 6;               // 心跳序号（乱序到达时服务端只推进最大 seq）
+  int32 rtt_ms = 7;            // 客户端观测往返时延（毫秒，播放质量类指标）
+  int32 received_lag_ms = 8;   // 消息接收滞后（毫秒，QoE 观测）
+  string trace_id = 9;
+}
+
+message ReportClientHeartbeatReply {
+  bool accepted = 1;             // 是否接受（票据校验失败为 false 并给原因）
+  int64 server_time = 2;         // 服务端时间（Unix 秒，客户端校准用）
+  int32 ttl_seconds = 3;         // 剩余 TTL（提示客户端及时续租）
+  DropReason deny_reason = 4;
+}
+
+message ListRoomConnectionsReq {
+  int64 room_id = 1;             // 必填
+  int64 mid = 2;                 // <=0 表示整个房间
+  ConnRole role = 3;             // 按角色过滤（UNSPECIFIED 不过滤）
+  PageParam page = 4;
+  // 说明：数据来源是 Redis 订阅集合 + 租约表，不是 MySQL；列表用于运营排障与主播工具，
+  // 属于"读多写少的易失视图"，因此不落业务主库。
+}
+
+message ListRoomConnectionsReply {
+  PageResult page = 1;
+  repeated LeaseInfo leases = 2;
+  bool snapshot_from_cache = 3;  // true 表示 Redis 不可用时返回的是本地短缓存快照（可能偏旧）
+}
+
+// ---------------------------------------------------------------------------
+// 断线重连票据
+// ---------------------------------------------------------------------------
+
+message IssueReconnectTicketReq {
+  string lease_id = 1;         // 以现有租约为凭据签发（无有效租约则拒绝）
+  int64 room_id = 2;
+  int64 mid = 3;
+  int32 ttl_seconds = 4;       // 票据有效期（0 用服务端默认，上限受配额配置夹取）
+  string request_id = 5;       // 幂等键
+  string trace_id = 6;
+}
+
+message ReconnectTicketInfo {
+  string ticket = 1;           // 票据串（HMAC 签名，不含明文身份信息）
+  string ticket_id = 2;        // 票据 ID（撤销与审计主键）
+  int64 room_id = 3;
+  int64 mid = 4;
+  string conn_id = 5;
+  string node_id = 6;
+  TicketState state = 7;
+  ConnRole role = 8;           // 票据绑定的角色（换取租约时不再接受客户端声明）
+  int64 issued_at = 9;         // Unix 秒
+  int64 expire_at = 10;        // Unix 秒
+  int64 used_at = 11;          // Unix 秒（0 表示未使用）
+  string issue_reason = 12;    // 签发场景：normal/reconnect/room_switch
+  string trace_id = 13;
+}
+
+message RedeemReconnectTicketReq {
+  string ticket = 1;           // 必填
+  int64 room_id = 2;           // 必须与票据一致
+  int64 mid = 3;               // 必须与票据一致
+  string conn_id = 4;          // 新连接标识
+  string node_id = 5;          // 新承载节点
+  int32 ttl_seconds = 6;
+  string request_id = 7;       // 幂等键：同 request_id 重放返回同一新租约
+  string trace_id = 8;
+}
+
+message RedeemReconnectTicketReply {
+  bool allowed = 1;
+  LeaseInfo lease = 2;              // 换取到的新租约
+  TicketState ticket_state = 3;     // 票据最终状态（USED/EXPIRED/REVOKED）
+  DropReason deny_reason = 4;       // 拒绝原因（三元组不匹配/过期/撤销）
+  string deny_detail = 5;
+  int64 last_offline_at = 6;        // 上一次断开时间（Unix 秒，客户端可提示断线时长）
+  int64 missed_message_estimate = 7; // 断线期间估算丢失的广播条数（可丢弃语义，仅提示）
+}
+
+message RevokeReconnectTicketReq {
+  string ticket_id = 1;        // ticket_id 与 (room_id, mid) 二选一（后者撤销该用户在该房间的全部票据）
+  int64 room_id = 2;
+  int64 mid = 3;
+  string reason = 4;           // 必填：banned/kicked/room_closed/risk（审计）
+  string operator = 5;         // 操作者标识
+  string request_id = 6;       // 幂等键
+  string trace_id = 7;
+}
+
+message RevokeReconnectTicketReply {
+  bool revoked = 1;
+  int32 revoked_count = 2;     // 撤销的票据数
+  TicketState state = 3;
+}
+
+// ---------------------------------------------------------------------------
+// 房间路由与订阅
+// ---------------------------------------------------------------------------
+
+message JoinRoomReq {
+  string lease_id = 1;         // 必填：先有租约才能订阅（防止无凭据的订阅注入）
+  string conn_id = 2;
+  int64 room_id = 3;
+  int64 mid = 4;
+  string node_id = 5;          // 由 WS 接入层传入，本服务据此登记/复用房间路由
+  repeated string topics = 6;  // 订阅子通道（danmaku/state/interaction），空表示默认全集
+  string request_id = 7;       // 幂等键
+  string trace_id = 8;
+}
+
+message JoinRoomReply {
+  bool joined = 1;
+  int64 joined_at = 2;            // Unix 秒
+  int32 room_connection_count = 3; // 房间连接数（Redis）
+  RouteState route_state = 4;      // 房间路由状态
+  DropReason deny_reason = 5;      // 拒绝原因（租约无效/越权/配额满）
+  repeated string subscribed_topics = 6;
+}
+
+message LeaveRoomReq {
+  string lease_id = 1;
+  string conn_id = 2;
+  int64 room_id = 3;
+  int64 mid = 4;
+  repeated string topics = 5;   // 空表示退订全部
+  string reason = 6;
+  string trace_id = 7;
+}
+
+message RoomRouteReq {
+  int64 room_id = 1;           // 必填
+}
+
+message RoomRouteInfo {
+  int64 room_id = 1;
+  string node_id = 2;             // 主承接节点（房间广播的第一跳）
+  repeated string replica_nodes = 3; // 副本节点（大房间分片广播）
+  RouteState state = 4;
+  int32 shard_count = 5;          // 广播分片数
+  int32 serving_connections = 6;  // 该路由当前承载连接数（Redis 读数）
+  int64 version = 7;              // 乐观并发版本（路由切换需带 expected_version）
+  int64 updated_at = 8;           // Unix 秒
+  int64 ctime = 9;
+}
+
+message ListRoomRoutesReq {
+  string node_id = 1;          // 按节点过滤（空表示不过滤）
+  RouteState state = 2;
+  PageParam page = 3;
+}
+
+message ListRoomRoutesReply {
+  PageResult page = 1;
+  repeated RoomRouteInfo routes = 2;
+}
+
+message DrainRoomRouteReq {
+  int64 room_id = 1;
+  string node_id = 2;             // 要排空的节点
+  int64 expected_version = 3;     // 乐观并发版本
+  string target_node_id = 4;      // 迁移目标节点（空表示只排空不指定）
+  string reason = 5;              // 必填：node_shutdown/deploy/scale（审计）
+  string request_id = 6;          // 幂等键
+  string operator = 7;
+  string trace_id = 8;
+}
+
+// ---------------------------------------------------------------------------
+// 广播与单播
+// ---------------------------------------------------------------------------
+
+message BroadcastToRoomReq {
+  int64 room_id = 1;             // 必填
+  BroadcastKind kind = 2;        // 消息类别（决定权限矩阵与限流口径）
+  string message_id = 3;         // 幂等键：同 message_id 在同一房间只下发一次
+  int64 sender_mid = 4;          // 发送者（系统消息为 0）
+  ConnRole sender_role = 5;      // 发送者角色（由调用方声明，本服务按权限矩阵校验）
+  string sender_lease_id = 6;    // 用户态消息必须带租约或票据，服务端校验 (mid, room_id, 有效期)
+  string sender_ticket = 7;      // 无租约场景（如 HTTP 触发）用重连票据证明身份，二选一
+  bytes payload = 8;             // 载荷（JSON/二进制，受 Broadcast.MaxPayloadBytes 限制）
+  repeated string target_roles = 9; // 只投递给指定角色，空表示全体
+  repeated string target_topics = 10; // 子通道过滤，空表示全体
+  int64 expire_at = 11;          // 过期时刻（Unix 秒）：过期的消息直接丢弃（可丢弃语义）
+  int32 priority = 12;           // 0 普通、1 高（审核处置/房间状态优先，配额限流时可豁免）
+  bool require_reliable = 13;    // true 时投递失败要返回错误（用于审核处置）；默认 false 可丢弃
+  string trace_id = 14;
+}
+
+message BroadcastToRoomReply {
+  bool accepted = 1;                // 是否受理
+  string message_id = 2;            // 回显幂等键
+  DropReason drop_reason = 3;       // 未受理/丢弃原因（DROP_REASON_OK 表示正常下发）
+  int32 fanout_nodes = 4;           // 需要扇出的节点数
+  int32 targeted_connections = 5;   // 估算命中的连接数
+  int64 enqueued_at = 6;            // 受理时间（Unix 秒）
+  bool duplicated = 7;              // 命中 message_id 去重（重复投递）
+  int32 rate_remaining = 8;         // 该维度剩余配额（限流可观测）
+}
+
+message SendToUserReq {
+  int64 room_id = 1;
+  int64 target_mid = 2;             // 目标用户
+  BroadcastKind kind = 3;
+  string message_id = 4;            // 幂等键（(room,target,message_id) 唯一）
+  int64 sender_mid = 5;
+  ConnRole sender_role = 6;
+  string sender_lease_id = 7;
+  string sender_ticket = 8;
+  bytes payload = 9;
+  bool require_reliable = 10;
+  string trace_id = 11;
+}
+
+message SendToUserReply {
+  DeliveryResult result = 1;
+  DropReason deny_reason = 2;       // result=DENIED 时给出具体原因
+  int32 delivered_leases = 3;       // 命中该用户的连接数（多端）
+  string message_id = 4;
+}
+
+// ForwardDanmaku：danmaku / gateway/app 把直播弹幕交给房间广播。
+// 服务端不改变弹幕事实（落库仍由 danmaku 负责），只做权限校验、限流与扇出。
+message ForwardDanmakuReq {
+  int64 room_id = 1;
+  int64 danmaku_id = 2;             // danmaku 主键（引用，不复制弹幕正文入库）
+  int64 sender_mid = 3;
+  string sender_lease_id = 4;       // 发送者凭据（必须校验三元组）
+  string sender_ticket = 5;
+  string content_digest = 6;        // 正文摘要（sha256 hex 前 32）；正文经 payload 传输，不在本服务落库
+  bytes payload = 7;                // 下发给观看端的弹幕包（含正文，短期存在）
+  int64 sent_at = 8;                // 客户端发送时刻（Unix 秒）
+  string message_id = 9;            // 幂等键
+  string trace_id = 10;
+}
+
+message ForwardDanmakuReply {
+  bool accepted = 1;
+  DropReason drop_reason = 2;
+  int32 fanout_nodes = 3;
+  int32 targeted_connections = 4;
+  int32 rate_remaining = 5;
+  string message_id = 6;
+}
+
+// ForwardSystemEvent：开播/断流/下播/审核处置等系统事件的转发入口。
+// 事件源是 live-room / live-ingest / moderation，它们只传主键与本服务定义的载荷。
+message ForwardSystemEventReq {
+  int64 room_id = 1;
+  string event_id = 2;              // 上游事件 ID（按 event_id 幂等，重复转发只下发一次）
+  BroadcastKind kind = 3;           // ROOM_STATE / MODERATION / SYSTEM
+  string event_type = 4;            // 语义串：room.open/room.disconnect/room.close/moderation.mute
+  int64 anchor_mid = 5;             // 房间归属主播（本服务据此校验 ANCHOR 角色）
+  bytes payload = 6;                // 事件载荷
+  bool require_reliable = 7;        // 审核处置类事件必须可靠下发（false 时允许丢弃）
+  string source_service = 8;        // 来源服务名（审计）
+  string trace_id = 9;
+}
+
+message ForwardSystemEventReply {
+  bool accepted = 1;
+  string event_id = 2;
+  DropReason drop_reason = 3;
+  int32 fanout_nodes = 4;
+  int32 targeted_connections = 5;
+  bool duplicated = 6;
+}
+
+message KickConnectionReq {
+  int64 room_id = 1;
+  int64 mid = 2;                    // mid 与 lease_id 至少一个
+  string lease_id = 3;
+  string conn_id = 4;               // 只踢单条连接（空表示该用户在该房间全部连接）
+  string reason = 5;                // 必填：banned/risk/room_closed/anchor_block
+  int32 ban_seconds = 6;            // >0 时在 Redis 写禁止重连窗口（0 表示只断开）
+  bool revoke_tickets = 7;          // 是否同时撤销该用户的重连票据
+  string operator = 8;              // 操作者（审计）
+  string request_id = 9;            // 幂等键
+  string trace_id = 10;
+}
+
+message KickConnectionReply {
+  bool kicked = 1;
+  int32 kicked_connections = 2;
+  int32 revoked_tickets = 3;
+  int64 ban_until = 4;              // 禁止重连到该时刻（Unix 秒，0 表示不禁止）
+  DropReason deny_reason = 5;       // 操作者无权限时给出原因
+}
+
+// ---------------------------------------------------------------------------
+// 审计与配额配置
+// ---------------------------------------------------------------------------
+
+message BroadcastLogInfo {
+  int64 id = 1;
+  string message_id = 2;            // 幂等键（房间维度唯一）
+  int64 room_id = 3;
+  BroadcastKind kind = 4;
+  int64 sender_mid = 5;
+  ConnRole sender_role = 6;
+  string event_id = 7;              // 系统事件来源 ID（非事件投递为空）
+  string payload_digest = 8;        // 载荷摘要（sha256 hex 前 32），不存正文
+  int32 payload_bytes = 9;          // 载荷字节数
+  int32 fanout_nodes = 10;
+  int32 targeted_connections = 11;
+  int32 state = 12;                 // 1 已下发、2 已丢弃、3 越权拒绝、4 重复丢弃
+  DropReason drop_reason = 13;
+  string source_service = 14;
+  string trace_id = 15;
+  int64 ctime = 16;                 // Unix 秒
+}
+
+message ListBroadcastLogsReq {
+  int64 room_id = 1;                // 必填（审计按房间查，避免全表扫）
+  BroadcastKind kind = 2;
+  int64 sender_mid = 3;
+  bool only_dropped = 4;            // 只看被丢弃/被拒绝的
+  PageParam page = 5;
+}
+
+message ListBroadcastLogsReply {
+  PageResult page = 1;
+  repeated BroadcastLogInfo logs = 2;
+}
+
+message AccessQuotaInfo {
+  QuotaScope scope = 1;
+  int64 scope_id = 2;               // GLOBAL=0，NODE=节点哈希，ROOM=room_id，USER=mid
+  string scope_key = 3;             // 可读标识（如 node_id），仅展示与排障
+  int32 max_connections = 4;        // 该作用域最大连接数（0 表示继承上一层）
+  int32 broadcast_qps = 5;          // 广播 QPS 上限（0 表示继承）
+  int32 danmaku_qps = 6;            // 弹幕转发 QPS 上限（0 表示继承）
+  int32 lease_ttl_seconds = 7;      // 租约 TTL（0 表示默认）
+  int32 ticket_ttl_seconds = 8;     // 重连票据 TTL（0 表示默认）
+  int32 max_payload_bytes = 9;      // 单条广播载荷上限
+  bool allow_guest = 10;            // 是否允许游客（mid=0）接入
+  int64 version = 11;               // 乐观并发版本
+  string updated_by = 12;           // 最后修改者（运营账号，审计）
+  int64 ctime = 13;
+  int64 mtime = 14;
+}
+
+message AccessQuotaReq {
+  QuotaScope scope = 1;            // 必填
+  int64 scope_id = 2;
+}
+
+message UpsertAccessQuotaReq {
+  AccessQuotaInfo quota = 1;       // 必填（scope/scope_id 决定行）
+  int64 expected_version = 2;      // 乐观并发版本（0 表示新建，行已存在则返回冲突）
+  string operator = 3;             // 必填：运营账号，写入审计
+  string request_id = 4;           // 幂等键
+  string trace_id = 5;
+}
+
+// ---------------------------------------------------------------------------
+// 服务定义
+// ---------------------------------------------------------------------------
+
+// LiveGateway 长连接租约、房间路由与广播服务。
+// 不提供任何会员/付费直播/投币/广告相关的下发能力（AGENTS.md §1）。
+service LiveGateway {
+  // --- 连接租约与心跳（主存储 Redis） ---
+
+  // 申请连接租约：校验 (mid, room_id, role) 与配额，签发 lease_id + 重连票据
+  rpc AcquireConnectionLease(AcquireConnectionLeaseReq) returns (AcquireConnectionLeaseReply);
+  // 续租（TTL 刷新）：三元组不匹配一律拒绝，不静默改绑
+  rpc RenewConnectionLease(RenewConnectionLeaseReq) returns (RenewConnectionLeaseReply);
+  // 释放租约（正常断开/切房）
+  rpc ReleaseConnectionLease(ReleaseConnectionLeaseReq) returns (EmptyReply);
+  // 查询租约（下发前的权限校验入口之一）
+  rpc GetConnectionLease(ConnectionLeaseReq) returns (ConnectionLeaseReply);
+  // 客户端心跳簿记：推进 last_heartbeat/max_seq，抽样产出 QoE 事件
+  rpc ReportClientHeartbeat(ReportClientHeartbeatReq) returns (ReportClientHeartbeatReply);
+  // 房间在线连接列表（Redis 视图，运营排障与主播工具）
+  rpc ListRoomConnections(ListRoomConnectionsReq) returns (ListRoomConnectionsReply);
+
+  // --- 断线重连票据 ---
+
+  // 以现有租约为凭据签发一次性重连票据
+  rpc IssueReconnectTicket(IssueReconnectTicketReq) returns (ReconnectTicketInfo);
+  // 用票据换取新租约（校验 mid/room/有效期，一次性消费）
+  rpc RedeemReconnectTicket(RedeemReconnectTicketReq) returns (RedeemReconnectTicketReply);
+  // 撤销票据（封禁、踢人、房间关闭）
+  rpc RevokeReconnectTicket(RevokeReconnectTicketReq) returns (RevokeReconnectTicketReply);
+
+  // --- 房间路由与订阅 ---
+
+  // 加入房间（登记订阅关系 + 复用/创建房间路由）
+  rpc JoinRoom(JoinRoomReq) returns (JoinRoomReply);
+  // 退出房间
+  rpc LeaveRoom(LeaveRoomReq) returns (EmptyReply);
+  // 查询房间路由（广播第一跳与副本节点）
+  rpc GetRoomRoute(RoomRouteReq) returns (RoomRouteInfo);
+  // 分页查询房间路由（运营/发布排障）
+  rpc ListRoomRoutes(ListRoomRoutesReq) returns (ListRoomRoutesReply);
+  // 排空某节点上的房间路由（优雅下线，版本号乐观校验）
+  rpc DrainRoomRoute(DrainRoomRouteReq) returns (RoomRouteInfo);
+
+  // --- 广播、单播与事件转发 ---
+
+  // 房间广播：权限矩阵 + 配额限流 + message_id 去重，允许丢弃但原因必须可解释
+  rpc BroadcastToRoom(BroadcastToRoomReq) returns (BroadcastToRoomReply);
+  // 房间内单播（审核处置、私信提示等）
+  rpc SendToUser(SendToUserReq) returns (SendToUserReply);
+  // 弹幕转发（弹幕事实仍归 danmaku，本服务只扇出）
+  rpc ForwardDanmaku(ForwardDanmakuReq) returns (ForwardDanmakuReply);
+  // 系统事件转发（开播/断流/下播/审核处置）
+  rpc ForwardSystemEvent(ForwardSystemEventReq) returns (ForwardSystemEventReply);
+  // 强制下线（风控/审核/主播踢人），可同时撤销票据与写禁止重连窗口
+  rpc KickConnection(KickConnectionReq) returns (KickConnectionReply);
+
+  // --- 审计与配额配置 ---
+
+  // 分页查询广播审计流水（按房间）
+  rpc ListBroadcastLogs(ListBroadcastLogsReq) returns (ListBroadcastLogsReply);
+  // 读取某作用域生效的配额（含继承链解析结果）
+  rpc GetAccessQuota(AccessQuotaReq) returns (AccessQuotaInfo);
+  // 新建或更新配额配置（运营面，带版本与操作者审计）
+  rpc UpsertAccessQuota(UpsertAccessQuotaReq) returns (AccessQuotaInfo);
+}

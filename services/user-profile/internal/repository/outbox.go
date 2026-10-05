@@ -3,10 +3,10 @@ package repository
 // 本文件实现 AGENTS.md §5 的 Outbox 模式：
 // 业务写操作与事件记录（member_outbox 表）在同一事务内提交，独立发布器
 // 轮询投递。当前投递目标：
-//   - user.profile_updated → account 服务 DelCache RPC
+//   - user.profile.updated → account 服务 DelCache RPC
 //     （对应参考仓库 databus 的 MemberService-AccountNotify 主题，
 //       消费者为 account 的缓存失效逻辑）；
-//   - user.moral_notice    → notification 服务（待接入，配置 MessageURL 后投递，
+//   - user.moral.notice    → notification 服务（待接入，配置 MessageURL 后投递，
 //     未配置时按参考仓库的最佳努力语义记录日志后标记完成）。
 // 消费者按 event_id 幂等；发布失败指数退避重试，超过上限标记失败转人工处理。
 

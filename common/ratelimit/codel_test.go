@@ -10,16 +10,38 @@ import (
 )
 
 // TestCoDelPushPop 验证报文在队列停留时间低于 Target 时被允许通过。
+//
+// 不能写成「先 `go q.Pop()` 再 Push」：Pop 在队列为空时会立刻返回，Push 于是永远等不到
+// 通知（2026-09-22 实测：那种写法首轮必失败、后续才通过，整树并发跑时稳定复现）。
+// 这里把顺序反过来——Push 在后台入队，主协程确认报文真的在队列里之后再驱动 Pop。
 func TestCoDelPushPop(t *testing.T) {
 	q := NewCoDelQueue(nil)
-	// 在另一个 goroutine 中调用 Pop，唤醒等待中的 Push。
-	go q.Pop()
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		done <- q.Push(ctx)
+	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := q.Push(ctx); err != nil {
+	waitInQueue(t, q)
+	q.Pop()
+	if err := <-done; err != nil {
 		t.Fatalf("push 期望成功，得到 %v", err)
 	}
+}
+
+// waitInQueue 等报文进队，再多让出一点时间确保 Push 已经走到「等 Pop 通知」那次 select：
+// Pop 的通知是非阻塞发送，若它先于 Push 进入等待，这次判定就会被丢掉（本用例原版的失败原因）。
+func waitInQueue(t *testing.T, q *CoDelQueue) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for q.Stat().Packets == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("2s 内没有报文入队")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(5 * time.Millisecond)
 }
 
 // TestCoDelDeadline 验证无人 Pop 时 Push 在 ctx 超时后返回 ErrDeadline。

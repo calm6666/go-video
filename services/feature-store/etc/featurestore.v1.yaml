@@ -1,0 +1,66 @@
+Name: featurestore.v1.rpc
+# 端口分配：本批次 8118 live-ingest / 8119 live-room / 8120 live-media / 8121 live-gateway
+# 已占用，8116/8123 归 recommend-recall/recommend-rank，8150/8151 归 private-message/open-platform。
+# 不用 0.0.0.0:8080 —— 那是 gateway/app 与 gateway/admin 的 HTTP 端口，本地同机启动会撞。
+ListenOn: 0.0.0.0:8130
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: featurestore.v1.rpc
+
+# 在线特征值主读缓存（fs:val:<key>:<ver>:<scope>:<entity>）与 ACTIVE 指针缓存（fs:active:<key>）。
+# 键名固定为 CacheRedis：zrpc.RpcServerConf 内嵌了同名 Redis 字段（redis.RedisKeyConf，限流用），
+# 业务缓存字段若也叫 Redis，conf.Load 会报 "conflict key redis" —— 能编译、启动即挂。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# go_video_feature_store 库的 MySQL DSN（仅本地示例，密钥留空，生产从配置中心/Secret 注入）。
+DataSource: feature_store:@tcp(127.0.0.1:3306)/go_video_feature_store?charset=utf8mb4&parseTime=true&loc=Local
+
+Read:
+  # 单次批量读响应体上限（字节）。只能下调，上界是 model.MaxBatchResponseBytes = 1 MiB：
+  # 条数上限（50 特征 × 20 主体）挡不住「50 个 512 维向量」这种组合。
+  MaxBatchResponseBytes: 1048576
+  # 缓存 TTL 的向下抖动比例（0..0.5）。上游按分钟批量写入，一批键 expire_at 完全相同，
+  # 不抖动就会在同一秒集体失效、让 DB 兜底路径承受惊群。
+  CacheJitterRatio: 0.2
+  # ACTIVE 版本指针缓存秒数。必须短于「切换生效到人眼看到」的时长，
+  # 否则指针陈旧会表现为「切了版本但在线还在读旧版本」。
+  ActivePointerCacheSeconds: 10
+  # false = 缓存 miss 不回源 feature_value，直接降级返回。
+  # 只在 DB 故障演练与压测时关闭，用于观测「缓存层单独能撑多久」。
+  DBFallbackEnabled: true
+
+Write:
+  # 幂等回执的执行权租约秒数，上界 model.MaxReceiptLeaseSeconds = 300。
+  # 进程崩溃后同一 request_id 在租约到期即可被重新取得，不会永久卡死。
+  ReceiptLeaseSeconds: 60
+  # 回执保留秒数（cron 据此清理 feature_write_receipt）。
+  # 必须大于上游的最大重试跨度：删早了等于作废幂等键，重试会拿到「新执行一遍」的结果。
+  ReceiptRetentionSeconds: 604800
+  # 单次 PurgeExpired 的清理行数上限，上界 model.MaxPurgeRows = 5000（契约值）。
+  MaxPurgeRowsPerCall: 5000
+
+Backfill:
+  # worker 认领作业的租约秒数；AddProgress 心跳用同一个值续期
+  # （用另一个值会让一次心跳把长批次作业的租约缩回默认值、跑到一半被接管）。
+  LeaseSeconds: 120
+  # 单次推进的主体行数（worker 写 feature_value 的批大小，
+  # 与对外契约 WriteFeatures 的 500 行上限是两件事）。
+  BatchRows: 1000
+  # 取数来源适配器 internal/featuresource 还没建（见 README「已知缺口」），
+  # 因此默认关闭认领：打开只会让作业稳定 FAILED 并刷错误日志。
+  WorkerEnabled: false
+
+Privacy:
+  # 允许触发 EraseEntityFeatures 的 operator 前缀白名单。
+  # 留空 = 谁都不能擦除（model.OperatorInPrefixes 是 fail closed 的），
+  # 这属于合规缺陷，Config.Validate 会直接拒绝启动。
+  # 名单不写死在 model：跑隐私工单的服务名在各环境不同。
+  OperatorPrefixes:
+  - "privacy:"
+  - "system:privacy-worker"
+  # 主体自助导出（ListEntityFeatures）可见的最高隐私级别：
+  # 4 = 含用户画像，主体核对自己的特征就该看到全部。
+  ExportMaxPrivacyLevel: 4

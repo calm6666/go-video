@@ -1,0 +1,95 @@
+Name: liveingest.v1.rpc
+ListenOn: 0.0.0.0:8118
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: liveingest.v1.rpc
+
+# 日志与 trace_id：本地开发保持控制台输出，生产由配置中心覆盖。
+# 明文推流密钥、哈希、Vault 引用、CDN 签名一律不得出现在日志里。
+Log:
+  ServiceName: liveingest.v1.rpc
+  Mode: console
+  Level: info
+
+# 业务缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，
+# 会触发 conflict key redis，导致启动即失败；全仓统一用 CacheRedis）。
+# 用途：接入鉴权结果短缓存、CDN 回调 nonce 防重放、节点打分快照、流状态读缓存。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# 本服务自有库 DSN（go_video_live_ingest）。只允许访问 live_* 表，
+# 禁止直连 live-room / live-media 的库表（AGENTS.md §5）。
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_live_ingest?charset=utf8mb4&parseTime=true&loc=Local
+
+# 领域参数：密钥有效期与轮转宽限、断流宽限期、健康阈值、分页上限、Outbox 退避。
+# 全部走配置，不在代码里写死；生产由配置中心覆盖。
+LiveIngest:
+  IssueTtlSeconds: 604800            # 签发密钥默认有效期（秒，7 天）
+  MaxIssueTtlSeconds: 2592000        # 有效期上限（秒，30 天）：长期密钥违反 README 约束
+  KeyRandomBytes: 18                 # 明文密钥随机字节数
+  RotateGraceSeconds: 300            # 轮转后旧密钥宽限秒数（OBS 不重启切换窗口）
+  MaxStreamsPerKey: 1                # 单密钥默认并发非终态流上限
+  InterruptGraceSeconds: 60          # 断流宽限期（秒），超时判 STOPPED
+  IdleTimeoutSeconds: 120            # 鉴权通过但从未推流的 IDLE 回收秒数
+  HeartbeatTimeoutSeconds: 30        # 非终态流心跳超时秒数，超时进入 INTERRUPTED
+  HealthSampleWindowSeconds: 10      # 健康采样默认聚合窗口（秒）
+  HealthNoDataSeconds: 30            # 无采样判 NO_DATA 的秒数
+  DegradedMinVideoBitrateBps: 800000 # 码率低于该值判 DEGRADED（bps）
+  CriticalMinVideoBitrateBps: 200000 # 码率低于该值判 CRITICAL（bps）
+  CriticalMaxPacketLossPpm: 50000    # 丢包率超过该值（百万分比）判 CRITICAL
+  CriticalMinFpsX100: 500            # 帧率（x100）低于该值判 CRITICAL
+  MaxListPageSize: 50                # pn/ps 分页每页上限
+  MaxEventPageSize: 200              # 事件/位点取样单次上限
+  MaxEventRetryBatch: 200            # RetryFailedEvents 单次批量上限
+  MaxSamplePoints: 120               # GetStreamHealth 返回采样点上限
+  CountHardLimit: 10000              # 断流记录 total 统计上限（超出返回 -1）
+  CallbackSkewSeconds: 300           # CDN 回调时间戳允许偏移（秒）
+  CallbackNonceTTLSec: 600           # 回调 nonce 防重放保留秒数
+  SweeperEnabled: false              # 状态扫描器仍未接线，打开只会得到一条启动告警
+  SweepIntervalSeconds: 10           # 扫描器轮询间隔（秒）
+  SweepBatchLimit: 200               # 单次扫描流数量上限
+
+# CDN/媒体入口配置位。
+# 契约缺口：本仓库不内置真实 CDN 厂商 SDK，Enabled 保持 false 时所有外部调用
+# 返回 live-ingest: cdn ingest gateway not configured（见 internal/repository/ingestgateway.go）。
+# CallbackSecretRef 只写 Secret/Vault 引用，真实签名密钥不得出现在本文件。
+Cdn:
+  Enabled: false
+  PublishDomains:
+  - push.dev.hilihili.example
+  CallbackSecretRef: ""            # 例：vault:secret/data/live-ingest/cdn#callback_key
+  RequestTimeoutSeconds: 3
+  DefaultAssignSameRegion: false
+
+# 事件发布链路（live_ingest_outbox → live.state.v1）。
+# Enabled=false 是本仓示例配置的钉住值（internal/publisher 的用例断言它）：
+# 默认构建没链接队列发送端，置 true 会让进程启动即失败（返回 ErrKafkaRuntimeNotBuilt），
+# 而不是「安静地不投递」。打开前先 `go build -tags liveingest_kafka` 并在 broker 上验证；
+# 本仓库从未连接过任何 Kafka/Redpanda，投递语义没有实测证据。
+# 这里没有 Username/Password/CaFile：go-queue v1.2.2 的 kq.NewPusher 不暴露鉴权/TLS 注入口。
+Kafka:
+  Enabled: false
+  Brokers:
+  - 127.0.0.1:9092
+  Group: live-ingest.v1              # 本服务不消费，仅留给将来的死信重投工具
+  PublishTopics:
+  - live.state.v1                    # 必须与 model 的 event_type+schema_version 拼出的 topic 一致
+  MaxRetries: 5                      # 单事件累计尝试上限（含首次），达到即 state=3(FAILED)
+  RetryBackoffSec: 2                 # 退避基数：第 n 次失败后等 2 * 2^(n-1) 秒
+  RetryMaxBackoffSec: 1800           # 退避上限（秒）
+  PollIntervalSec: 2                 # 发布循环轮询间隔（进程启动时先立刻扫一轮）
+  BatchLimit: 100                    # 单轮取到的到期事件数
+  SendTimeoutSec: 5                  # 单条投递超时，超时按一次失败计入退避（不算已投递）
+
+# live-room zrpc client 配置位（将来的房间门禁/场次回查依赖）。
+# 本服务刻意不构造该客户端：live-room 与 live-ingest 是「事件生产者 → 消费者」关系，
+# 不需要编译期依赖（生成包 go-video/services/live-room/rpc 已存在）。
+# 真的要在入站前查房间门禁时，放开下面这段并在 internal/svc/servicecontext.go 中装配。
+# LiveRoomRPC:
+#   Etcd:
+#     Hosts:
+#       - 127.0.0.1:2379
+#     Key: liveroom.v1.rpc
+#   NonBlock: true

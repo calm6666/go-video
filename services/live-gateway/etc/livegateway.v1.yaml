@@ -1,0 +1,63 @@
+Name: livegateway.v1.rpc
+ListenOn: 0.0.0.0:8121
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: livegateway.v1.rpc
+
+Log:
+  ServiceName: livegateway.v1.rpc
+  Mode: console
+  Level: info
+
+# 长连接主存储：连接租约、房间订阅集合、心跳计数、广播去重与限流窗口、重连票据有效位
+# 全部落在这里（易失、可重建）。业务库只存路由/配额/审计（README「数据分层」）。
+# 键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会让 conf.Load 直接失败。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# 本服务自有库 DSN（go_video_live_gateway）：只存需要审计/重建的路由与配额配置。
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_live_gateway?charset=utf8mb4&parseTime=true&loc=Local
+
+# 房间归属/状态查询依赖 live-room（ANCHOR 角色与 ROOM_CLOSED 判定都要问它）。
+# 本轮 ServiceContext 不构造客户端：调用点在 internal/repository 的显式 stub 中。
+LiveRoomRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: liveroom.v1.rpc
+  NonBlock: true
+
+# 领域参数：租约/票据 TTL、载荷上限、默认配额、Redis 键前缀。
+LiveGateway:
+  # WsListenOn 是 WebSocket 接入层监听地址。
+  # 已知缺口：本仓库禁止新增依赖且没有 websocket 库，真实 WS 服务端未实装，
+  # 该值当前只作为接线约定（见 services/live-gateway/README.md「接入方式」）。
+  WsListenOn: 0.0.0.0:8122
+  DefaultLeaseTTLSeconds: 30      # 连接租约默认 TTL（客户端需在此周期内续租）
+  MaxLeaseTTLSeconds: 300         # 租约 TTL 上限（配额配置也只能夹到这里）
+  MinLeaseTTLSeconds: 10          # 租约 TTL 下限（防止客户端把 TTL 配成 1s 打爆 Redis）
+  DefaultTicketTTLSeconds: 120    # 断线重连票据默认有效期
+  MaxTicketTTLSeconds: 600        # 票据 TTL 上限
+  HeartbeatMaxSkewSeconds: 300    # 客户端心跳时间与服务端时间可容忍偏差（超出只观测不落库）
+  ReconnectGraceSeconds: 60       # 断线宽限期：期内重连可复用订阅视图
+  MaxPayloadBytes: 32768          # 单条广播载荷上限（超过直接 DROP_REASON_PAYLOAD_TOO_LARGE）
+  DefaultRoomBroadcastQps: 200    # 房间广播默认 QPS（无配额配置行时使用）
+  DefaultUserBroadcastQps: 5      # 单用户发弹幕/消息的默认 QPS
+  DefaultMaxRoomConnections: 50000 # 单房间默认最大连接数
+  AllowGuestByDefault: true       # 无配额行时是否允许游客（mid=0）接入
+  PayloadDigestBytes: 32          # 审计流水里保存的载荷摘要长度（sha256 hex 前缀）
+  BroadcastLogRetentionDays: 30   # 广播审计流水保留天数（超期由回收任务清理）
+  RoomRouteCacheTTLSeconds: 10    # 房间路由读缓存
+  QuotaCacheTTLSeconds: 60        # 配额配置读缓存
+  ConnectionScanLimit: 500        # ListRoomConnections 单次从 Redis 扫描的上限
+
+# 事件链路（消费 live.state.v1 做房间状态广播；投递入口待接线）。
+Kafka:
+  Brokers:
+  - 127.0.0.1:9092
+  Group: live-gateway.v1
+  SubscribeTopics:
+  - live.state.v1
+  - danmaku.sent.v1

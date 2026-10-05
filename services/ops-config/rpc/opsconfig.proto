@@ -1,0 +1,647 @@
+syntax = "proto3";
+
+package opsconfig.v1;
+
+option go_package = "go-video/services/ops-config/rpc";
+
+// ops-config：内容运营配置服务（配置发布/版本/回滚/灰度、专题、推荐位与坑位、
+// 客户端开关、缓存刷新）。
+//
+// 数据所有权（AGENTS.md §5）
+//   * 本服务拥有 ops_config_item / ops_config_version / ops_rollout_rule /
+//     ops_topic / ops_topic_item / ops_recommend_slot / ops_recommend_slot_item /
+//     ops_client_switch，库名 go_video_ops_config。
+//   * **分区与标签不在本服务**：catalog_zone / catalog_tag 由 catalog 持有
+//     （见 deploy/migrations/catalog/000001_create_catalog_tables.sql 与
+//     services/catalog/rpc/catalog.proto 的 ListZones/ListTags）。本服务只在
+//     ops_topic.zone_ids / ops_topic.tag_ids 里保存 ID 引用，
+//     不复制分区名/标签名等可变主资料；展示名由调用方经 catalog RPC 解析。
+//   * 内容条目（稿件/作品/季/集）只以 item_type + item_id 引用，
+//     真实存在性与上下架状态由 video / catalog / rights 判定，本服务不建副本。
+//   * 管理员身份与 RBAC 归 operation；本服务不读写其表，只保存 operator_id 引用。
+//
+// 与 operation.op_config 的边界（待维护者裁决，见 README「所有权结论与待评审」）
+//   * operation.op_config 是「运营后台自用的一行一键值对 + 乐观锁版本」，
+//     没有发布/回滚/灰度/版本历史；本服务的 ops_config_item 是「带不可变版本快照、
+//     灰度规则和缓存失效语义的发布式配置」。
+//   * 本期不做数据搬迁（op_config 的迁移文件属于 deploy/migrations/operation，
+//     不在本服务边界内），因此两侧并存。新增的**面向端展示与灰度**配置写本服务；
+//     operation 既有键保持不动，等维护者确认后再按「迁移 + RPC」接管。
+//
+// 审计写入方（与 audit 的契约分工，避免两边都声称拥有）
+//   * 本服务是自身配置动作的发起者，因此由**本服务**调用 audit.AppendAudit 写入
+//     action_domain = ops_config 的审计条目（event_id 固定为
+//     "ops-config:<request_id>:<action>"，同一次请求重放不会产生第二条审计）。
+//   * 写入成功后把返回的 entry_id 记进 ops_config_version.audit_entry_id
+//     （发布/回滚/挂灰度都产生版本行，形成双向可追链路）。
+//     不产生版本行的动作（RefreshCache、SetRolloutRuleState、专题/坑位/开关的保存）
+//     只把 entry_id 回给调用方：这类动作的事实源就是 audit 侧那条条目，
+//     本服务不再复制一份「审计索引表」，避免同一事实出现两个所有者。
+//   * audit 拥有条目本身；本服务不解释、不修改、不删除已写入的审计条目。
+//   * 审计写失败**不回滚**业务写入（配置发布已成功），但必须打 Error 级日志并
+//     把 audit_entry_id 留 0，由后续补偿任务重投；这样审计缺口可见而不是被静默吞掉。
+//
+// 商业化范围外（AGENTS.md §1）：推荐位/坑位只承载内容分发（UGC/PGC 条目、专题入口），
+// 契约中不存在广告主、出价、排期购买、投放计费、分成等任何字段。
+// 终端范围（AGENTS.md §1、§6）：平台枚举只覆盖 Android/iOS/HarmonyOS/桌面端，
+// 项目不支持小程序；服务端不因平台不同返回任何 UI 结构或布局指令。
+
+// CallContext 调用上下文。写接口必须带 request_id（幂等键）与 operator_id。
+message CallContext {
+  int64 operator_id = 1;      // 操作管理员 admin_id（引用 operation.op_admin_user；0 时写接口拒绝）
+  string operator_name = 2;   // 展示用冗余（服务端不据此判权限）
+  string request_id = 3;      // 幂等键：所有写方法必填且非空
+  string trace_id = 4;        // 链路 ID（透传给 audit 与日志）
+  string caller_service = 5;  // 调用方服务名（gateway/admin、cron ...）
+  string ip = 6;              // 来源 IP（本服务不落明文，只透传给 audit 做哈希）
+}
+
+// ClientPlatform 四类终端标识。服务端不写死任何端的 UI 行为，
+// 该枚举只用于「配置在哪些端生效」的范围界定。
+enum ClientPlatform {
+  CLIENT_PLATFORM_UNSPECIFIED = 0;
+  CLIENT_PLATFORM_ANDROID = 1;
+  CLIENT_PLATFORM_IOS = 2;
+  CLIENT_PLATFORM_HARMONY = 3;
+  CLIENT_PLATFORM_DESKTOP = 4;
+}
+
+// RolloutMode 灰度判定方式。多条规则按 priority 升序求第一命中；
+// 全不命中时回落到 ops_config_item 的正式版本（latest_version）。
+enum RolloutMode {
+  ROLLOUT_MODE_UNSPECIFIED = 0;
+  ROLLOUT_MODE_FULL = 1;          // 全量
+  ROLLOUT_MODE_PERCENTAGE = 2;    // 按 mid 稳定分桶百分比（bucket = crc32(cfg_key + ":" + mid) % 100 < percentage）
+  ROLLOUT_MODE_APP_VERSION = 3;   // 按 App 版本区间
+  ROLLOUT_MODE_PLATFORM = 4;      // 按端
+  ROLLOUT_MODE_MID_SUFFIX = 5;    // 按 mid 十进制尾号（"0,3,7" 命中任一尾号）
+  ROLLOUT_MODE_WHITELIST = 6;     // 按 mid 白名单
+}
+
+// ConfigValueType 配置值类型，写入前按类型校验，避免把脏值推给读取方。
+enum ConfigValueType {
+  CONFIG_VALUE_TYPE_UNSPECIFIED = 0;
+  CONFIG_VALUE_TYPE_STRING = 1;
+  CONFIG_VALUE_TYPE_INT = 2;
+  CONFIG_VALUE_TYPE_BOOL = 3;
+  CONFIG_VALUE_TYPE_JSON = 4;     // 不透明 JSON 文本；本服务不解析业务语义
+}
+
+// ItemState 通用启用/停用状态。
+enum ItemState {
+  ITEM_STATE_UNSPECIFIED = 0;
+  ITEM_STATE_ON = 1;              // 启用/生效/上架
+  ITEM_STATE_OFF = 2;             // 停用/下线/下架
+}
+
+// TargetContext 运行时解析请求的调用侧上下文（灰度输入）。
+message TargetContext {
+  ClientPlatform platform = 1;    // 终端类型；UNSPECIFIED 表示不做端过滤
+  string app_version = 2;         // 客户端版本号（点分十进制字符串，如 "7.2.10"）
+  int64 mid = 3;                  // 当前用户；0 表示未登录（不参与 mid 维度灰度）
+  bool ignore_rollout = 4;        // true 表示强制取正式版本（后台预览与排障用）
+}
+
+// --- 1. 运行时读取（带灰度命中与缓存 TTL） ---
+
+message ConfigView {
+  int64 config_id = 1;
+  string cfg_key = 2;             // 配置键（如 home.topic.enabled）
+  string scope = 3;               // global / android / ios / harmony / desktop
+  ConfigValueType value_type = 4;
+  string value = 5;               // 命中版本的值（文本承载）
+  int64 version = 6;              // 命中版本号
+  int64 rollout_rule_id = 7;      // 命中的灰度规则，0 表示走正式版本
+  string rollout_mode = 8;        // 命中方式标识（便于客户端与排障对齐，不驱动 UI）
+  int32 ttl = 9;                  // 建议缓存秒数（0 表示不建议缓存）
+  int64 epoch = 10;               // 缓存代次：RefreshCache 后单调递增，客户端本地缓存可据此失效
+  string published_by = 11;       // 发布该版本的操作人（冗余快照）
+  int64 published_at = 12;        // 该版本发布时间（Unix 秒）
+}
+
+message ResolveConfigReq {
+  CallContext ctx = 1;
+  string cfg_key = 2;             // 必填
+  string scope = 3;               // 空表示 global
+  TargetContext target = 4;
+  bool refresh = 5;               // true 强制回源并回填缓存
+}
+
+message ResolveConfigReply {
+  ConfigView config = 1;
+  bool found = 2;                 // false 表示键不存在或已停用（不返回 gRPC NotFound）
+}
+
+message BatchResolveConfigReq {
+  CallContext ctx = 1;
+  repeated string cfg_keys = 2;   // 单次最多 50 个键（网关聚合用）
+  string scope = 3;
+  TargetContext target = 4;
+}
+
+message BatchResolveConfigReply {
+  repeated ConfigView configs = 1;
+  repeated string missing_keys = 2; // 未命中的键（含停用与不存在）
+  int32 ttl = 3;                  // 本批最小建议 TTL（网关按此缓存整批）
+}
+
+// --- 2. 配置项与发布/回滚 ---
+
+message ConfigItem {
+  int64 config_id = 1;
+  string cfg_key = 2;
+  string scope = 3;
+  ConfigValueType value_type = 4;
+  string title = 5;               // 中文名，后台展示
+  string description = 6;
+  int32 state = 7;                // 1 启用、2 停用
+  int64 latest_version = 8;       // 当前正式版本，0 表示未发布
+  int64 epoch = 9;                // 缓存代次
+  int64 operator_id = 10;         // 最后操作人
+  int64 ctime = 11;
+  int64 mtime = 12;
+}
+
+message ListConfigsReq {
+  CallContext ctx = 1;
+  string scope = 2;               // 空表示全部
+  string keyword = 3;             // cfg_key/title 模糊
+  int32 state = 4;                // 0 全部
+  int32 pn = 5;                   // 从 1 开始
+  int32 ps = 6;                   // 上限 100
+}
+
+message ListConfigsReply {
+  repeated ConfigItem items = 1;
+  int64 total = 2;
+}
+
+// PublishConfigReq 发布一个新版本。
+// 语义：expect_version 是**当前生效版本号**（新建传 0）；成功后写入
+// ops_config_version（不可变快照）、把 item.latest_version 推到新版本、epoch +1。
+// 带 rollout 时新版本只做灰度生效，latest_version 保持不变，由 SetRolloutRuleState
+// 或再次全量发布收口。
+message PublishConfigReq {
+  CallContext ctx = 1;            // request_id 必填，作为幂等键与 audit event_id 组成
+  string cfg_key = 2;
+  string scope = 3;               // 空默认 global
+  ConfigValueType value_type = 4; // 新建必填；更新时 0 表示沿用
+  string value = 5;               // 新值
+  int64 expect_version = 6;       // 乐观锁；0 表示新建
+  string reason = 7;              // 变更原因（必填，透传给 audit）
+  repeated RolloutRuleSpec rollout = 8; // 可选：随本次发布同时挂灰度规则
+}
+
+message PublishConfigReply {
+  ConfigItem item = 1;
+  ConfigVersion version = 2;      // 新版本快照
+  repeated RolloutRule rules = 3; // 本次一并写入的灰度规则
+  int64 audit_entry_id = 4;       // audit 条目引用，0 表示审计写入待补偿
+  bool reused = 5;                // true 表示 request_id 命中已完成的发布（幂等回放）
+}
+
+// RollbackConfigReq 回滚：不是删版本，而是把历史版本的值再发布成**新版本**，
+// 因此版本序列单调递增、历史不被改写（可审计）。
+message RollbackConfigReq {
+  CallContext ctx = 1;
+  string cfg_key = 2;
+  string scope = 3;
+  int64 to_version = 4;           // 目标历史版本号
+  string reason = 5;              // 回滚原因（必填）
+}
+
+message RollbackConfigReply {
+  ConfigItem item = 1;
+  ConfigVersion version = 2;      // 新生成的回滚版本（change_type = rollback，rollback_from 指向 to_version）
+  int64 audit_entry_id = 3;
+}
+
+// ConfigVersion 不可变版本快照。
+message ConfigVersion {
+  int64 version_id = 1;
+  int64 config_id = 2;
+  int64 version = 3;
+  string value = 4;
+  ConfigValueType value_type = 5;
+  string change_type = 6;         // create/publish/rollback
+  int64 rollback_from = 7;        // 回滚来源版本，0 表示非回滚
+  int64 operator_id = 8;
+  string operator_name = 9;       // 冗余快照
+  string reason = 10;
+  int64 audit_entry_id = 11;      // audit.audit_entry 引用（谁写：本服务），0 表示待补偿
+  string request_id = 12;         // 触发本次写入的幂等键
+  int64 published_at = 13;
+  int64 ctime = 14;
+}
+
+message ListConfigVersionsReq {
+  CallContext ctx = 1;
+  string cfg_key = 2;
+  string scope = 3;
+  int32 pn = 4;
+  int32 ps = 5;
+}
+
+message ListConfigVersionsReply {
+  repeated ConfigVersion items = 1;
+  int64 total = 2;
+  int64 latest_version = 3;
+}
+
+// --- 3. 灰度规则 ---
+
+// RolloutRule 灰度规则：作用于 (config_id, version)。多条规则按 priority 升序求首个命中。
+message RolloutRule {
+  int64 rule_id = 1;
+  int64 config_id = 2;
+  int64 version = 3;              // 该规则放量的版本号
+  string name = 4;                // 同 (config_id, version) 内唯一，作为 upsert 幂等句柄
+  RolloutMode mode = 5;
+  int32 percentage = 6;           // mode=PERCENTAGE 生效，0-100
+  string app_version_min = 7;     // 闭区间下界（点分版本，服务端按段比较）
+  string app_version_max = 8;     // 闭区间上界，空表示不设上界
+  repeated ClientPlatform platforms = 9; // 空表示不限端
+  string mid_suffixes = 10;       // "0,3,7"，空表示不限
+  repeated int64 whitelist_mids = 11; // 白名单 mid
+  int32 priority = 12;            // 小者先判定
+  int32 state = 13;               // 1 生效、2 停用
+  int64 operator_id = 14;
+  string remark = 15;
+  int64 start_at = 16;            // 生效起始（Unix 秒），0 表示立即
+  int64 end_at = 17;              // 生效结束（Unix 秒），0 表示不设限
+  int64 ctime = 18;
+  int64 mtime = 19;
+}
+
+message RolloutRuleSpec {
+  string name = 1;                // 必填，幂等句柄
+  RolloutMode mode = 2;
+  int32 percentage = 3;
+  string app_version_min = 4;
+  string app_version_max = 5;
+  repeated ClientPlatform platforms = 6;
+  string mid_suffixes = 7;
+  repeated int64 whitelist_mids = 8;
+  int32 priority = 9;
+  string remark = 10;
+  int64 start_at = 11;
+  int64 end_at = 12;
+}
+
+message SaveRolloutRuleReq {
+  CallContext ctx = 1;            // request_id 必填
+  string cfg_key = 2;
+  string scope = 3;
+  int64 version = 4;              // 目标版本号（必须是已发布的版本）
+  RolloutRuleSpec rule = 5;       // 按 (config_id, version, name) upsert
+}
+
+message SaveRolloutRuleReply {
+  RolloutRule rule = 1;
+  int64 audit_entry_id = 2;
+}
+
+message ListRolloutRulesReq {
+  CallContext ctx = 1;
+  string cfg_key = 2;             // 空表示全部（此时 scope 也忽略）
+  string scope = 3;
+  int64 version = 4;              // 0 表示全部版本
+  int32 state = 5;                // 0 全部
+  int32 pn = 6;
+  int32 ps = 7;
+}
+
+message ListRolloutRulesReply {
+  repeated RolloutRule items = 1;
+  int64 total = 2;
+}
+
+// SetRolloutRuleStateReq 启停灰度规则（不物理删除，保留放量决策证据）。
+message SetRolloutRuleStateReq {
+  CallContext ctx = 1;
+  int64 rule_id = 2;
+  int32 state = 3;                // 1 生效、2 停用
+  string reason = 4;              // 必填（进 audit）
+}
+
+message SetRolloutRuleStateReply {
+  RolloutRule rule = 1;
+  int64 audit_entry_id = 2;
+}
+
+// --- 4. 专题 / 合集（引用分区与标签 ID，不复制主资料） ---
+
+message Topic {
+  int64 topic_id = 1;
+  string slug = 2;                // 稳定标识（唯一，端上按此寻址）
+  string title = 3;
+  string description = 4;
+  string cover = 5;               // 封面 URL（对象存储地址由 playback/asset 侧签名，这里只存展示用地址或 object_key）
+  repeated int64 zone_ids = 6;    // 引用 catalog_zone.zoneid（本服务不存分区名）
+  repeated int64 tag_ids = 7;     // 引用 catalog_tag.tagid（本服务不存标签名）
+  int32 state = 8;                // 1 上架、2 下架
+  int32 sort = 9;                 // 列表排序，小者在前
+  int64 start_at = 10;            // 生效窗口起（Unix 秒）
+  int64 end_at = 11;              // 生效窗口止，0 表示不限
+  int64 version = 12;             // 乐观锁
+  int64 operator_id = 13;
+  int64 ctime = 14;
+  int64 mtime = 15;
+}
+
+message SaveTopicReq {
+  CallContext ctx = 1;
+  int64 topic_id = 2;             // 0 表示新建
+  string slug = 3;                // 新建必填；更新时非空即改 slug
+  string title = 4;
+  string description = 5;
+  string cover = 6;
+  repeated int64 zone_ids = 7;    // 全量覆盖
+  repeated int64 tag_ids = 8;     // 全量覆盖
+  int32 state = 9;                // 0 视为 2（草稿语义：默认不上架）
+  int32 sort = 10;
+  int64 start_at = 11;
+  int64 end_at = 12;
+  int64 expect_version = 13;      // 乐观锁：更新必填当前版本；0 表示新建
+  string reason = 14;             // 变更原因（进 audit）
+}
+
+message SaveTopicReply {
+  Topic topic = 1;
+  int64 audit_entry_id = 2;
+}
+
+message GetTopicReq {
+  CallContext ctx = 1;
+  int64 topic_id = 2;             // 与 slug 二选一
+  string slug = 3;
+  bool with_items = 4;            // true 时返回条目
+  int32 item_limit = 5;           // with_items 时的条目上限，<=0 按服务端默认（100）
+}
+
+message GetTopicReply {
+  Topic topic = 1;
+  repeated TopicItem items = 2;
+  bool found = 3;
+  int32 ttl = 4;
+}
+
+message ListTopicsReq {
+  CallContext ctx = 1;
+  int32 state = 2;                // 0 全部
+  int64 zone_id = 3;              // 0 不过滤（按引用 ID 过滤，本服务不解析分区名）
+  int64 tag_id = 4;               // 0 不过滤
+  string keyword = 5;
+  int32 pn = 6;
+  int32 ps = 7;
+  bool online_only = 8;           // true 时附加「当前时间在生效窗口内」
+}
+
+message ListTopicsReply {
+  repeated Topic items = 1;
+  int64 total = 2;
+}
+
+// TopicItem 专题条目：只引用内容主键，不复制标题/时长等可变资料。
+message TopicItem {
+  int64 id = 1;
+  int64 topic_id = 2;
+  string item_type = 3;           // ugc_video / pgc_season / pgc_episode（值域固定，新增需评审）
+  string item_id = 4;             // 领域服务主键（aid / season_id / epid）
+  int32 position = 5;             // 专题内排序，小者在前
+  int32 state = 6;                // 1 生效、2 移除
+  int64 operator_id = 7;
+  int64 ctime = 8;
+  int64 mtime = 9;
+}
+
+// SaveTopicItemsReq 全量覆盖某专题的条目集合（幂等：同一 request_id 重放结果一致）。
+message SaveTopicItemsReq {
+  CallContext ctx = 1;
+  int64 topic_id = 2;
+  repeated TopicItem items = 3;   // 最多 500 条；position 必须从 1 连续
+  string reason = 4;
+}
+
+message SaveTopicItemsReply {
+  int64 topic_id = 1;
+  int32 total = 2;
+  int64 audit_entry_id = 3;
+}
+
+// --- 5. 推荐位与坑位（内容分发，不含任何商业化投放字段） ---
+
+message RecommendSlot {
+  int64 slot_id = 1;
+  string code = 2;                // 坑位编码（唯一，如 home.banner、detail.below_player）
+  string page = 3;                // 归属页面标识（服务端不解释布局）
+  string title = 4;
+  repeated ClientPlatform platforms = 5; // 空表示不限端
+  int32 capacity = 6;             // 坑位数量上限
+  int32 state = 7;                // 1 启用、2 停用
+  int64 version = 8;              // 乐观锁
+  int64 operator_id = 9;
+  string remark = 10;
+  int64 ctime = 11;
+  int64 mtime = 12;
+}
+
+message SlotItem {
+  int64 id = 1;
+  int64 slot_id = 2;
+  int32 position = 3;             // 1..capacity
+  string item_type = 4;           // ugc_video / pgc_season / pgc_episode / topic
+  string item_id = 5;             // 引用主键
+  int32 weight = 6;               // 同坑位并列时的次序（本服务不做推荐排序，见 README 缺口）
+  int64 start_at = 7;             // 排期生效起（Unix 秒）
+  int64 end_at = 8;               // 排期生效止，0 表示不限
+  int32 state = 9;                // 1 生效、2 停用
+  int64 operator_id = 10;
+  int64 ctime = 11;
+  int64 mtime = 12;
+}
+
+message SaveSlotReq {
+  CallContext ctx = 1;
+  int64 slot_id = 2;              // 0 新建
+  string code = 3;
+  string page = 4;
+  string title = 5;
+  repeated ClientPlatform platforms = 6;
+  int32 capacity = 7;
+  int32 state = 8;                // 0 视为 2
+  int64 expect_version = 9;
+  string remark = 10;
+  string reason = 11;
+}
+
+message SaveSlotReply {
+  RecommendSlot slot = 1;
+  int64 audit_entry_id = 2;
+}
+
+message ListSlotsReq {
+  CallContext ctx = 1;
+  string page = 2;                // 空表示全部
+  int32 state = 3;
+  ClientPlatform platform = 4;    // UNSPECIFIED 不过滤
+  int32 pn = 5;
+  int32 ps = 6;
+}
+
+message ListSlotsReply {
+  repeated RecommendSlot items = 1;
+  int64 total = 2;
+}
+
+// SaveSlotItemsReq 全量覆盖一个坑位的条目集合（含排期）。
+message SaveSlotItemsReq {
+  CallContext ctx = 1;
+  int64 slot_id = 2;
+  repeated SlotItem items = 3;    // 最多 200 条；position 不得重复且 <= capacity
+  string reason = 4;
+}
+
+message SaveSlotItemsReply {
+  int64 slot_id = 1;
+  int32 total = 2;
+  int64 audit_entry_id = 3;
+}
+
+// ResolveSlotReq 运行时坑位视图：按端 + 版本 + mid + 当前时间过滤，
+// 只回引用；条目标题/封面/状态由调用方（gateway/app）批量向 video/catalog 取。
+message ResolveSlotReq {
+  CallContext ctx = 1;
+  string code = 2;                // 坑位编码
+  TargetContext target = 3;
+  int64 at = 4;                   // 判定时间（Unix 秒），0 表示服务端当前时间
+  int32 limit = 5;                // 返回条数上限，<=0 按 capacity
+}
+
+message ResolveSlotReply {
+  RecommendSlot slot = 1;
+  repeated SlotItem items = 2;
+  bool found = 3;
+  int32 ttl = 4;                  // 建议网关缓存秒数
+}
+
+// --- 6. 客户端开关与版本门槛 ---
+
+// ClientSwitch 表达「某端从哪个版本起具备某能力」，不表达 UI 细节。
+message ClientSwitch {
+  int64 switch_id = 1;
+  string switch_key = 2;          // 开关键（如 vertical_feed）
+  ClientPlatform platform = 3;    // 必填；不按端区分时用 cfg_key 走配置项
+  string min_version = 4;         // 具备能力的最小版本，空表示不限
+  string max_version = 5;         // 具备能力的最大版本，空表示不限
+  int32 enabled = 6;              // 1 开、2 关
+  int64 config_id = 7;            // 可选：关联的配置项（0 表示无关联）
+  int64 operator_id = 8;
+  string remark = 9;
+  int64 version = 10;             // 乐观锁
+  int64 ctime = 11;
+  int64 mtime = 12;
+}
+
+message SaveClientSwitchReq {
+  CallContext ctx = 1;
+  int64 switch_id = 2;            // 0 新建（按 switch_key + platform upsert）
+  string switch_key = 3;
+  ClientPlatform platform = 4;
+  string min_version = 5;
+  string max_version = 6;
+  int32 enabled = 7;              // 0 视为 2（默认关闭，避免误放量）
+  int64 config_id = 8;
+  string remark = 9;
+  int64 expect_version = 10;
+  string reason = 11;
+}
+
+message SaveClientSwitchReply {
+  ClientSwitch switch = 1;
+  int64 audit_entry_id = 2;
+}
+
+message ListClientSwitchesReq {
+  CallContext ctx = 1;
+  ClientPlatform platform = 2;    // UNSPECIFIED 不过滤
+  string switch_key = 3;          // 空不过滤
+  int32 enabled = 4;              // 0 不过滤
+  int32 pn = 5;
+  int32 ps = 6;
+}
+
+message ListClientSwitchesReply {
+  repeated ClientSwitch items = 1;
+  int64 total = 2;
+}
+
+// --- 7. 缓存刷新 ---
+
+// RefreshCacheReq 主动失效运行时缓存（多实例收敛）。
+// 语义：按 scope/cfg_key 把 ops_config_item.epoch 递增并删除 Redis 读缓存；
+// target = all 时整域失效（用于故障兜底，必须写审计）。
+message RefreshCacheReq {
+  CallContext ctx = 1;
+  string target = 2;              // config / topic / slot / all
+  string cfg_key = 3;             // target=config 时定位单键，空表示该 scope 全部
+  string scope = 4;               // 空表示 global
+  int64 topic_id = 5;             // target=topic
+  int64 slot_id = 6;              // target=slot
+  string reason = 7;              // 必填
+}
+
+message RefreshCacheReply {
+  int32 affected = 1;             // 失效的缓存键数量
+  int64 epoch = 2;                // 刷新后的代次（target=all 时为 0）
+  int64 audit_entry_id = 3;
+}
+
+// OpsConfig 运营配置服务：发布式配置、灰度与回滚、专题、推荐位、客户端开关、缓存刷新。
+service OpsConfig {
+  // 运行时解析单个配置（命中灰度规则，返回建议 TTL）
+  rpc ResolveConfig(ResolveConfigReq) returns (ResolveConfigReply);
+  // 批量解析（网关聚合用，最多 50 键）
+  rpc BatchResolveConfig(BatchResolveConfigReq) returns (BatchResolveConfigReply);
+  // 后台分页列出配置项
+  rpc ListConfigs(ListConfigsReq) returns (ListConfigsReply);
+  // 发布新版本（乐观锁 + 幂等 + 可选一并挂灰度规则）
+  rpc PublishConfig(PublishConfigReq) returns (PublishConfigReply);
+  // 回滚到历史版本（生成新版本，不改写历史）
+  rpc RollbackConfig(RollbackConfigReq) returns (RollbackConfigReply);
+  // 版本历史分页
+  rpc ListConfigVersions(ListConfigVersionsReq) returns (ListConfigVersionsReply);
+
+  // 新建/更新灰度规则（按 config_id + version + name upsert）
+  rpc SaveRolloutRule(SaveRolloutRuleReq) returns (SaveRolloutRuleReply);
+  // 灰度规则分页查询
+  rpc ListRolloutRules(ListRolloutRulesReq) returns (ListRolloutRulesReply);
+  // 启停灰度规则（软状态切换，保留放量证据）
+  rpc SetRolloutRuleState(SetRolloutRuleStateReq) returns (SetRolloutRuleStateReply);
+
+  // 新建/更新专题（zone_ids/tag_ids 只存引用）
+  rpc SaveTopic(SaveTopicReq) returns (SaveTopicReply);
+  // 专题详情（可带条目）
+  rpc GetTopic(GetTopicReq) returns (GetTopicReply);
+  // 专题分页查询
+  rpc ListTopics(ListTopicsReq) returns (ListTopicsReply);
+  // 全量覆盖专题条目
+  rpc SaveTopicItems(SaveTopicItemsReq) returns (SaveTopicItemsReply);
+
+  // 新建/更新推荐位定义
+  rpc SaveSlot(SaveSlotReq) returns (SaveSlotReply);
+  // 推荐位分页查询
+  rpc ListSlots(ListSlotsReq) returns (ListSlotsReply);
+  // 全量覆盖坑位条目与排期
+  rpc SaveSlotItems(SaveSlotItemsReq) returns (SaveSlotItemsReply);
+  // 运行时坑位视图（按端/版本/mid/时间过滤，只回引用）
+  rpc ResolveSlot(ResolveSlotReq) returns (ResolveSlotReply);
+
+  // 新建/更新客户端开关（按 switch_key + platform upsert）
+  rpc SaveClientSwitch(SaveClientSwitchReq) returns (SaveClientSwitchReply);
+  // 客户端开关分页查询
+  rpc ListClientSwitches(ListClientSwitchesReq) returns (ListClientSwitchesReply);
+
+  // 主动失效运行时缓存（必写审计）
+  rpc RefreshCache(RefreshCacheReq) returns (RefreshCacheReply);
+}

@@ -1,0 +1,464 @@
+syntax = "proto3";
+
+package audit.v1;
+
+option go_package = "go-video/services/audit/rpc";
+
+// audit：管理操作、登录、审核与敏感数据访问的**追加式**审计服务。
+//
+// 数据所有权（AGENTS.md §5）
+//   * 本服务拥有 audit_entry / audit_chain_head / audit_export_task /
+//     audit_retention_policy / audit_archive_batch 五类自有表，库名 go_video_audit。
+//   * 本服务**不拥有**任何业务主数据：稿件、目录、版权窗口、审核结论、用户资料、
+//     运营配置一律只存 target_type + target_id 引用（跨服务只传主键）。
+//   * 管理员身份与 RBAC 归 operation；本服务不调用也不复制其表，
+//     只要求调用方在 CallContext 里带 operator_id，并由网关/operation 完成鉴权。
+//
+// 与 operation 的分工（谁写审计）
+//   * operation.op_audit_index 是**后台控制台列表用的轻量索引**，由 operation 自己写，
+//     只回答“哪个管理员在后台点了什么”，不是不可抵赖存证。
+//   * audit.audit_entry 是**长期不可抵赖存证**（append-only + 哈希链 + 归档清单），
+//     由「发起该业务动作的领域服务」通过本契约 AppendAudit/BatchAppendAudit 写入：
+//     ops-config 的发布/回滚由 ops-config 写，审核结论由 moderation-orchestrator 写，
+//     登录由 operation 写。同一个 event_id 只允许一个所有者写，避免双写分叉。
+//
+// 追加式约束
+//   * 契约不提供任何 Update/Delete 语义；修改与撤销只能用新的补偿条目表达
+//     （action 形如 <对象>.<动作>，撤销写 <对象>.revoke）。
+//   * 保留期与归档是唯一能让行离开热表的路径，且必须先落归档清单（含 manifest_hash）
+//     再删热表行，见 ArchiveAuditEntries。
+//
+// 完整性自证（哈希链）
+//   * chain_key = "<action_domain>/<yyyy-MM-dd UTC>"。按「动作域 + 自然日」分链，
+//     避免单条全局链把所有写入串行化，同时让校验可按天并行、归档后仍可分段复核。
+//   * prev_hash：同链上一条条目的 entry_hash；链头（seq = 1）取
+//     GENESIS = sha256hex("go-video/audit/v1/genesis/<chain_key>")。
+//   * entry_hash = sha256hex(V1_SERIALIZATION)，V1_SERIALIZATION 按下表固定顺序，
+//     字段间用单字节 0x1F（单元分隔符）连接，整串以 prev_hash 结尾：
+//       1 schema_version  2 chain_key      3 seq        4 event_id
+//       5 actor_type      6 actor_id       7 action     8 target_type
+//       9 target_id      10 result        11 before_digest  12 after_digest
+//      13 reason         14 occurred_at  15 trace_id   16 source_app
+//      17 ip_hash        18 device_hash  19 prev_hash
+//     整数一律十进制无符号前导零；字符串原样（已脱敏，不含换行外的控制字符）。
+//   * 不参与哈希的列只有 entry_id（由 chain_key + seq 唯一决定）、ctime（入库时间，
+//     非业务事实）、archived_at（归档时改写，其证据由 audit_archive_batch.manifest_hash 覆盖）。
+//   * 算法版本由 schema_version 固化；字段增删必须升版本号并新开链，不得改动 V1 定义。
+//
+// 脱敏（AGENTS.md §7、docs/data-design.md §6）
+//   * 手机号/邮箱/证件号/口令/token 的原文禁止进入任何字段；before_digest/after_digest
+//     采用**格式白名单**（model.ValidDigest）而不是关键词黑名单，因为黑名单永远列不全：
+//     只允许空串、64 位十六进制的整对象摘要、或 `字段名=16 位十六进制` 的分号列表。
+//     自由文本（reason / actor_name）再走一次正则兜底（ErrDigestLooksPII），命中即拒绝整条写入。
+//   * ip / device_id 只在入参出现，服务端落库前转成 ip_hash / device_hash。
+//
+// 商业化范围外（AGENTS.md §1）：不记录广告投放、订单、支付、投币、分成相关动作，
+// 也不为它们提供查询维度。
+
+// CallContext 调用上下文：所有方法都要求携带，服务端据此做写入者归因与链路对齐。
+message CallContext {
+  string caller_service = 1;  // 调用方服务名（如 ops-config、operation、moderation-orchestrator）
+  int64 operator_id = 2;      // 触发这次调用的管理员 ID（operation.op_admin_user 引用；系统任务填 0）
+  string trace_id = 3;        // 链路 ID
+  string request_id = 4;      // 幂等键：写接口（Append/BatchAppend/CreateExport/Save/Archive）必填
+  string ip = 5;              // 来源 IP（服务端只存 sha256 前 32 位，不落明文）
+  string user_agent = 6;      // 客户端 UA（服务端按 255 字符截断后存 display 字段）
+}
+
+// ActorType 动作发起者类型。
+enum ActorType {
+  ACTOR_TYPE_UNSPECIFIED = 0; // 未指定，写入直接拒绝
+  ACTOR_TYPE_ADMIN = 1;       // 后台管理员（operator_id 语义，引用 operation）
+  ACTOR_TYPE_USER = 2;        // 终端用户（mid 语义，引用 account）
+  ACTOR_TYPE_SYSTEM = 3;      // 系统任务/定时进程（services/cron、消费者重试等）
+  ACTOR_TYPE_UNKNOWN = 4;     // 无法判定（例如登录失败时账号不存在）
+}
+
+// AuditResult 被审计动作的结果。拒绝与失败同样必须留痕。
+enum AuditResult {
+  AUDIT_RESULT_UNSPECIFIED = 0;
+  AUDIT_RESULT_OK = 1;        // 成功
+  AUDIT_RESULT_DENIED = 2;    // 被拒（权限不足、状态非法、风控拦截）
+  AUDIT_RESULT_ERROR = 3;     // 执行出错（下游失败、内部异常）
+}
+
+// SourceApp 动作来源端。四类客户端 + 后台 + 内部进程，互不混用；
+// 服务端不据此写死任何端的 UI 行为，只作为审计维度。
+enum SourceApp {
+  SOURCE_APP_UNSPECIFIED = 0;
+  SOURCE_APP_ANDROID = 1;
+  SOURCE_APP_IOS = 2;
+  SOURCE_APP_HARMONY = 3;
+  SOURCE_APP_DESKTOP = 4;
+  SOURCE_APP_ADMIN_WEB = 5;   // 管理后台 Web（项目不支持小程序，无小程序端）
+  SOURCE_APP_INTERNAL_RPC = 6; // 服务间 RPC 触发（无终端来源）
+  SOURCE_APP_CRON = 7;        // 定时进程触发
+}
+
+// --- 1. 追加写入 ---
+
+// AuditEntryDraft 写入一条审计的入参。
+// 注意：seq / prev_hash / entry_hash 由服务端计算，请求里不接受这些字段。
+message AuditEntryDraft {
+  string event_id = 1;        // 幂等键（全局唯一，建议 "<service>.<uuid>"；重复提交返回原条目）
+  int32 schema_version = 2;   // 条目契约版本，当前必须为 1；0 视为 1
+  ActorType actor_type = 3;   // 发起者类型
+  int64 actor_id = 4;         // 发起者 ID（admin_id / mid；UNSPECIFIED 类型时写 0）
+  string actor_name = 5;      // 发起者展示名（冗余快照，不随源资料变化）
+  string action = 6;          // 动作：<对象>.<动作>，如 ops_config.publish、admin.login
+  string action_domain = 7;   // 动作域（决定所属哈希链与保留策略）：admin/moderation/data_access/ops_config/system
+  string target_type = 8;     // 目标类型（跨服务只存类型标识）：video:submission、ops_config:release ...
+  string target_id = 9;       // 目标主键（字符串，兼容 aid/epid/cfg_key/config_id 等形态）
+  AuditResult result = 10;    // 结果
+  string before_digest = 11;  // 变更前摘要（脱敏；禁止明文手机号/邮箱/证件号/口令）
+  string after_digest = 12;   // 变更后摘要（脱敏）
+  string reason = 13;         // 业务原因/备注（脱敏，最长 500）
+  SourceApp source_app = 14;  // 来源端
+  string ip = 15;             // 来源 IP 原文（服务端转 ip_hash 后丢弃，绝不入库）
+  string device_id = 16;      // 设备标识原文（服务端转 device_hash 后丢弃）
+  int64 occurred_at = 17;     // 业务发生时间（Unix 秒；0 由服务端按入库时间填充）
+}
+
+message AppendAuditReq {
+  CallContext ctx = 1;
+  AuditEntryDraft entry = 2;
+}
+
+message AppendAuditReply {
+  AuditEntryView entry = 1;
+  bool reused = 2;            // true 表示 event_id 命中已有条目（幂等回放，未新增行）
+}
+
+message BatchAppendAuditReq {
+  CallContext ctx = 1;
+  repeated AuditEntryDraft entries = 2; // 单次最多 200 条；任一条非法则整批拒绝（避免半批丢失）
+}
+
+// BatchAppendAuditReply 逐条结果，顺序与请求一致。
+message BatchAppendAuditReply {
+  repeated AuditEntryView entries = 1;
+  int32 accepted = 2;         // 新写入条数（不含 reused）
+  int32 reused = 3;           // event_id 命中已有条目的条数
+}
+
+// --- 2. 审计条目视图 ---
+
+// AuditEntryView 审计条目投影。永不返回明文 IP / 设备号 / 口令。
+message AuditEntryView {
+  int64 entry_id = 1;         // 全局唯一条目 ID（audit_entry.entry_id）
+  string event_id = 2;
+  int32 schema_version = 3;
+  string chain_key = 4;       // 所属哈希链标识：<action_domain>/<yyyy-MM-dd UTC>
+  int64 seq = 5;              // 链内序号，从 1 连续递增
+  ActorType actor_type = 6;
+  int64 actor_id = 7;
+  string actor_name = 8;
+  string action = 9;
+  string action_domain = 10;
+  string target_type = 11;
+  string target_id = 12;
+  AuditResult result = 13;
+  string before_digest = 14;
+  string after_digest = 15;
+  string reason = 16;
+  SourceApp source_app = 17;
+  string ip_hash = 18;        // 来源 IP 的不可逆短哈希
+  string device_hash = 19;    // 设备标识的不可逆短哈希
+  string trace_id = 20;
+  string request_id = 21;
+  int64 occurred_at = 22;     // 业务发生时间（Unix 秒）
+  string prev_hash = 23;
+  string entry_hash = 24;     // 本条目完整性摘要（算法见文件头注释）
+  int64 ctime = 25;           // 入库时间（Unix 秒）
+  int64 archived_at = 26;     // 归档完成时间，0 表示仍在热表
+  string caller_service = 27; // 写入方服务名（归因“谁声称做了这件事”）
+}
+
+// --- 3. 查询（强约束：时间范围 + 分页 + 维度过滤） ---
+
+message GetAuditEntryReq {
+  CallContext ctx = 1;
+  int64 entry_id = 2;         // 与 event_id 二选一，entry_id 优先
+  string event_id = 3;
+}
+
+message GetAuditEntryReply {
+  AuditEntryView entry = 1;
+  bool found = 2;             // false 时 entry 为空（不返回 gRPC NotFound，便于批量核对）
+}
+
+// ListAuditEntriesReq 查询约束（服务端强制，违反即 InvalidArgument）：
+//   1. start_at/end_at 必填且 start_at < end_at，跨度不超过 max_range_seconds
+//      （配置 AuditQuery.MaxRangeDays，默认 92 天）；
+//   2. 必须至少给出一个收窄维度：actor_id / action / action_domain /
+//      target_type+target_id / trace_id；
+//   3. ps <= AuditQuery.MaxPageSize（默认 100），pn 从 1 开始；
+//   4. 排序固定 occurred_at DESC, entry_id DESC（不接受客户端指定排序键，
+//      避免大表 filesort）。
+// 读侧权限：由 gateway/admin + operation.VerifyAdminPermission 判定
+// （audit 不拥有 RBAC）；本服务把每次读到的维度写回一行 action_domain=data_access
+// 的自审计条目（action=audit.entry.query / audit.entry.list），保证「谁看过什么」可追。
+message ListAuditEntriesReq {
+  CallContext ctx = 1;
+  int64 start_at = 2;         // Unix 秒，含
+  int64 end_at = 3;           // Unix 秒，不含
+  ActorType actor_type = 4;   // UNSPECIFIED 表示不过滤
+  int64 actor_id = 5;         // 0 表示不过滤
+  string action = 6;          // 空表示不过滤（精确匹配）
+  string action_domain = 7;   // 空表示不过滤
+  string target_type = 8;     // 与 target_id 同时给出才生效
+  string target_id = 9;
+  string trace_id = 10;       // 空表示不过滤
+  AuditResult result = 11;    // UNSPECIFIED 表示不过滤
+  SourceApp source_app = 12;  // UNSPECIFIED 表示不过滤
+  int32 pn = 13;              // 页码，从 1 开始
+  int32 ps = 14;              // 每页条数，上限由服务端配置
+}
+
+message ListAuditEntriesReply {
+  repeated AuditEntryView entries = 1;
+  int64 total = 2;            // 命中总数（受时间范围约束的 COUNT，可能滞后于并发写入）
+  int32 pn = 3;
+  int32 ps = 4;
+  int64 max_range_seconds = 5; // 服务端实际生效的时间跨度上限（便于调用方自我修正）
+}
+
+// --- 4. 完整性自证 ---
+
+// VerifyAuditChainReq 重算指定链区间的哈希。
+// 校验语义：按 seq 升序重放 V1_SERIALIZATION，比对 prev_hash 与 entry_hash；
+// 首个断点之后的条目不再继续判定（chainKey 已定位到 域+日，范围通常 <= 数十万行）。
+message VerifyAuditChainReq {
+  CallContext ctx = 1;
+  string chain_key = 2;       // 必填，如 "ops_config/2026-09-20"
+  int64 from_seq = 3;         // 0 表示从链头开始
+  int64 to_seq = 4;           // 0 表示直到链尾
+  int32 max_entries = 5;      // <=0 时按配置 AuditVerify.MaxEntriesPerCall（默认 50000）
+}
+
+message VerifyAuditChainReply {
+  bool intact = 1;            // 整段一致
+  int64 checked = 2;          // 实际校验条数
+  int64 first_broken_seq = 3; // 首个异常序号，0 表示无异常
+  int64 first_broken_entry_id = 4;
+  string broken_reason = 5;   // seq_gap / prev_hash_mismatch / entry_hash_mismatch / truncated
+  string last_entry_hash = 6; // 本次校验到的最后一个条目摘要（可用于增量续验）
+  bool truncated = 7;         // true 表示达到 max_entries 未验完整段
+}
+
+// --- 5. 导出（任务，不是同步大查询） ---
+
+// ExportState 导出任务状态机：
+//   pending → running → succeeded → expired
+//                    ↘ failed（可重新提交新任务） / canceled
+message AuditExportTask {
+  int64 task_id = 1;
+  string request_id = 2;      // 提交幂等键（唯一索引）
+  int64 operator_id = 3;      // 申请人 admin_id
+  string caller_service = 4;
+  string filter_json = 5;     // 查询条件快照（JSON 文本；服务端已剔除任何疑似 PII 值）
+  string format = 6;          // csv / json
+  string state = 7;           // pending/running/succeeded/failed/expired/canceled
+  int64 row_count = 8;        // 导出行数（完成时写入）
+  string bucket = 9;          // 对象存储 bucket（只存引用，不存密钥）
+  string object_key = 10;     // 对象 key
+  int64 object_size = 11;     // 字节数
+  int64 expire_at = 12;       // 对象计划删除时间（Unix 秒）
+  string file_hash = 13;      // 导出文件 sha256hex，供下载方自证未被替换
+  string err_msg = 14;        // 失败原因（脱敏，不含连接串/堆栈）
+  string trace_id = 15;
+  int64 ctime = 16;
+  int64 started_at = 17;
+  int64 finished_at = 18;
+}
+
+message CreateAuditExportReq {
+  CallContext ctx = 1;        // request_id 必填
+  int64 start_at = 2;         // 同查询约束：必填、跨度受限
+  int64 end_at = 3;
+  ActorType actor_type = 4;
+  int64 actor_id = 5;
+  string action = 6;
+  string action_domain = 7;
+  string target_type = 8;
+  string target_id = 9;
+  string format = 10;         // 空默认 csv
+  string reason = 11;         // 导出理由（写入 filter_json 与本任务，作为可审计动机）
+}
+
+message CreateAuditExportReply {
+  AuditExportTask task = 1;
+  bool reused = 2;            // true 表示 request_id 命中已有任务
+}
+
+message GetAuditExportReq {
+  CallContext ctx = 1;
+  int64 task_id = 2;          // 与 request_id 二选一
+  string request_id = 3;
+}
+
+message GetAuditExportReply {
+  AuditExportTask task = 1;
+  string download_url = 2;    // 仅在 state=succeeded 且未过期时返回短期签名地址；否则为空
+  int64 url_expire_at = 3;    // 签名地址到期时间（Unix 秒）
+}
+
+message ListAuditExportsReq {
+  CallContext ctx = 1;
+  int64 operator_id = 2;      // 0 表示不过滤
+  string state = 3;           // 空表示全部
+  int64 start_at = 4;         // 可选，按任务创建时间过滤
+  int64 end_at = 5;
+  int32 pn = 6;
+  int32 ps = 7;
+}
+
+message ListAuditExportsReply {
+  repeated AuditExportTask items = 1;
+  int64 total = 2;
+}
+
+// RunAuditExportTask 由 services/cron（或人工）推进一个导出任务：
+// 本服务不内置 worker；执行时按 filter 分批读热表 + 已归档清单，写对象存储引用。
+message RunAuditExportTaskReq {
+  CallContext ctx = 1;
+  int64 task_id = 2;
+  int32 batch_rows = 3;       // <=0 时按配置 AuditExport.BatchRows（默认 2000）
+}
+
+message RunAuditExportTaskReply {
+  AuditExportTask task = 1;
+  int64 exported_rows = 2;    // 本次推进实际写出行数
+  bool finished = 3;          // true 表示任务已进入 succeeded/failed
+}
+
+// --- 6. 保留期策略与归档 ---
+
+// RetentionPolicy 按 action_domain 设定热表/归档/清除窗口。
+// 语义：occurred_at 超过 archive_after_days 的条目可归档；hot_days 是热表软上限；
+// delete_after_days 是「允许物理删除」的最早时点，且必须已存在 verified 的归档批次。
+// 本契约只做热表标记（archived_at），不提供物理 DELETE 方法——清理动作由 DBA 作业
+// 按此窗口在库外执行（见 services/audit/README.md「已知缺口」）；
+// delete_after_days = 0 表示永久保留（默认）。
+message RetentionPolicy {
+  int64 policy_id = 1;
+  string action_domain = 2;   // 唯一键；"default" 是未匹配域的回退策略
+  int32 hot_days = 3;         // 热表保留天数
+  int32 archive_after_days = 4; // 超过该天数即可归档
+  int32 delete_after_days = 5;  // 超过该天数且已归档才允许清理；0 表示不删
+  int32 state = 6;            // 1 启用、2 停用
+  int64 version = 7;          // 乐观锁版本
+  int64 operator_id = 8;      // 最后修改人 admin_id（引用，不复制）
+  string remark = 9;
+  int64 ctime = 10;
+  int64 mtime = 11;
+}
+
+message ListRetentionPoliciesReq {
+  CallContext ctx = 1;
+  int32 state = 2;            // 0 表示全部
+  int32 pn = 3;
+  int32 ps = 4;
+}
+
+message ListRetentionPoliciesReply {
+  repeated RetentionPolicy items = 1;
+  int64 total = 2;
+}
+
+message SaveRetentionPolicyReq {
+  CallContext ctx = 1;        // request_id 必填
+  string action_domain = 2;   // 小写字母/数字/下划线，最长 32；"default" 必须存在
+  int32 hot_days = 3;
+  int32 archive_after_days = 4;
+  int32 delete_after_days = 5;
+  int32 state = 6;            // 0 视为 1
+  int64 expect_version = 7;   // 0 表示新建；非 0 表示基于该版本更新（乐观锁）
+  string remark = 8;          // 变更原因（同时由调用方写一条 audit 条目）
+}
+
+message SaveRetentionPolicyReply {
+  RetentionPolicy policy = 1;
+}
+
+// ArchiveAuditEntries 归档一个链区间：写 audit_archive_batch（含 manifest_hash）后，
+// 按策略决定是否清理热表。任务式调用（request_id 幂等），由 services/cron 触发。
+message ArchiveAuditEntriesReq {
+  CallContext ctx = 1;        // request_id 必填
+  string chain_key = 2;       // 必填，一次只归档一条链的一个区间
+  int64 from_seq = 3;         // 0 表示链头
+  int64 to_seq = 4;           // 0 表示链尾前
+  bool purge_hot = 5;         // true 时归档成功后把热表行标记 archived_at（不物理删除）
+}
+
+// ArchiveBatch 归档批次（审计链离开热表前后的证据）。
+message ArchiveBatch {
+  int64 batch_id = 1;
+  string request_id = 2;
+  string chain_key = 3;
+  int64 from_seq = 4;
+  int64 to_seq = 5;
+  int64 row_count = 6;
+  string bucket = 7;          // 只存引用
+  string object_key = 8;
+  string manifest_hash = 9;   // 归档清单（entry_id/seq/entry_hash 逐行）的 sha256hex
+  string last_entry_hash = 10; // 批次尾条目的 entry_hash，续验用
+  string state = 11;          // pending/writing/verified/purged/failed
+  int64 operator_id = 12;
+  string trace_id = 13;
+  string err_msg = 14;
+  int64 ctime = 15;
+  int64 finished_at = 16;
+}
+
+message ArchiveAuditEntriesReply {
+  ArchiveBatch batch = 1;
+  bool reused = 2;            // true 表示 request_id 命中已有批次
+}
+
+message ListArchiveBatchesReq {
+  CallContext ctx = 1;
+  string chain_key = 2;       // 空表示全部
+  string state = 3;           // 空表示全部
+  int64 start_at = 4;
+  int64 end_at = 5;
+  int32 pn = 6;
+  int32 ps = 7;
+}
+
+message ListArchiveBatchesReply {
+  repeated ArchiveBatch items = 1;
+  int64 total = 2;
+}
+
+// Audit 追加式审计服务。
+service Audit {
+  // 追加一条审计（event_id 幂等）
+  rpc AppendAudit(AppendAuditReq) returns (AppendAuditReply);
+  // 批量追加（Outbox 重放/领域服务批量留痕；任一条非法整批拒绝）
+  rpc BatchAppendAudit(BatchAppendAuditReq) returns (BatchAppendAuditReply);
+  // 按 entry_id / event_id 取单条
+  rpc GetAuditEntry(GetAuditEntryReq) returns (GetAuditEntryReply);
+  // 强约束分页查询（时间范围 + 收窄维度必填）
+  rpc ListAuditEntries(ListAuditEntriesReq) returns (ListAuditEntriesReply);
+  // 哈希链完整性自证（按链区间重放校验）
+  rpc VerifyAuditChain(VerifyAuditChainReq) returns (VerifyAuditChainReply);
+
+  // 提交导出任务（request_id 幂等；导出不走同步大查询）
+  rpc CreateAuditExport(CreateAuditExportReq) returns (CreateAuditExportReply);
+  // 查询导出任务，必要时签发短期下载地址
+  rpc GetAuditExport(GetAuditExportReq) returns (GetAuditExportReply);
+  // 分页列出导出任务
+  rpc ListAuditExports(ListAuditExportsReq) returns (ListAuditExportsReply);
+  // 推进一个导出任务（由 services/cron 或人工触发，本服务不内置 worker）
+  rpc RunAuditExportTask(RunAuditExportTaskReq) returns (RunAuditExportTaskReply);
+
+  // 分页列出保留期策略
+  rpc ListRetentionPolicies(ListRetentionPoliciesReq) returns (ListRetentionPoliciesReply);
+  // 新建/更新保留期策略（expect_version 乐观锁）
+  rpc SaveRetentionPolicy(SaveRetentionPolicyReq) returns (SaveRetentionPolicyReply);
+  // 归档一个链区间（request_id 幂等，先落清单再标记账号）
+  rpc ArchiveAuditEntries(ArchiveAuditEntriesReq) returns (ArchiveAuditEntriesReply);
+  // 分页列出归档批次
+  rpc ListArchiveBatches(ListArchiveBatchesReq) returns (ListArchiveBatchesReply);
+}

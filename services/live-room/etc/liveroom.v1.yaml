@@ -1,0 +1,109 @@
+# live-room（直播间与主播状态领域服务）示例配置。
+# 仅供本地开发：真实口令/密钥由配置中心或 Secret/Vault 注入，禁止提交到仓库（AGENTS.md §4）。
+#
+# 端口说明：8114-8119 按 services/cron/etc/cron.v1.yaml 的约定留给阶段 3-4 新服务，
+# 同批次 live-ingest 取 8118，本服务取 8119；live-media/live-gateway 已占 8120/8121(+8122)。
+# 全仓 docs 无权威直播端口分配表，落地部署清单时以本值为准统一改（见 README「已知缺口」）。
+Name: liveroom.v1.rpc
+ListenOn: 0.0.0.0:8119
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: liveroom.v1.rpc
+
+# 日志与 trace_id：本地保持控制台输出，生产由配置中心覆盖成 file。
+# 注意：房间审核意见、封禁原因等运营口径内容不得进日志（moderation-orchestrator 是真值源）。
+Log:
+  ServiceName: liveroom.v1.rpc
+  Mode: console
+  Level: info
+
+# 业务缓存：房间详情/分区树读缓存、PrepareLive 检查结果短缓存、开播令牌与幂等结果副本。
+# 真值恒在 MySQL；缓存丢失可由 DB 重建。
+# 键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会触发
+# "conflict key redis"（代码可编译、启动即失败）；全仓统一用 CacheRedis。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# 本服务自有库 DSN（go_video_live_room）。
+# 只允许访问 live_* 表；禁止直连 live-ingest / live-media / creator / moderation 的库表（AGENTS.md §5）。
+# root:root 仅限本机开发；生产示例：secretRef: vault:secret/data/go-video/live-room/mysql#dsn
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_live_room?charset=utf8mb4&parseTime=true&loc=Local
+
+# ---------------- 下游依赖（etcd key 与既有服务自身 yaml 里的 Key 逐字对齐） ----------------
+
+# creator：开播前置检查读主播身份（UpAttr from=2 直播 UP / from=3 直播白名单）。
+# 未配置时 PrepareLive 的 anchor_qualification 检查项按「未通过 + degraded=true」返回，不静默放行。
+CreatorRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: creator.v1.rpc
+  NonBlock: true
+
+# risk-control：开播前 CheckAction(ACTION_LIVE_START)，封禁/黑名单判定以它为准。
+RiskControlRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: risk-control.v1.rpc
+  NonBlock: true
+
+# moderation-orchestrator：房间资料送审（SubmitForReview，ContentType LIVE）。
+# 审核结果由 moderation.result.v1 事件回灌 ApplyRoomModerationResult，本服务不自建审核队列。
+ModerationRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: moderation.v1.rpc
+  NonBlock: true
+
+# ---------------- 领域参数 ----------------
+# 全部走配置，不在代码里写死；上限直接影响 CreateRoom/MutateAnchor/List* 的校验口径。
+LiveRoom:
+  MaxRoomsPerOwner: 1              # 单主播生效房间数上限（0 表示不限制）
+  MaxOwnerBindingsPerMid: 20       # 单主播可覆盖的房间绑定数上限（房管/连麦同样计入）
+  MaxCohostPerRoom: 8              # 单房间生效联合主播（连麦嘉宾）上限
+  MaxManagerPerRoom: 30            # 单房间生效房管上限
+  TitleMaxLength: 80               # 房间标题 rune 上限，与 live_room.title 列宽一致
+  AreaNameMaxLength: 32            # 分区名 rune 上限，与 live_area.area_name 列宽一致
+  DefaultListPageSize: 20          # 列表默认每页
+  MaxListPageSize: 100             # 列表每页上限，超出直接拒绝（不静默截断）
+  MaxAreaPageSize: 200             # ListAreas 每页上限（分区是运营维护的小表）
+  StreamInterruptGraceSeconds: 120 # 断流宽限期：超时才把场次置为 TERMINATED(STREAM_TIMEOUT)
+  PrepareCheckTTLSeconds: 60       # PrepareLive 结果缓存秒数，0 表示每次实查下游
+  RoomCacheTTLSeconds: 10          # 房间详情缓存秒数，写路径必须同步失效
+  AreaListCacheTTLSeconds: 300     # 分区列表缓存秒数，0 表示每次回源 DB
+  ModerationBusiness: live         # 送审登记的 business，须与 moderation 侧一致
+  IdempotencyRetentionDays: 30     # 幂等/事件去重记录保留天数，必须大于最大重试与重投间隔
+  StateLogRetentionDays: 365       # 状态流转日志保留天数，超期由 services/cron 归档
+  SweepBatchLimit: 200             # cron 单批扫描上限（禁播到期、幂等清理共用）
+  # 本轮 logic 未实现，到期推进没有执行者；保持 false，避免「配置开了但没人跑」的隐性期待。
+  BanExpirySweepEnabled: false
+
+# 事件消费链路（live.state.v1 -> ReportStreamState）。
+# 默认 false：本仓库的默认构建不链接 Kafka 客户端（kq 只在 -tags liveroom_kafka 时进入二进制），
+# 置 true 会启动即失败并点名缺什么，不会「安静地不消费」。
+# 打开消费需要两件事同时成立：用 `go build -tags liveroom_kafka ./services/live-room` 构建，
+# 并且真的有一个 broker 可联调。本仓库从未与任何 broker 联调过，下面的取值只保证配置自洽。
+# 本服务不发布事件：docs/api-and-events.md §5 已收敛为 live.state.v1 的唯一生产者是 live-ingest。
+Kafka:
+  Enabled: false
+  Brokers:
+  - 127.0.0.1:9092
+  Group: live-room.v1
+  # 只允许本服务有映射的 topic。moderation.result.v1 目前在本仓库没有生产者
+  # （moderation-orchestrator 只留了 TODO），订阅它等于读出来再丢掉，因此不写在这里。
+  SubscribeTopics:
+  - live.state.v1
+  MaxRetries: 5                      # 同一 event_id 的进程内尝试上限，达到即放弃并写错误日志
+  Offset: last                       # first 会重放保留窗口（重复由 live_room_idempotency 兜住）
+  Conns: 1                           # 每个 topic 的 reader 连接数
+  Consumers: 2                       # 每条连接的拉取协程数
+  Processors: 4                      # 每条连接的并发处理协程数
+  ForceCommit: false                 # 失败不提交位点，让 broker 重投
+  Username:                          # SASL 用户名，生产由 Secret 注入
+  Password:                          # SASL 口令，与 Username 成对，不写进仓库
+  CaFile:                            # TLS 根证书路径，为空表示不启用 TLS
+

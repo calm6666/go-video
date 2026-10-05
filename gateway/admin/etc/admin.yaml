@@ -15,3 +15,277 @@ UserProfileRPC:
     Hosts:
     - 127.0.0.1:2379
     Key: user-profile.v1.rpc
+
+# 以下为本次扩展接入的下游领域服务 RPC 占位；
+# 本地默认关闭（optional），生产环境通过 Secret/配置中心注入 etcd 地址与 key。
+VideoRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: video.v1.rpc
+CatalogRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: catalog.v1.rpc
+RightsRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: rights.v1.rpc
+ModerationRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: moderation.v1.rpc
+TranscodeRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: transcode.v1.rpc
+AssetRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: asset.v1.rpc
+
+# 本批接入：弹幕屏蔽词、搜索索引重建、账号与行为风控。
+# etcd key 逐一取自各服务 etc/*.yaml 的 Etcd.Key（不是目录名，注意 search-indexer
+# 注册的是无连字符的 searchindexer.v1.rpc），每行末尾是各服务 ListenOn 端口：
+#   danmaku        services/danmaku/etc/danmaku.v1.yaml         0.0.0.0:8103
+#   search-indexer services/search-indexer/etc/searchindexer.v1.yaml 0.0.0.0:8106
+#   risk-control   services/risk-control/etc/riskcontrol.v1.yaml 0.0.0.0:8105
+# 业务缓存（CacheRedis）由各服务自己持有，网关不接任何服务的 Redis（AGENTS.md §5）。
+DanmakuRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: danmaku.v1.rpc
+SearchIndexerRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: searchindexer.v1.rpc
+RiskControlRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: risk-control.v1.rpc
+
+# 本批接入：管理后台领域服务 operation（RBAC/菜单/运营配置/管理任务/审计索引）。
+# etcd key 取自 services/operation/etc/operation.v1.yaml 的 Etcd.Key（Name: operation.v1.rpc，
+# 与目录名同为无连字符形态），服务监听端口 0.0.0.0:8109。
+# OperationRPC 同时被 /admin/operation/* 路由组与 AdminPermission 中间件使用：
+# 未配置时中间件对全部受保护路由 fail-closed（503），不会退化成免鉴权放行；
+# /admin/operation/login 与 /admin/operation/permission/verify 不在中间件组内，
+# 但仍需要该客户端才能工作。后台会话密钥（OPERATION_ADMIN_TOKEN_SECRET）只注入
+# services/operation，网关不持有、也不校验 token 摘要（AGENTS.md §4/§5）。
+OperationRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: operation.v1.rpc
+
+# 本轮接入：评论运营（comment 8082）、通知模板/投递/死信（notification 8108）、
+# 创作者分组与签约（creator 8086）。etcd key 取自各服务 etc/*.yaml 的 Etcd.Key。
+# 这些路由组与既有 /admin/* 业务路由一致，暂不挂 AdminPermission（该中间件目前只覆盖
+# /admin/operation/*）；上线前需补 op_permission seed 迁移并把路由→权限点登记到
+# internal/middleware/adminpermissionmiddleware.go 的 routePermissions 表，见 README。
+CommentRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: comment.v1.rpc
+NotificationRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: notification.v1.rpc
+CreatorRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: creator.v1.rpc
+# 本轮接入：inbox 运营面（系统站内信下发、未读快照修复）。etcd key 取自 services/inbox/etc/inbox.v1.yaml。
+InboxRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: inbox.v1.rpc
+
+# 本轮接入：audit / ops-config / cron / 推荐 / 直播四服务。
+# etcd key 逐一取自各服务 etc/*.yaml 的 Etcd.Key（注意目录名与注册名不同形：
+# ops-config→opsconfig、recommend-recall→recommendrecall、recommend-rank→recommendrank、
+# live-ingest→liveingest、live-gateway→livegateway、live-media→livemedia、live-room→liveroom），
+# 行末是各服务 ListenOn 端口，本地直连时把 Etcd 段换成 Endpoints: [127.0.0.1:<port>] 即可：
+#   audit           services/audit/etc/audit.v1.yaml                   0.0.0.0:8110
+#   ops-config      services/ops-config/etc/opsconfig.v1.yaml          0.0.0.0:8111
+#   cron            services/cron/etc/cron.v1.yaml                     0.0.0.0:8112
+#   recommend-recall services/recommend-recall/etc/recommendrecall.v1.yaml 0.0.0.0:8116
+#   recommend-rank  services/recommend-rank/etc/recommendrank.v1.yaml  0.0.0.0:8123
+#   live-ingest     services/live-ingest/etc/liveingest.v1.yaml        0.0.0.0:8118
+#   live-gateway    services/live-gateway/etc/livegateway.v1.yaml      0.0.0.0:8121
+#   live-media      services/live-media/etc/livemedia.v1.yaml           0.0.0.0:8120
+#   live-room       services/live-room/etc/liveroom.v1.yaml            0.0.0.0:8119
+# 与上面各批次一致：客户端未配置时保持 nil，logic 返回明确的服务不可用错误；
+# 生产环境的 etcd 地址与凭据由 Secret/配置中心注入，不进仓库（AGENTS.md §4）。
+# 推流密钥明文、审计签名下载地址都不落网关日志，也不写进本文件。
+AuditRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: audit.v1.rpc
+OpsConfigRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: opsconfig.v1.rpc
+CronRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: cron.v1.rpc
+RecommendRecallRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: recommendrecall.v1.rpc
+RecommendRankRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: recommendrank.v1.rpc
+LiveIngestRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: liveingest.v1.rpc
+LiveGatewayRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: livegateway.v1.rpc
+# live-media 运营面：转码/分发档位/录制与切片/回放与资产引用/回收任务的 23 条 /admin/live 路由。
+# 五个 Report* 回报口不接后台路由，因此本网关不会代为推进任务状态机。
+LiveMediaRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: livemedia.v1.rpc
+LiveRoomRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: liveroom.v1.rpc
+
+# 本轮接入：event-collector 运营面（13 条 /admin/collector 路由：批次与事件台账、死信、
+# 采样/脱敏策略与投递推进）。etcd key 取自 services/event-collector/etc/eventcollector.v1.yaml
+# 的 Etcd.Key（目录名带连字符、注册名不带：eventcollector.v1.rpc），服务监听 0.0.0.0:8152。
+# 两个上报入口 CollectEvents / IngestServerEvents 刻意不接后台路由（终端面 SDK 入口归
+# gateway/app；服务端埋点要求调用方服务身份，网关代报会让信封 producer 失真）。
+# 采集事件的明文设备号/IP 只存在于各服务自己的请求生命周期内，网关侧只见 device_hash
+# 与 ip_segment；盐值不进本文件，只由 salt_ref 指向的环境变量名在 event-collector 侧解析。
+EventCollectorRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: eventcollector.v1.rpc
+
+# 私信运营面：举报台账/处置 + 留存到期清理（3 条 /admin/private-message 路由）。
+# etcd Key 必须写 privatemessage.v1.rpc —— 服务侧注册的是不带连字符的名字，
+# 写成 private-message.v1.rpc 会永远发现不了对端（服务发现不会报错，只会一直 nil 客户端）。
+# ApplyModerationVerdict 不接后台路由：审核结论只能由审核侧以服务身份写入。
+PrivateMessageRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: privatemessage.v1.rpc
+# 阶段 4 行为分析面（15 条 /admin/spm 路由）。etcd Key 取自 services/spm/etc/spm.v1.yaml 的
+# Name/Etcd.Key = spm.v1.rpc（服务 ListenOn 0.0.0.0:8131；本地直连可把 Etcd 段换成 Endpoints）。
+# WriteMetricWindow 不接后台路由：窗口指标的唯一写方是计算链路（实时聚合器/离线回填/重算作业），
+# 后台代写会让「运营觉得某稿该火」变成一个指标源，违反 AGENTS.md §7（SPM 只做行为分析）。
+SpmRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: spm.v1.rpc
+
+# 阶段 4 特征面（13 条 /admin/feature-store 路由）。etcd Key 取自
+# services/feature-store/etc/featurestore.v1.yaml 的 Name/Etcd.Key = featurestore.v1.rpc
+# （服务 ListenOn 0.0.0.0:8130；目录名带连字符、注册名不带，写成 feature-store.v1.rpc 会永远发现不了对端）。
+# WriteFeatures 不接后台路由：特征值的写入方只有计算链路（spm 指标投影、离线模型回填、风控滑窗），
+# 后台代写等于让运营的主观判断变成排序侧读到的在线特征，违反 AGENTS.md §7。
+# GetFeature/BatchGetFeatures 也不接：它们是 recommend-* 每次排序都打的在线热路径读。
+FeatureStoreRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: featurestore.v1.rpc
+
+# 阶段 4 开放平台面（16 条 /admin/open-platform 路由）。etcd Key 取自
+# services/open-platform/etc/openplatform.v1.yaml 的 Name/Etcd.Key = openplatform.v1.rpc
+# （服务 ListenOn 0.0.0.0:8151；目录名带连字符、注册名不带，写成 open-platform.v1.rpc 会发现不了对端）。
+# 三条口径决定了这里只有 16 条路由（详见 admin.api 段头与 gateway/admin/README.md）：
+# 后台不代替开发者表达意愿（不接 RegisterApplication / RegisterWebhook / 资料通道）、
+# 不签发也不换发用户凭证（不接 OAuth 五法：IssueAuthorizationCode / ExchangeAuthorizationCode /
+# RefreshAccessToken / IntrospectToken / AuthorizeRequest）、不注入事实（不接 EnqueueWebhookEvent）。
+# 本域的运营主体位是**用户 mid 空间**（operator_mid / caller_mid），与 op_admin_user.admin_id 不是
+# 同一编号空间，因此表单必须自报 mid、网关只做会话校验与双主体日志，不代为渲染（已知缺口）。
+# 一次性明文（轮换出的 client_secret、撤销入参 token_hint）永不进网关日志。
+OpenPlatformRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: openplatform.v1.rpc
+
+# 本轮接入：商业化五域运营面（共 39 条 /admin/* 路由）。
+# 资金语义（AGENTS.md §1，2026-09-22 修订）：支付与充值**只走沙箱台账**，不调用任何真实支付渠道；
+# 「开通即生效」是读会员授予表的真实结论，不是伪造成功。渠道回调验签、退款到卡、提现、
+# 打款出金、对账文件、发票税务这些真实资金能力既没有接口也没有本文件里的配置项。
+# 创作者分成的结算单 payout_state 恒 NOT_PAYABLE——本期没有出金通道，后台读到的就是「未出金」。
+#
+# etcd Key 逐一取自各服务 etc/*.yaml 的 Etcd.Key / Name（服务侧注册的都是**不带连字符**的名字），
+# 行末是各服务 ListenOn 端口，本地直连时把 Etcd 段换成 Endpoints: [127.0.0.1:<port>] 即可：
+#   membership       services/membership/etc/membership.v1.yaml           0.0.0.0:8160
+#   payment          services/payment/etc/payment.v1.yaml                 0.0.0.0:8161
+#   trade-order      services/trade-order/etc/tradeorder.v1.yaml          0.0.0.0:8162
+#   coin             services/coin/etc/coin.v1.yaml                       0.0.0.0:8163
+#   creator-revenue  services/creator-revenue/etc/creatorrevenue.v1.yaml  0.0.0.0:8164
+# **坑（本文件已踩过一次，见 privatemessage 那段）**：目录名带连字符而注册名不带，
+# 把 trade-order 写成 tradeorder.v1.rpc 之外的值（例如 trade-order.v1.rpc）会让服务发现永远找不到对端
+# —— 它不会启动失败、也不会报错，只会让客户端一直拿不到地址、调用超时。
+# 同理 creator-revenue 必须写 creatorrevenue.v1.rpc。
+# 未配置（或 etcd 不可达）时对应路由一律返回明确错误，绝不返回空台账或假成功；
+# 后台会话密钥（OPERATION_ADMIN_TOKEN_SECRET）仍只注入 services/operation，网关不持有。
+MembershipRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: membership.v1.rpc
+PaymentRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: payment.v1.rpc
+# 目录名 trade-order，注册名 tradeorder.v1.rpc（不带连字符）。
+# 建单/取消/申退/绑单/履约五类方法不接后台路由：订单状态机的唯一驱动方是 trade-order 自己。
+TradeOrderRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: tradeorder.v1.rpc
+# 硬币是社区虚拟币、不是钱：coin 与 payment 是两套账，不互换也不折算；
+# 投币/撤币（终端用户动作）与内容侧汇总都不接后台路由。
+CoinRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: coin.v1.rpc
+# 目录名 creator-revenue，注册名 creatorrevenue.v1.rpc（不带连字符）。
+# 加入/退出计划（创作者本人动作）与计量事实写入（spm/coin/cron 的活）不接后台路由；
+# 出金/提现/打款在本期范围外，契约里没有这些方法。
+CreatorRevenueRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: creatorrevenue.v1.rpc

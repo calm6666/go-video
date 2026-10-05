@@ -15,8 +15,8 @@ import (
 type Config struct {
 	zrpc.RpcServerConf
 
-	// Redis 缓存连接（基础资料/经验/节操/实名信息缓存、实名验证码、经验奖励位图）。
-	Redis redis.RedisConf
+	// CacheRedis 业务缓存连接（基础资料/经验/节操/实名信息缓存、实名验证码、经验奖励位图）。
+	CacheRedis redis.RedisConf // 不能命名为 Redis：与 zrpc.RpcServerConf 内嵌字段同名会让配置加载失败
 
 	// MySQL 主库连接 DSN（user-profile 服务自有的 14 张表）。
 	DataSource string
@@ -28,7 +28,7 @@ type Config struct {
 	Outbox OutboxConf
 
 	// AccountRPC 是 account 服务的 zrpc client 配置。
-	// 资料更新事件（user.profile_updated）通过 account 的 DelCache RPC
+	// 资料更新事件（user.profile.updated）通过 account 的 DelCache RPC
 	// 失效 account 侧 Info/Card/Profile 缓存（替代参考仓库 databus 的
 	// MemberService-AccountNotify 主题，遵循"跨服务只用同步 RPC/事件"约束）。
 	AccountRPC zrpc.RpcClientConf

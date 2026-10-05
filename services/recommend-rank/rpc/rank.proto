@@ -1,0 +1,429 @@
+syntax = "proto3";
+
+package recommendrank.v1;
+
+option go_package = "go-video/services/recommend-rank/rpc";
+
+// recommend-rank：多目标排序领域服务（模型版本、特征配置、A/B 实验、频控与打散、安全过滤）。
+//
+// 契约边界（AGENTS.md）：
+//   - §7：排序只消费候选与特征做打分排序，不提供广告位参数、不做广告投放与商业化报表；
+//     本契约**没有**"手工置顶/加权某 aid""按付费能力排序"之类的入参。
+//     也不提供"改写推荐结果"的写接口：运营能改的只有模型版本、特征配置与实验状态，
+//     且每次改动都带 operator/reason 并可审计。
+//   - §5：候选由调用方（gateway/app 经 recommend-recall）传入，跨服务只传主键 aid；
+//     本服务不落稿件、用户、媒资主数据，也不写任何其他服务的表。
+//   - 硬约束：**任何情况下返回的 items 都是入参 candidates 的子集**，
+//     不得凭空生成 aid，不得返回超出候选集的结果；候选为空时返回空列表 + 明确原因。
+//
+// 可审计性（本契约的核心设计）：
+//   - 每次排序产出一个 decision_id，落 rank_decision_log：入参条数、出参条数、
+//     过滤计数、model_key/model_version/feature_config_version、exp_key/variant_key/bucket_no、
+//     有序 aid 的 sha256 摘要（result_digest）；
+//   - 调用方（recommend-recall 的 snapshot_id + 本次 request_id）可把整条链路回放出来。
+//
+// 降级红线：模型/特征/存储故障时按 FallbackStrategy 回退召回原序并置 degraded=true，
+// 不返回"看起来正常"的空结果冒充成功；排序服务整体不可用时，由调用方直接使用
+// recommend-recall 的 rank_in_source 顺序（见 README 降级矩阵）。
+
+// 空响应
+message EmptyReply {}
+
+// 客户端平台（AGENTS.md §1/§6）。编号与 recommend-recall 契约一致但本文件不 import 它。
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0; // 未指定
+  PLATFORM_ANDROID = 1;     // Android
+  PLATFORM_IOS = 2;         // iOS
+  PLATFORM_HARMONY = 3;     // HarmonyOS
+  PLATFORM_DESKTOP = 4;     // 电脑客户端
+}
+
+// 候选来源标记。编号与 recommend-recall 的 Source 逐一对齐（同名同值），
+// 映射由调用方（gateway/app）负责，两服务互不 import；
+// 一致性由 internal/logic/contract_consistency_test.go 钉住，禁止随意改号。
+enum RankSource {
+  RANK_SOURCE_UNSPECIFIED = 0; // 未指定
+  RANK_SOURCE_HOT = 1;         // 热门池
+  RANK_SOURCE_FOLLOW = 2;      // 关注池
+  RANK_SOURCE_TAG = 3;         // 标签池
+  RANK_SOURCE_COLLAB = 4;      // 协同候选
+  RANK_SOURCE_VECTOR = 5;      // 向量候选
+  RANK_SOURCE_COLD = 6;        // 冷启动池
+}
+
+// 模型版本状态（与 model.rank_model_version.state 一致）。
+// 合法迁移：DRAFT -> READY -> ACTIVE -> RETIRED；READY -> RETIRED。ACTIVE 每 model_key 至多一个。
+enum ModelVersionState {
+  MODEL_VERSION_STATE_UNSPECIFIED = 0; // 未指定
+  MODEL_VERSION_STATE_DRAFT = 1;       // 登记中，不可上线
+  MODEL_VERSION_STATE_READY = 2;       // 校验通过，可激活
+  MODEL_VERSION_STATE_ACTIVE = 3;      // 当前生效
+  MODEL_VERSION_STATE_RETIRED = 4;     // 已下线（保留供审计与回滚）
+}
+
+// 实验状态（与 model.rank_experiment.state 一致）。
+enum ExperimentState {
+  EXPERIMENT_STATE_UNSPECIFIED = 0; // 未指定
+  EXPERIMENT_STATE_DRAFT = 1;       // 草稿
+  EXPERIMENT_STATE_RUNNING = 2;     // 分流中
+  EXPERIMENT_STATE_PAUSED = 3;      // 暂停（已分桶保持不变）
+  EXPERIMENT_STATE_STOPPED = 4;     // 结束（终态）
+}
+
+// 分桶主体类型：登录用户或设备受控摘要（游客）。
+enum SubjectType {
+  SUBJECT_TYPE_UNSPECIFIED = 0; // 未指定
+  SUBJECT_TYPE_MID = 1;         // subject_id = mid 的十进制字符串
+  SUBJECT_TYPE_DEVICE = 2;      // subject_id = 设备 sha256 摘要（禁止明文设备号）
+}
+
+// 降级原因（与 model.RankDegradeReason* 一致）。0 表示未降级。
+enum RankDegradeReason {
+  RANK_DEGRADE_REASON_UNSPECIFIED = 0;      // 未降级
+  RANK_DEGRADE_REASON_MODEL_UNAVAILABLE = 1; // 无 ACTIVE 模型版本或模型加载失败
+  RANK_DEGRADE_REASON_FEATURE_UNAVAILABLE = 2; // 特征读取下游不可用（feature-store/spm）
+  RANK_DEGRADE_REASON_STORE_UNAVAILABLE = 3;   // Redis/MySQL 不可用
+  RANK_DEGRADE_REASON_BUDGET_EXHAUSTED = 4;    // 打分时间预算耗尽，裁剪未打分候选
+  RANK_DEGRADE_REASON_SAFETY_UNAVAILABLE = 5;  // 内容安全结论不可读（按不通过处理并声明）
+  RANK_DEGRADE_REASON_EXPERIMENT_UNAVAILABLE = 6; // 实验配置不可读，退回默认变体
+  RANK_DEGRADE_REASON_EMPTY_CANDIDATES = 7;    // 入参候选为空（不是故障，但必须显式）
+}
+
+// 降级时采用的兜底策略。0 表示未降级。
+enum FallbackStrategy {
+  FALLBACK_STRATEGY_UNSPECIFIED = 0;    // 未降级
+  FALLBACK_STRATEGY_RECALL_ORDER = 1;   // 回退召回原序（source 优先级 + rank_in_source）
+  FALLBACK_STRATEGY_PREVIOUS_MODEL = 2; // 回退到上一个 ACTIVE 模型版本
+  FALLBACK_STRATEGY_SAFETY_ONLY = 3;    // 只跑安全过滤与去重，不打分
+}
+
+// 请求上下文（AGENTS.md §6：能区分平台/版本/设备，但不写死任何端 UI 行为）。
+message RequestContext {
+  int64 mid = 1;              // 当前用户 ID，0 表示游客
+  Platform platform = 2;      // 客户端平台
+  string app_version = 3;     // 客户端版本号
+  string device_id_hash = 4;  // 设备受控摘要（sha256 hex）；明文设备号被拒绝
+  string region = 5;          // 地区代码
+  string scene = 6;           // 场景稳定 key（home.feed / play.related ...）
+  string request_id = 7;      // 幂等与审计键；同 key 重放返回同一 decision
+  string trace_id = 8;        // 调用方透传 trace_id
+}
+
+// 入参候选（只接受主键 + 来源 + 召回分数；不接受任何"人工加权/置顶"字段）。
+message CandidateInput {
+  int64 aid = 1;            // 稿件 ID
+  RankSource source = 2;    // 来源标记
+  double recall_score = 3;  // 召回分（跨路不可比，仅用于兜底排序）
+  int32 rank_in_source = 4; // 召回路内序号（0 起），回退召回原序时使用
+  int64 pool_version = 5;   // 召回池版本（审计回指）
+  string batch_id = 6;      // 召回生成批次（审计回指）
+}
+
+message RankedItem {
+  int64 aid = 1;             // 稿件 ID（必定来自入参 candidates）
+  double score = 2;          // 最终排序分（多目标加权后的合成值）
+  repeated ObjectiveScore objectives = 3; // 各目标预估值（可解释，不含商业化目标）
+  RankSource source = 4;     // 原样回传来源
+  int32 recall_rank = 5;     // 原样回传召回路内序号
+  string reason_code = 6;    // 稳定 key（rk.because.follow / rk.because.hot ...），文案由客户端渲染
+  int32 original_index = 7;  // 在入参 candidates 中的下标，用于验证"没有凭空产生"
+}
+
+// 单个优化目标的预估值。目标集合是受控枚举，新增目标必须先登记再使用。
+message ObjectiveScore {
+  string objective = 1; // 受控 key：pred_click / pred_finish / pred_interact / pred_negative
+  double value = 2;     // 概率或归一值
+}
+
+// 过滤与打散统计（丢弃原因必须可见，不允许静默吞候选）。
+message FilterStat {
+  int32 safety_filtered = 1;     // 内容安全/审核不可见被剔除
+  int32 frequency_filtered = 2;  // 频控（同作者/同标签/近期已推上限）被剔除
+  int32 dedup_filtered = 3;      // 入参重复 aid 去重
+  int32 diversified_moved = 4;   // 打散导致位置移动（不减少条数）
+  int32 truncated = 5;           // 超出 limit 被截断
+}
+
+// 降级声明。
+message DegradationInfo {
+  bool degraded = 1;
+  RankDegradeReason reason = 2;
+  FallbackStrategy fallback = 3;
+  int32 scored_items = 4;   // 真正被模型打分的条数
+  int32 cost_ms = 5;        // 本次排序耗时
+  string detail = 6;        // 排障文本，禁止包含用户敏感信息
+}
+
+// --- 在线排序 ---
+
+message RankCandidatesReq {
+  RequestContext context = 1;
+  repeated CandidateInput candidates = 2; // 上限 MaxCandidates，超限直接报错（不静默裁剪）
+  string snapshot_id = 3;                 // recommend-recall 返回的召回快照 ID（审计回指）
+  int32 limit = 4;                        // 出参条数（<= MaxReturn）
+  bool allow_degrade = 5;                 // false 时依赖故障直接报错（压测/回放）
+  string idempotency_key = 6;             // 幂等键；为空时服务端用 request_id 兜底
+}
+
+message RankCandidatesReply {
+  string decision_id = 1;        // 本次排序的审计 ID（rank_decision_log.decision_id）
+  string request_id = 2;         // 回显或服务端生成
+  repeated RankedItem items = 3; // 入参候选的子集，按最终分降序
+  string result_digest = 4;      // sha256(有序 aid 列表, 分隔符 "|")，回放比对
+  string model_key = 5;
+  string model_version = 6;
+  string feature_config_version = 7;
+  string exp_key = 8;            // 命中的实验（未命中为空）
+  string variant_key = 9;        // 命中的变体（未命中为 default）
+  int32 bucket_no = 10;          // 分桶号
+  string recall_snapshot_id = 11; // 回指召回快照
+  int32 input_count = 12;
+  int32 returned_count = 13;
+  FilterStat filters = 14;
+  DegradationInfo degradation = 15;
+  int64 ttl_seconds = 16;        // 建议网关缓存秒数；降级结果固定 0
+}
+
+// --- 审计读（结果摘要必须可查） ---
+
+message RankDecisionInfo {
+  string decision_id = 1;
+  string request_id = 2;
+  string trace_id = 3;
+  string snapshot_id = 4;
+  int64 mid = 5;
+  SubjectType subject_type = 6;
+  string subject_id = 7;         // mid 字符串或设备摘要（不含明文设备号）
+  string scene = 8;
+  Platform platform = 9;
+  string app_version = 10;
+  string exp_key = 11;
+  string variant_key = 12;
+  int32 bucket_no = 13;
+  string model_key = 14;
+  string model_version = 15;
+  string feature_config_version = 16;
+  int32 input_count = 17;
+  int32 returned_count = 18;
+  string result_digest = 19;
+  repeated int64 top_aids = 20;  // 前 N 个 aid（N 由配置 MaxDigestAids 决定），人工排障用
+  bool degraded = 21;
+  RankDegradeReason reason = 22;
+  FallbackStrategy fallback = 23;
+  FilterStat filters = 24;
+  int32 cost_ms = 25;
+  int64 ctime = 26;
+}
+
+message GetRankDecisionReq {
+  string decision_id = 1;  // 与 request_id 二选一
+  string request_id = 2;
+}
+
+message GetRankDecisionReply {
+  RankDecisionInfo entry = 1;  // 不存在时为 null，不返回空对象冒充命中
+}
+
+message ListRankDecisionsReq {
+  string exp_key = 1;
+  string variant_key = 2;
+  string model_key = 3;
+  string model_version = 4;
+  string scene = 5;
+  int64 from_time = 6;   // Unix 秒，含
+  int64 to_time = 7;     // Unix 秒，含
+  bool only_degraded = 8;
+  int32 pn = 9;
+  int32 ps = 10;         // 上限 MaxDecisionPage
+}
+
+message ListRankDecisionsReply {
+  repeated RankDecisionInfo entries = 1;
+  bool has_more = 2;
+}
+
+// --- 模型版本与特征配置（写接口全部带 operator/reason 与幂等键） ---
+
+message UpsertModelVersionReq {
+  string model_key = 1;               // 逻辑模型名（如 home_feed_multi_gate）
+  string version = 2;                 // 版本号（不可变，注册后只能改状态）
+  string feature_config_version = 3;  // 绑定的特征配置版本（必须已存在）
+  repeated ObjectiveWeight objective_weights = 4; // 多目标权重（受控目标集合）
+  string artifact_ref = 5;            // 模型工件引用（对象存储 key，禁止内联模型本体与密钥）
+  string offline_metrics = 6;         // 离线指标 JSON（AUC/校准等），仅审计展示，不参与在线决策
+  string operator = 7;
+  string reason = 8;
+  string idempotency_key = 9;
+}
+
+message ObjectiveWeight {
+  string objective = 1; // 受控 key，同 ObjectiveScore.objective
+  double weight = 2;    // >= 0；权重和不做强制归一，但服务端校验不超过 10
+}
+
+message UpsertModelVersionReply {
+  string model_key = 1;
+  string version = 2;
+  ModelVersionState state = 3;
+  int32 revision = 4;      // 元数据修订号（权重/工件变更 +1），版本号不变
+  bool deduplicated = 5;
+}
+
+message SetModelVersionStateReq {
+  string model_key = 1;
+  string version = 2;
+  ModelVersionState target_state = 3; // 只允许 READY/ACTIVE/RETIRED
+  string operator = 4;
+  string reason = 5;                  // 必填：激活/回滚理由是审计要求
+  string idempotency_key = 6;
+}
+
+message SetModelVersionStateReply {
+  bool changed = 1;
+  ModelVersionState state = 2;
+  string previous_active_version = 3; // 该 model_key 切换前的 ACTIVE
+  bool deduplicated = 4;
+  string event_id = 5;                // 预留：状态变更事件（本期未接 MQ，见 README 缺口）
+}
+
+message UpsertFeatureConfigReq {
+  string config_version = 1;          // 特征配置版本（不可变标识）
+  repeated string feature_keys = 2;   // 特征清单（受控 key，上限 MaxFeatureKeys）
+  string missing_policy = 3;          // 缺失值策略：default / drop_source / reject（受控枚举）
+  string feature_store_scene = 4;     // 将来接 feature-store 的读取场景 key
+  string operator = 5;
+  string reason = 6;
+  string idempotency_key = 7;
+}
+
+message UpsertFeatureConfigReply {
+  string config_version = 1;
+  int32 feature_count = 2;
+  int32 revision = 3;
+  bool deduplicated = 4;
+}
+
+// --- A/B 实验与分桶 ---
+
+message UpsertExperimentReq {
+  string exp_key = 1;
+  string variant_key = 2;      // 同一 exp_key 下的变体（含 "control"）
+  string layer_key = 3;        // 互斥层（同层互斥分流，不同层正交）
+  string hash_seed = 4;        // 分桶哈希盐（变更会导致重新分桶，需 reason 说明）
+  int32 bucket_start = 5;      // [start, end) 左闭右开，0 <= start < end <= 1000
+  int32 bucket_end = 6;
+  string model_key = 7;
+  string model_version = 8;    // 空表示沿用 ACTIVE 版本
+  string feature_config_version = 9;
+  string overrides = 10;       // 参数覆盖 JSON（受控 key，禁止出现商业化字段）
+  int64 start_at = 11;         // Unix 秒
+  int64 end_at = 12;           // Unix 秒，0 表示未设定
+  string operator = 13;
+  string reason = 14;
+  string idempotency_key = 15;
+}
+
+message ExperimentInfo {
+  string exp_key = 1;
+  string variant_key = 2;
+  string layer_key = 3;
+  int32 bucket_start = 4;
+  int32 bucket_end = 5;
+  string model_key = 6;
+  string model_version = 7;
+  string feature_config_version = 8;
+  string overrides = 9;
+  ExperimentState state = 10;
+  int32 revision = 11;
+  int64 start_at = 12;
+  int64 end_at = 13;
+  string operator = 14;
+  string reason = 15;
+  int64 ctime = 16;
+  int64 mtime = 17;
+}
+
+message UpsertExperimentReply {
+  ExperimentInfo experiment = 1;
+  bool deduplicated = 2;
+}
+
+message SetExperimentStateReq {
+  string exp_key = 1;
+  string variant_key = 2;
+  ExperimentState target_state = 3; // RUNNING/PAUSED/STOPPED
+  string operator = 4;
+  string reason = 5;
+  string idempotency_key = 6;
+}
+
+message SetExperimentStateReply {
+  bool changed = 1;
+  ExperimentState state = 2;
+  bool deduplicated = 3;
+}
+
+// 分桶查询：同一主体对同一实验的分配是稳定的（首次访问落库，之后 sticky 复用）。
+message GetExperimentAssignmentReq {
+  string exp_key = 1;
+  SubjectType subject_type = 2;
+  string subject_id = 3;   // mid 十进制字符串或设备 sha256 摘要
+  int32 bucket_count = 4;  // 桶总数，0 表示用配置 BucketCount（默认 1000）
+}
+
+message GetExperimentAssignmentReply {
+  string exp_key = 1;
+  SubjectType subject_type = 2;
+  string subject_id = 3;
+  int32 bucket_no = 4;
+  string variant_key = 5;  // 未命中任何 RUNNING 变体时为 "control"
+  bool newly_assigned = 6; // false 表示 sticky 复用或纯计算结果
+  int64 assigned_at = 7;   // Unix 秒
+  string hash_seed = 8;
+}
+
+// --- 在线面参数与运行时状态 ---
+
+message GetRankRuntimeConfigReq {
+  string scene = 1;   // 预留：场景级参数
+  string model_key = 2; // 空表示默认 model_key
+}
+
+message GetRankRuntimeConfigReply {
+  string model_key = 1;
+  string active_model_version = 2;        // 空表示无 ACTIVE 模型（在线必然降级）
+  string feature_config_version = 3;
+  int32 max_candidates = 4;
+  int32 max_return = 5;
+  repeated string objectives = 6;         // 启用的优化目标受控 key
+  bool degrade_enabled = 7;
+  FallbackStrategy fallback = 8;          // 故障时的兜底策略
+  int64 score_budget_ms = 9;              // 打分时间预算
+  int64 ttl_seconds = 10;                 // 正常结果建议缓存秒数
+  repeated ExperimentInfo running_experiments = 11;
+  string config_revision = 12;            // 配置代次摘要（灰度核对用）
+}
+
+// Rank 排序服务。
+service Rank {
+  // 多目标排序：入参候选子集内排序，输出可审计结果摘要
+  rpc RankCandidates(RankCandidatesReq) returns (RankCandidatesReply);
+  // 按 decision_id/request_id 回放一次排序决策
+  rpc GetRankDecision(GetRankDecisionReq) returns (GetRankDecisionReply);
+  // 分页查排序决策摘要（审计与实验核对）
+  rpc ListRankDecisions(ListRankDecisionsReq) returns (ListRankDecisionsReply);
+  // 登记/更新模型版本元数据（版本不可变，元数据变更 revision+1）
+  rpc UpsertModelVersion(UpsertModelVersionReq) returns (UpsertModelVersionReply);
+  // 切换模型版本状态（READY/ACTIVE/RETIRED；激活是回滚开关）
+  rpc SetModelVersionState(SetModelVersionStateReq) returns (SetModelVersionStateReply);
+  // 登记/更新特征配置版本
+  rpc UpsertFeatureConfig(UpsertFeatureConfigReq) returns (UpsertFeatureConfigReply);
+  // 新建/修改实验变体（同 (exp_key,variant_key) 唯一，变更 revision+1）
+  rpc UpsertExperiment(UpsertExperimentReq) returns (UpsertExperimentReply);
+  // 实验状态迁移（RUNNING/PAUSED/STOPPED）
+  rpc SetExperimentState(SetExperimentStateReq) returns (SetExperimentStateReply);
+  // 查询/登记主体在实验中的稳定分桶
+  rpc GetExperimentAssignment(GetExperimentAssignmentReq) returns (GetExperimentAssignmentReply);
+  // 下发在线排序参数与当前生效的模型/特征/实验状态
+  rpc GetRankRuntimeConfig(GetRankRuntimeConfigReq) returns (GetRankRuntimeConfigReply);
+}

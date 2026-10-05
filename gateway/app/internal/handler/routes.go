@@ -368,4 +368,1054 @@ func RegisterHandlers(server *rest.Server, serverCtx *svc.ServiceContext) {
 		},
 		rest.WithPrefix("/x/passport-login"),
 	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 创建稿件（DRAFT 状态）
+				Method:  http.MethodPost,
+				Path:    "/submissions",
+				Handler: createSubmissionHandler(serverCtx),
+			},
+			{
+				// 分页查询稿件（按 mid 或 typeid 过滤）
+				Method:  http.MethodGet,
+				Path:    "/submissions",
+				Handler: listSubmissionsHandler(serverCtx),
+			},
+			{
+				// 查询稿件详情
+				Method:  http.MethodGet,
+				Path:    "/submissions/:aid",
+				Handler: getSubmissionHandler(serverCtx),
+			},
+			{
+				// 推进稿件状态机（发布/删除等，校验合法转换）
+				Method:  http.MethodPost,
+				Path:    "/submissions/:aid/transition",
+				Handler: transitionStateHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/video"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 关注（幂等：重复不重复计数）
+				Method:  http.MethodPost,
+				Path:    "/follow",
+				Handler: followHandler(serverCtx),
+			},
+			{
+				// mid 的粉丝列表（分页）
+				Method:  http.MethodGet,
+				Path:    "/follower",
+				Handler: listFollowerHandler(serverCtx),
+			},
+			{
+				// mid 的关注列表（分页）
+				Method:  http.MethodGet,
+				Path:    "/following",
+				Handler: listFollowingHandler(serverCtx),
+			},
+			{
+				// 查询 mid 是否关注 owner
+				Method:  http.MethodGet,
+				Path:    "/is_following",
+				Handler: isFollowingHandler(serverCtx),
+			},
+			{
+				// 查询关注数与粉丝数
+				Method:  http.MethodGet,
+				Path:    "/stat",
+				Handler: socialStatHandler(serverCtx),
+			},
+			{
+				// 取关（幂等）
+				Method:  http.MethodPost,
+				Path:    "/unfollow",
+				Handler: unfollowHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/social"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 清零未读计数
+				Method:  http.MethodPost,
+				Path:    "/clear_unread",
+				Handler: clearUnreadHandler(serverCtx),
+			},
+			{
+				// 拉取关注流（cursor 翻页）
+				Method:  http.MethodGet,
+				Path:    "/pull",
+				Handler: pullFeedHandler(serverCtx),
+			},
+			{
+				// 查询用户未读动态数
+				Method:  http.MethodGet,
+				Path:    "/unread",
+				Handler: getUnreadCountHandler(serverCtx),
+			},
+			{
+				// 查询某用户主页动态
+				Method:  http.MethodGet,
+				Path:    "/user/:mid",
+				Handler: listUserFeedHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/feed"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 取消上传（删除 OSS 分片）
+				Method:  http.MethodPost,
+				Path:    "/abort",
+				Handler: abortUploadHandler(serverCtx),
+			},
+			{
+				// 完成上传：校验分片清单并触发 OSS 完成分片上传
+				Method:  http.MethodPost,
+				Path:    "/complete",
+				Handler: completeUploadHandler(serverCtx),
+			},
+			{
+				// 初始化上传会话，返回 upload_id 和 OSS bucket/object_key 占位
+				Method:  http.MethodPost,
+				Path:    "/init",
+				Handler: initUploadHandler(serverCtx),
+			},
+			{
+				// 查询上传状态和已完成分片列表
+				Method:  http.MethodGet,
+				Path:    "/status",
+				Handler: getUploadStatusHandler(serverCtx),
+			},
+			{
+				// 为某分片获取 OSS 预签名 PUT URL（短期）
+				Method:  http.MethodGet,
+				Path:    "/url",
+				Handler: getUploadUrlHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/upload"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 查询集详情
+				Method:  http.MethodGet,
+				Path:    "/episodes/:epid",
+				Handler: getEpisodeHandler(serverCtx),
+			},
+			{
+				// 查询某季的集列表
+				Method:  http.MethodGet,
+				Path:    "/seasons/:season_id/episodes",
+				Handler: listEpisodesHandler(serverCtx),
+			},
+			{
+				// 分页查询作品
+				Method:  http.MethodGet,
+				Path:    "/works",
+				Handler: listWorksHandler(serverCtx),
+			},
+			{
+				// 查询作品详情
+				Method:  http.MethodGet,
+				Path:    "/works/:work_id",
+				Handler: getWorkHandler(serverCtx),
+			},
+			{
+				// 分区树（扁平列表）
+				Method:  http.MethodGet,
+				Path:    "/zones",
+				Handler: listZonesHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/catalog"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 添加收藏
+				Method:  http.MethodPost,
+				Path:    "/fav",
+				Handler: addFavHandler(serverCtx),
+			},
+			{
+				// 用户收藏夹列表
+				Method:  http.MethodGet,
+				Path:    "/folders",
+				Handler: userFoldersHandler(serverCtx),
+			},
+			{
+				// 点赞/取消点赞/点踩（幂等）
+				Method:  http.MethodPost,
+				Path:    "/like",
+				Handler: likeHandler(serverCtx),
+			},
+			{
+				// 批量查询对象计数与当前用户状态
+				Method:  http.MethodGet,
+				Path:    "/stats",
+				Handler: engagementStatsHandler(serverCtx),
+			},
+			{
+				// 删除收藏
+				Method:  http.MethodPost,
+				Path:    "/unfav",
+				Handler: delFavHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/engagement"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 上报播放心跳（进度单调不回退，事件走 Outbox）
+				Method:  http.MethodPost,
+				Path:    "/heartbeat",
+				Handler: playbackHeartbeatHandler(serverCtx),
+			},
+			{
+				// 查询本人播放会话与续播进度
+				Method:  http.MethodGet,
+				Path:    "/session",
+				Handler: playbackSessionHandler(serverCtx),
+			},
+			{
+				// 签发短期防盗链播放地址（request_id 幂等）
+				Method:  http.MethodPost,
+				Path:    "/token",
+				Handler: playbackTokenHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/playback"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 删除本人弹幕（管理员可删任意，软删保留审计）
+				Method:  http.MethodPost,
+				Path:    "/delete",
+				Handler: deleteDanmakuHandler(serverCtx),
+			},
+			{
+				// 按时间轴分段拉取弹幕
+				Method:  http.MethodGet,
+				Path:    "/list",
+				Handler: listDanmakuHandler(serverCtx),
+			},
+			{
+				// 发送弹幕（幂等，落库后待审核）
+				Method:  http.MethodPost,
+				Path:    "/post",
+				Handler: postDanmakuHandler(serverCtx),
+			},
+			{
+				// 举报弹幕
+				Method:  http.MethodPost,
+				Path:    "/report",
+				Handler: reportDanmakuHandler(serverCtx),
+			},
+			{
+				// 屏蔽/解除屏蔽某用户或某关键词的弹幕
+				Method:  http.MethodPost,
+				Path:    "/user_block",
+				Handler: danmakuUserBlockHandler(serverCtx),
+			},
+			{
+				// 本人弹幕屏蔽列表
+				Method:  http.MethodGet,
+				Path:    "/user_blocks",
+				Handler: listDanmakuUserBlocksHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/danmaku"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 该端/分区的排序与分页能力配置
+				Method:  http.MethodGet,
+				Path:    "/config",
+				Handler: searchConfigHandler(serverCtx),
+			},
+			{
+				// 本人搜索历史
+				Method:  http.MethodGet,
+				Path:    "/history",
+				Handler: listSearchHistoryHandler(serverCtx),
+			},
+			{
+				// 清空本人搜索历史（需 confirm=true，物理删除）
+				Method:  http.MethodPost,
+				Path:    "/history/clear",
+				Handler: clearSearchHistoryHandler(serverCtx),
+			},
+			{
+				// 删除单个搜索历史词（需 confirm=true，物理删除）
+				Method:  http.MethodPost,
+				Path:    "/history/delete",
+				Handler: deleteSearchHistoryHandler(serverCtx),
+			},
+			{
+				// 全站/分区热词快照
+				Method:  http.MethodGet,
+				Path:    "/hot",
+				Handler: hotKeywordsHandler(serverCtx),
+			},
+			{
+				// 关键词搜索（cursor 优先分页；引擎不可用返回明确错误）
+				Method:  http.MethodGet,
+				Path:    "/query",
+				Handler: searchHandler(serverCtx),
+			},
+			{
+				// 上报查询行为（SPM 分析链路，query_id 幂等）
+				Method:  http.MethodPost,
+				Path:    "/query/report",
+				Handler: reportQueryHandler(serverCtx),
+			},
+			{
+				// 输入前缀联想
+				Method:  http.MethodGet,
+				Path:    "/suggest",
+				Handler: searchSuggestHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/search"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 用户侧软删除站内信（只影响本人收件箱）
+				Method:  http.MethodPost,
+				Path:    "/delete",
+				Handler: deleteInboxMessageHandler(serverCtx),
+			},
+			{
+				// 收件箱分页（cursor 优先）
+				Method:  http.MethodGet,
+				Path:    "/messages",
+				Handler: listInboxMessagesHandler(serverCtx),
+			},
+			{
+				// 幂等标记已读
+				Method:  http.MethodPost,
+				Path:    "/read",
+				Handler: markInboxReadHandler(serverCtx),
+			},
+			{
+				// 按分类全部标记已读
+				Method:  http.MethodPost,
+				Path:    "/read/all",
+				Handler: markInboxAllReadHandler(serverCtx),
+			},
+			{
+				// 未读总数与分类未读
+				Method:  http.MethodGet,
+				Path:    "/unread",
+				Handler: inboxUnreadHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/inbox"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 删除本人评论（管理员删除走 gateway/admin）
+				Method:  http.MethodPost,
+				Path:    "/delete",
+				Handler: deleteCommentHandler(serverCtx),
+			},
+			{
+				// 分页查询目标下的根评论
+				Method:  http.MethodGet,
+				Path:    "/list",
+				Handler: listCommentsHandler(serverCtx),
+			},
+			{
+				// 稿件 UP 主置顶/取消置顶评论
+				Method:  http.MethodPost,
+				Path:    "/pin",
+				Handler: pinCommentHandler(serverCtx),
+			},
+			{
+				// 发布评论或楼中楼回复（一律以待审状态落库）
+				Method:  http.MethodPost,
+				Path:    "/post",
+				Handler: postCommentHandler(serverCtx),
+			},
+			{
+				// 分页查询某根评论下的楼中楼
+				Method:  http.MethodGet,
+				Path:    "/replies",
+				Handler: listCommentRepliesHandler(serverCtx),
+			},
+			{
+				// 举报评论（进入 moderation 待审队列）
+				Method:  http.MethodPost,
+				Path:    "/report",
+				Handler: reportCommentHandler(serverCtx),
+			},
+			{
+				// 目标下的评论计数快照
+				Method:  http.MethodGet,
+				Path:    "/stats",
+				Handler: commentStatsHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/comment"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 查询本人通道偏好与免打扰设置
+				Method:  http.MethodGet,
+				Path:    "/dnd",
+				Handler: getDndPreferenceHandler(serverCtx),
+			},
+			{
+				// 更新本人通道偏好与免打扰设置（全量覆盖）
+				Method:  http.MethodPost,
+				Path:    "/dnd/update",
+				Handler: updateDndPreferenceHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/notification"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 查询 UP 主身份属性
+				Method:  http.MethodGet,
+				Path:    "/attr",
+				Handler: upAttrHandler(serverCtx),
+			},
+			{
+				// 查询单个 UP 主特殊属性
+				Method:  http.MethodGet,
+				Path:    "/special",
+				Handler: upSpecialHandler(serverCtx),
+			},
+			{
+				// 批量查询 UP 主特殊属性（最多 100）
+				Method:  http.MethodGet,
+				Path:    "/specials",
+				Handler: upsSpecialHandler(serverCtx),
+			},
+			{
+				// 查询关注弹窗开关
+				Method:  http.MethodGet,
+				Path:    "/switch",
+				Handler: getUpSwitchHandler(serverCtx),
+			},
+			{
+				// 设置关注弹窗开关
+				Method:  http.MethodPost,
+				Path:    "/switch",
+				Handler: setUpSwitchHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/up"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 拉黑用户（已关注时自动取关）
+				Method:  http.MethodPost,
+				Path:    "/black/add",
+				Handler: addBlackHandler(serverCtx),
+			},
+			{
+				// 是否已拉黑 owner
+				Method:  http.MethodGet,
+				Path:    "/black/check",
+				Handler: isBlackedHandler(serverCtx),
+			},
+			{
+				// 取消拉黑（幂等）
+				Method:  http.MethodPost,
+				Path:    "/black/del",
+				Handler: delBlackHandler(serverCtx),
+			},
+			{
+				// 本人黑名单列表
+				Method:  http.MethodGet,
+				Path:    "/black/list",
+				Handler: listBlacksHandler(serverCtx),
+			},
+			{
+				// 设为特别关注（须先关注）
+				Method:  http.MethodPost,
+				Path:    "/special/add",
+				Handler: addSpecialHandler(serverCtx),
+			},
+			{
+				// 取消特别关注（幂等）
+				Method:  http.MethodPost,
+				Path:    "/special/del",
+				Handler: delSpecialHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/social"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 单对象收藏状态
+				Method:  http.MethodGet,
+				Path:    "/fav/state",
+				Handler: isFavoredHandler(serverCtx),
+			},
+			{
+				// 批量收藏状态（最多 100）
+				Method:  http.MethodGet,
+				Path:    "/fav/states",
+				Handler: isFavoredsHandler(serverCtx),
+			},
+			{
+				// 新建收藏夹
+				Method:  http.MethodPost,
+				Path:    "/folder/add",
+				Handler: addFolderHandler(serverCtx),
+			},
+			{
+				// 删除收藏夹（软删）
+				Method:  http.MethodPost,
+				Path:    "/folder/del",
+				Handler: delFolderHandler(serverCtx),
+			},
+			{
+				// 批量查询当前用户点赞状态
+				Method:  http.MethodGet,
+				Path:    "/has_like",
+				Handler: hasLikeHandler(serverCtx),
+			},
+			{
+				// 上报分享并返回最新分享数
+				Method:  http.MethodPost,
+				Path:    "/share",
+				Handler: addShareHandler(serverCtx),
+			},
+			{
+				// 当前用户的点赞历史
+				Method:  http.MethodGet,
+				Path:    "/user_likes",
+				Handler: userLikesHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/engagement"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 删除本人动态（写扩散撤销由 feed 服务处理）
+				Method:  http.MethodPost,
+				Path:    "/delete",
+				Handler: deleteFeedHandler(serverCtx),
+			},
+			{
+				// 置顶本人动态
+				Method:  http.MethodPost,
+				Path:    "/pin",
+				Handler: pinFeedHandler(serverCtx),
+			},
+			{
+				// 取消置顶动态
+				Method:  http.MethodPost,
+				Path:    "/unpin",
+				Handler: unpinFeedHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/feed"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 删除稿件（软删，状态机推进到 DELETED）
+				Method:  http.MethodPost,
+				Path:    "/submissions/:aid/delete",
+				Handler: deleteSubmissionHandler(serverCtx),
+			},
+			{
+				// 编辑稿件元信息（空字段表示不更新，须为所有者）
+				Method:  http.MethodPost,
+				Path:    "/submissions/:aid/update",
+				Handler: updateSubmissionHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/video"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 对驳回结论提交申诉（仅作者本人）
+				Method:  http.MethodPost,
+				Path:    "/appeal",
+				Handler: submitAppealHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/moderation"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 本人登录记录
+				Method:  http.MethodGet,
+				Path:    "/login/logs",
+				Handler: loginLogsHandler(serverCtx),
+			},
+			{
+				// 历史密码重复校验
+				Method:  http.MethodGet,
+				Path:    "/password/history/check",
+				Handler: checkHistoryPasswordHandler(serverCtx),
+			},
+			{
+				// 验证码校验后找回密码
+				Method:  http.MethodPost,
+				Path:    "/password/reset",
+				Handler: resetPasswordHandler(serverCtx),
+			},
+			{
+				// 设置/修改密码（RSA 密文传输）
+				Method:  http.MethodPost,
+				Path:    "/password/set",
+				Handler: setPasswordHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/x/passport-login"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 按对方 mid 定位或创建单聊会话（pair_key 幂等）
+				Method:  http.MethodPost,
+				Path:    "/conversation/get-or-create",
+				Handler: getOrCreatePmConversationHandler(serverCtx),
+			},
+			{
+				// 隐藏/恢复本方会话（不删除对方数据）
+				Method:  http.MethodPost,
+				Path:    "/conversation/hide",
+				Handler: hidePmConversationHandler(serverCtx),
+			},
+			{
+				// 会话列表（cursor 分页，黑名单/风控/隐藏会话在服务侧过滤）
+				Method:  http.MethodGet,
+				Path:    "/conversations",
+				Handler: listPmConversationsHandler(serverCtx),
+			},
+			{
+				// 会话内消息分页（seq 游标倒序）
+				Method:  http.MethodGet,
+				Path:    "/messages",
+				Handler: listPmMessagesHandler(serverCtx),
+			},
+			{
+				// 前移已读游标（幂等，只前进不回退）
+				Method:  http.MethodPost,
+				Path:    "/read",
+				Handler: markPmReadHandler(serverCtx),
+			},
+			{
+				// 举报私信（写举报事实并向 moderation 送审）
+				Method:  http.MethodPost,
+				Path:    "/report",
+				Handler: reportPmMessageHandler(serverCtx),
+			},
+			{
+				// 发送私信（client_msg_id 幂等键透传）
+				Method:  http.MethodPost,
+				Path:    "/send",
+				Handler: sendPmMessageHandler(serverCtx),
+			},
+			{
+				// 查询本人反骚扰偏好
+				Method:  http.MethodGet,
+				Path:    "/setting",
+				Handler: getPmSettingHandler(serverCtx),
+			},
+			{
+				// 更新本人反骚扰偏好
+				Method:  http.MethodPost,
+				Path:    "/setting/update",
+				Handler: updatePmSettingHandler(serverCtx),
+			},
+			{
+				// 未读汇总（角标用，投影可重算）
+				Method:  http.MethodGet,
+				Path:    "/unread",
+				Handler: pmUnreadSummaryHandler(serverCtx),
+			},
+			{
+				// 撤回消息（终端仅自助撤回，服务侧校验窗口与授权）
+				Method:  http.MethodPost,
+				Path:    "/withdraw",
+				Handler: withdrawPmMessageHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/private-message"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 观众面：房间主播绑定列表
+				Method:  http.MethodGet,
+				Path:    "/anchors",
+				Handler: listLiveAnchorsHandler(serverCtx),
+			},
+			{
+				// 观众面：直播分区列表（客户端与运营共用读接口）
+				Method:  http.MethodGet,
+				Path:    "/areas",
+				Handler: listLiveAreasHandler(serverCtx),
+			},
+			{
+				// 观众面：按 UP 主读取其生效中的直播间
+				Method:  http.MethodGet,
+				Path:    "/room/by/up",
+				Handler: liveRoomByUpHandler(serverCtx),
+			},
+			{
+				// 观众面：按房间 ID 读取直播间
+				Method:  http.MethodGet,
+				Path:    "/room/info",
+				Handler: liveRoomInfoHandler(serverCtx),
+			},
+			{
+				// 观众面：房间分页浏览（发现页/主播主页）
+				Method:  http.MethodGet,
+				Path:    "/rooms",
+				Handler: listLiveRoomsHandler(serverCtx),
+			},
+			{
+				// 观众面：读单场直播（按场次 ID，或按房间取最近一场）
+				Method:  http.MethodGet,
+				Path:    "/session",
+				Handler: getLiveSessionHandler(serverCtx),
+			},
+			{
+				// 观众面：历史场次 cursor 分页
+				Method:  http.MethodGet,
+				Path:    "/sessions",
+				Handler: listLiveSessionsHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/live"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 主播面：绑定或解绑主播/房管（房主房间数上限由服务校验）
+				Method:  http.MethodPost,
+				Path:    "/anchor/mutate",
+				Handler: mutateLiveAnchorHandler(serverCtx),
+			},
+			{
+				// 主播面：下播（LIVING→READY，场次置为 ENDED）
+				Method:  http.MethodPost,
+				Path:    "/end",
+				Handler: endLiveHandler(serverCtx),
+			},
+			{
+				// 主播面：开播前置检查（资格与风控由 live-room 经 creator/risk-control RPC 判定）
+				Method:  http.MethodPost,
+				Path:    "/prepare",
+				Handler: prepareLiveHandler(serverCtx),
+			},
+			{
+				// 主播面：关闭房间（终态 FINISHED，强制终止进行中场次并保留审计）
+				Method:  http.MethodPost,
+				Path:    "/room/close",
+				Handler: closeLiveRoomHandler(serverCtx),
+			},
+			{
+				// 主播面：创建直播间（request_id 幂等，资料送审由服务发起）
+				Method:  http.MethodPost,
+				Path:    "/room/create",
+				Handler: createLiveRoomHandler(serverCtx),
+			},
+			{
+				// 主播面：修改标题/封面/分区（终态房间不可改，改动后重新送审）
+				Method:  http.MethodPost,
+				Path:    "/room/info/update",
+				Handler: updateLiveRoomInfoHandler(serverCtx),
+			},
+			{
+				// 主播面：更新直播配置（整段覆盖语义）
+				Method:  http.MethodPost,
+				Path:    "/room/setting/update",
+				Handler: updateLiveRoomSettingHandler(serverCtx),
+			},
+			{
+				// 主播面：开播（READY→LIVING 并新建场次，只登记 stream_id 引用）
+				Method:  http.MethodPost,
+				Path:    "/start",
+				Handler: startLiveHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/live"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 自动续费签约/解约（沙箱：只记录意愿，不建立真实代扣协议）
+				Method:  http.MethodPost,
+				Path:    "/autorenew/set",
+				Handler: mbAutoRenewHandler(serverCtx),
+			},
+			{
+				// 批量权益判定（播放详情页一次问多项）
+				Method:  http.MethodGet,
+				Path:    "/entitlements",
+				Handler: mbEntitlementsHandler(serverCtx),
+			},
+			{
+				// 我的会员开通记录（用户侧台账）
+				Method:  http.MethodGet,
+				Path:    "/grants",
+				Handler: mbGrantsHandler(serverCtx),
+			},
+			{
+				// 我的会员状态（含服务端时钟与可得权益码）
+				Method:  http.MethodGet,
+				Path:    "/my",
+				Handler: mbMyHandler(serverCtx),
+			},
+			{
+				// 单个套餐读取（下单前置展示）
+				Method:  http.MethodGet,
+				Path:    "/plan",
+				Handler: mbPlanHandler(serverCtx),
+			},
+			{
+				// 会员套餐列表（终端可见档位；含下架档需 all=true，供续费页）
+				Method:  http.MethodGet,
+				Path:    "/plans",
+				Handler: mbPlansHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/membership"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 我的硬币账户（含今日剩余额度）
+				Method:  http.MethodGet,
+				Path:    "/account",
+				Handler: coinAccountHandler(serverCtx),
+			},
+			{
+				// 投币限额参数（客户端不写死日限/单片上限）
+				Method:  http.MethodGet,
+				Path:    "/config",
+				Handler: coinConfigHandler(serverCtx),
+			},
+			{
+				// 单内容投币汇总（详情页）
+				Method:  http.MethodGet,
+				Path:    "/target/summary",
+				Handler: coinTargetSummaryHandler(serverCtx),
+			},
+			{
+				// 批量内容投币汇总（列表页）
+				Method:  http.MethodGet,
+				Path:    "/targets/summary",
+				Handler: coinTargetsSummaryHandler(serverCtx),
+			},
+			{
+				// 投币（扣币+记录+限额判定，request_id 幂等）
+				Method:  http.MethodPost,
+				Path:    "/toss",
+				Handler: coinTossHandler(serverCtx),
+			},
+			{
+				// 取消投币（窗口内全额退回）
+				Method:  http.MethodPost,
+				Path:    "/toss/cancel",
+				Handler: coinTossCancelHandler(serverCtx),
+			},
+			{
+				// 我的投币记录
+				Method:  http.MethodGet,
+				Path:    "/toss/mine",
+				Handler: coinTossMineHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/coin"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 我的余额（现金台账，沙箱）
+				Method:  http.MethodGet,
+				Path:    "/balance",
+				Handler: walletBalanceHandler(serverCtx),
+			},
+			{
+				// 渠道能力自述（sandbox_only/real_money，让端上显式知道不是真实资金）
+				Method:  http.MethodGet,
+				Path:    "/channels",
+				Handler: walletChannelsHandler(serverCtx),
+			},
+			{
+				// 我的资金流水
+				Method:  http.MethodGet,
+				Path:    "/flows",
+				Handler: walletFlowsHandler(serverCtx),
+			},
+			{
+				// 取消未结算充值单
+				Method:  http.MethodPost,
+				Path:    "/recharge/cancel",
+				Handler: walletRechargeCancelHandler(serverCtx),
+			},
+			{
+				// 开充值单（仅 SANDBOX 渠道）
+				Method:  http.MethodPost,
+				Path:    "/recharge/open",
+				Handler: walletRechargeOpenHandler(serverCtx),
+			},
+			{
+				// 沙箱结算充值单（把钱记到自己台账上；不请求任何第三方支付）
+				Method:  http.MethodPost,
+				Path:    "/recharge/settle",
+				Handler: walletRechargeSettleHandler(serverCtx),
+			},
+			{
+				// 我的充值单列表
+				Method:  http.MethodGet,
+				Path:    "/recharges",
+				Handler: walletRechargesHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/wallet"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 取消未支付订单
+				Method:  http.MethodPost,
+				Path:    "/cancel",
+				Handler: orderCancelHandler(serverCtx),
+			},
+			{
+				// 下单（金额由服务侧重算；沙箱渠道下建单即受理并履约）
+				Method:  http.MethodPost,
+				Path:    "/create",
+				Handler: orderCreateHandler(serverCtx),
+			},
+			{
+				// 订单详情（强制按 mid 校验归属）
+				Method:  http.MethodGet,
+				Path:    "/detail",
+				Handler: orderDetailHandler(serverCtx),
+			},
+			{
+				// 订单状态流转记录（让用户看到卡在哪一步）
+				Method:  http.MethodGet,
+				Path:    "/events",
+				Handler: orderEventsHandler(serverCtx),
+			},
+			{
+				// 我的订单列表
+				Method:  http.MethodGet,
+				Path:    "/list",
+				Handler: orderListHandler(serverCtx),
+			},
+			{
+				// 申请退款（进入待审批，不代表已退）
+				Method:  http.MethodPost,
+				Path:    "/refund/request",
+				Handler: orderRefundHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/order"),
+	)
+
+	server.AddRoutes(
+		[]rest.Route{
+			{
+				// 参加分成计划（必须带已确认的规则版本）
+				Method:  http.MethodPost,
+				Path:    "/enroll",
+				Handler: revEnrollHandler(serverCtx),
+			},
+			{
+				// 我的分成参与状态
+				Method:  http.MethodGet,
+				Path:    "/enrollment",
+				Handler: revEnrollmentHandler(serverCtx),
+			},
+			{
+				// 退出分成计划
+				Method:  http.MethodPost,
+				Path:    "/leave",
+				Handler: revLeaveHandler(serverCtx),
+			},
+			{
+				// 我的收益计量明细
+				Method:  http.MethodGet,
+				Path:    "/metrics",
+				Handler: revMetricsHandler(serverCtx),
+			},
+			{
+				// 生效中的分成规则（终端面只读 ACTIVE）
+				Method:  http.MethodGet,
+				Path:    "/rules",
+				Handler: revRulesHandler(serverCtx),
+			},
+			{
+				// 结算单详情（含分项，便于核对）
+				Method:  http.MethodGet,
+				Path:    "/settlement",
+				Handler: revSettlementHandler(serverCtx),
+			},
+			{
+				// 我的结算单列表
+				Method:  http.MethodGet,
+				Path:    "/settlements",
+				Handler: revSettlementsHandler(serverCtx),
+			},
+			{
+				// 我的收益概览（应计金额，非已到账）
+				Method:  http.MethodGet,
+				Path:    "/summary",
+				Handler: revSummaryHandler(serverCtx),
+			},
+		},
+		rest.WithPrefix("/creator/revenue"),
+	)
 }

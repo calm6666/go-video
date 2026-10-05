@@ -1,0 +1,30 @@
+Name: coin.v1.rpc
+ListenOn: 0.0.0.0:8163
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: coin.v1.rpc
+
+# 只缓存「单内容投币汇总」这类展示口径；余额、日额度、投币记录一律读 MySQL。
+# 键名固定为 CacheRedis：zrpc.RpcServerConf 内嵌了同名 Redis 字段（限流用），
+# 业务缓存必须用 CacheRedis，否则配置加载报 "conflict key redis"。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# go_video_coin 主库 DSN（仅本地示例，生产从配置中心/Secret 注入）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_coin?charset=utf8mb4&parseTime=true&loc=Local
+
+# 投币领域参数：客户端不得写死限额（AGENTS.md §6），
+# 生效值由 GetTossConfig 回显给终端与运营页。
+Coin:
+  InitialBalance: 5              # 新建账户初始硬币（沙箱便利，随建仓写一条 ADMIN_GRANT 流水；0 表示不发）
+  DailyLimit: 10                 # 单用户每自然日可投上限
+  PerTargetLimit: 2              # 单用户对同一内容累计可投上限
+  CancelWindowSeconds: 86400     # 取消投币窗口（秒），自最后一次投币起算
+  MinBalanceToToss: 1            # 投币余额门槛，条件扣减按 max(count, 本值) 判定
+  MaxGrantDelta: 1000            # GrantCoin 单次发放/扣回绝对值上限
+  DefaultPageSize: 20            # 列表默认每页条数
+  MaxPageSize: 100               # 列表每页条数硬上限
+  MaxBatchAids: 50               # BatchGetTargetSummary 单次 aid 上限，超出裁剪
+  TargetSummaryCacheTTLSeconds: 10 # 汇总缓存秒数，0 关闭

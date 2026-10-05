@@ -1,4 +1,6 @@
 -- 收藏夹表
+-- owner：engagement 服务（deploy/migrations/engagement，库 go_video_engagement）；影响范围：新增 2 张表。
+-- 回滚：DROP TABLE IF EXISTS `favorite_item`; DROP TABLE IF EXISTS `favorite_folder`;
 CREATE TABLE IF NOT EXISTS `favorite_folder` (
   `fid`         BIGINT       NOT NULL AUTO_INCREMENT COMMENT '收藏夹 ID',
   `mid`         BIGINT       NOT NULL DEFAULT 0 COMMENT '用户 ID',

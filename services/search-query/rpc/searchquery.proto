@@ -1,0 +1,275 @@
+syntax = "proto3";
+
+package searchquery.v1;
+
+option go_package = "go-video/services/search-query/rpc";
+
+// 说明：本服务是搜索链路的“查询侧”，索引文档由 search-indexer 构建（AGENTS.md §5：
+// 索引是投影，不是事实源）。本服务只拥有查询衍生数据：搜索历史、查询日志摘要、
+// 热词快照、屏蔽词与事件 Outbox；不写 video/catalog/user-profile 的任何主数据。
+//
+// PGC（番剧/影视）结果同样来自 search-indexer 写入的索引投影（doc_type=pgc，
+// 文档由 catalog/rights 的 content.published.v1 事件驱动），本服务不直接查
+// catalog 库，也不编造版权内容。
+//
+// 分页策略（docs/api-and-events.md §2）：cursor 优先，pn/ps 仅为兼容保留；
+// ps 受 PsLimit 限制，from+size 超过 MaxOffset/MaxResultWindow 直接拒绝，
+// 避免深分页拖垮引擎。
+//
+// 降级语义（README 同步说明）：OpenSearch 未配置或熔断打开时返回明确错误码
+// （ErrSearchUnavailable），绝不返回伪造的空成功结果。
+
+// 搜索对象类型。ALL 表示在同一查询别名内跨 doc_type 召回。
+enum SearchType {
+  SEARCH_TYPE_UNSPECIFIED = 0; // 未指定，等价于 ALL
+  SEARCH_TYPE_ALL = 1;         // 全部（视频 + 用户 + PGC）
+  SEARCH_TYPE_VIDEO = 2;       // UGC/PUGC 视频稿件
+  SEARCH_TYPE_USER = 3;        // 用户（up 主）
+  SEARCH_TYPE_PGC = 4;         // 番剧/影视等版权内容目录投影
+}
+
+// 排序方式。UNSPECIFIED 表示使用 GetSearchConfig 返回的该端默认排序。
+enum SortMode {
+  SORT_UNSPECIFIED = 0;     // 由服务端配置决定
+  SORT_COMPREHENSIVE = 1;   // 综合（引擎相关性 + 热度因子）
+  SORT_LATEST = 2;          // 最新发布（pub_time 倒序）
+  SORT_MOST_VIEW = 3;       // 播放量倒序
+  SORT_MOST_FANS = 4;       // 粉丝数倒序（仅 SEARCH_TYPE_USER 有效）
+  SORT_HOT_SCORE = 5;       // 热度分（doc 内 hot_score 字段，SPM 侧写入）
+}
+
+// 时长区间筛选（秒）。与索引 doc 的 duration 字段对应。
+enum DurationBucket {
+  DURATION_UNSPECIFIED = 0; // 不筛选
+  DURATION_LT_1MIN = 1;     // < 60s
+  DURATION_1_10MIN = 2;     // [60s, 600s)
+  DURATION_10_30MIN = 3;    // [600s, 1800s)
+  DURATION_30_60MIN = 4;    // [1800s, 3600s)
+  DURATION_GT_60MIN = 5;    // >= 3600s
+}
+
+// 查询日志的结果状态（与 search_query_log.result_state 一致）。
+enum QueryResultState {
+  RESULT_STATE_UNSPECIFIED = 0;
+  RESULT_STATE_OK = 1;      // ok：引擎返回且有命中
+  RESULT_STATE_EMPTY = 2;   // empty：引擎返回但零命中
+  RESULT_STATE_DEGRADED = 3; // degraded：引擎不可用/熔断/超时，未返回结果
+  RESULT_STATE_BLOCKED = 4;  // blocked：命中屏蔽词，未查询引擎
+}
+
+// 命中结果（索引文档投影，字段由 search-indexer 的 mapping 约定，见 README）。
+message SearchHit {
+  string doc_type = 1;        // video / user / pgc
+  int64 doc_id = 2;           // aid / mid / pgc work id（各自主键，本服务不解释语义）
+  string title = 3;           // 标题（可能已被 highlight 标签包裹）
+  string content_snippet = 4; // 摘要/简介片段（可能含 highlight 标签）
+  int64 author_mid = 5;       // UP 主 mid（video/pgc 投影字段；用户结果为自身 mid）
+  string author_name = 6;     // UP 主昵称快照（展示用，主资料仍归 user-profile）
+  int32 zone_id = 7;          // 分区 ID（PGC 为 catalog 分区投影）
+  string cover_url = 8;       // 封面引用（索引快照；播放签名由 playback 负责）
+  int64 view_count = 9;       // 播放数快照（非计数事实源）
+  int64 like_count = 10;      // 点赞数快照（计数事实源为 engagement）
+  int64 danmaku_count = 11;   // 弹幕数快照（计数事实源为 danmaku）
+  int64 fans_count = 12;      // 粉丝数快照（仅 user；事实源为 social-graph）
+  int32 duration_sec = 13;    // 时长（video/pgc）
+  int64 pub_time = 14;        // 发布/上线时间（Unix 秒）
+  double score = 15;          // 引擎打分
+  map<string, string> highlights = 16; // 其它高亮片段（字段名 -> 文本）
+  string state = 17;          // 文档状态快照（例如 published/offline），仅用于排查
+}
+
+// --- 搜索 ---
+
+message SearchReq {
+  string keyword = 1;              // 关键词（必填；长度受 Search.KeywordMaxLen 限制）
+  SearchType search_type = 2;      // 搜索类型，UNSPECIFIED 视为 ALL
+  int32 zone_id = 3;               // 分区筛选（0 表示不筛选）
+  DurationBucket duration = 4;     // 时长筛选
+  SortMode sort = 5;               // 排序，UNSPECIFIED 使用配置默认值
+  int32 pn = 6;                    // 页码（从 1 开始）；传了 cursor 时忽略
+  int32 ps = 7;                    // 每页大小，超过 PsLimit 会被截断
+  string cursor = 8;               // 游标（优先于 pn/ps，见 §2 cursor 优先分页）
+  int64 viewer_mid = 9;            // 查看者 mid（0 表示游客；用于风控与历史写入）
+  string platform = 10;            // android/ios/harmony/desktop（不写死 UI 行为）
+  string app_version = 11;         // 客户端版本，用于能力区分
+  string request_id = 12;          // 幂等/追踪用请求 ID（客户端生成）
+  string trace_id = 13;            // 链路 trace_id
+  int64 published_after = 14;      // 仅召回发布时间不早于该值（Unix 秒，0 不筛选）
+  int64 published_before = 15;     // 仅召回发布时间不晚于该值（Unix 秒，0 不筛选）
+}
+
+message SearchReply {
+  repeated SearchHit hits = 1;   // 命中列表；引擎失败时不会返回本消息（走错误码）
+  int64 total = 2;               // 命中总数（引擎近似值，受 track_total_hits 限制）
+  int32 pn = 3;                  // 当前页码（cursor 请求下由游标反解）
+  int32 ps = 4;                  // 当前页大小
+  string next_cursor = 5;        // 下一页游标（空表示无更多或已达 offset 上限）
+  bool has_more = 6;             // 是否还有下一页
+  bool safe_filtered = 7;        // 是否触发安全过滤（屏蔽词/风控裁剪命中）
+  bool cache_hit = 8;            // 是否命中结果短缓存（便于网关设置 ttl）
+  int32 ttl = 9;                 // 建议客户端缓存秒数（0 表示不建议缓存）
+}
+
+// --- 联想 ---
+
+message SuggestReq {
+  string keyword = 1;       // 前缀（必填）
+  int32 limit = 2;          // 返回条数，受配置上限限制
+  int64 viewer_mid = 3;     // 查看者 mid（0 游客）
+  string platform = 4;      // 端标识
+  string app_version = 5;   // 客户端版本
+  SearchType search_type = 6; // 期望结果类型（当前仅用于候选池选择）
+  string trace_id = 7;
+}
+
+message SuggestItem {
+  string keyword = 1;      // 候选词
+  double weight = 2;       // 权重（用于客户端排序展示，不含 UI 行为）
+  string source = 3;       // 候选来源：redis / opensearch
+  bool from_history = 4;   // 是否来自该用户历史（登录用户优先合并）
+}
+
+message SuggestReply {
+  repeated SuggestItem items = 1; // 去重后的候选（保持权重降序）
+  int32 ttl = 2;                  // 建议缓存秒数
+}
+
+// --- 热词 ---
+
+message HotKeywordsReq {
+  string scope = 1;        // 作用域：global 或 zone:<zone_id>；空视为 global
+  int32 limit = 2;         // 返回条数
+  int64 viewer_mid = 3;    // 查看者 mid（保留字段，当前不做个性化）
+  string platform = 4;     // 端标识
+  string trace_id = 5;
+}
+
+message HotKeyword {
+  string keyword = 1;   // 热词
+  double score = 2;     // 热度分（快照值）
+  int64 snapshot_at = 3; // 快照生成时间（Unix 秒）
+  string scope = 4;     // 所属作用域
+}
+
+message HotKeywordsReply {
+  repeated HotKeyword keywords = 1; // 热词列表；快照为空时返回空列表并说明 freshness
+  int64 snapshot_at = 2;            // 本批快照时间（0 表示尚无快照）
+  bool from_cache = 3;              // 是否命中 Redis 缓存
+  int32 ttl = 4;                    // 建议缓存秒数
+}
+
+// --- 查询配置 ---
+
+message GetSearchConfigReq {
+  string platform = 1;        // 端标识
+  string app_version = 2;     // 客户端版本
+  SearchType search_type = 3; // 目标类型（不同默认值）
+  int32 zone_id = 4;          // 分区（分区可覆盖默认排序）
+  string trace_id = 5;
+}
+
+// 搜索展示能力（只有参数与枚举，不包含任何 UI 文案/控件行为）。
+message GetSearchConfigReply {
+  SortMode default_sort = 1;              // 该端/分区默认排序
+  repeated SortMode supported_sorts = 2;  // 允许的排序枚举
+  repeated SearchType supported_types = 3; // 允许的搜索类型枚举
+  repeated DurationBucket supported_durations = 4; // 允许的时长筛选
+  int32 ps_default = 5;                   // 默认页大小
+  int32 ps_limit = 6;                     // 页大小上限
+  int32 max_offset = 7;                   // 允许的最大起始 offset（深分页保护）
+  int32 keyword_max_len = 8;              // 关键词最大字符数
+  int32 cache_ttl_seconds = 9;            // 结果缓存建议秒数
+  bool engine_available = 10;             // 引擎是否已配置（false 时 Search 必然降级）
+}
+
+// --- 搜索历史（隐私可控） ---
+
+message SearchHistoryItem {
+  string keyword = 1;  // 关键词
+  int64 ctime = 2;     // 首次搜索时间（Unix 秒）
+  int64 mtime = 3;     // 最近一次搜索时间（列表按此倒序）
+  int32 state = 4;     // 0 正常、1 运营标记、2 待清理（非 0 不返回给客户端）
+  string platform = 5; // 最近一次来源端
+}
+
+message ListSearchHistoryReq {
+  int64 mid = 1;     // 用户 ID（必填）
+  string cursor = 2; // 游标（首页传空；编码格式见 README，按 mtime 倒序 keyset 分页）
+  int32 limit = 3;   // 条数，受配置上限限制
+  string platform = 4;
+  string trace_id = 5;
+}
+
+message ListSearchHistoryReply {
+  repeated SearchHistoryItem items = 1;
+  string next_cursor = 2; // 空表示无更多
+  bool has_more = 3;
+}
+
+message DeleteSearchHistoryReq {
+  int64 mid = 1;       // 用户 ID（必填）
+  string keyword = 2;  // 待删除关键词（必填，按 keyword_hash 精确定位）
+  bool confirm = 3;    // 必须为 true：二次确认语义，防止误调用（AGENTS.md 隐私要求）
+  string request_id = 4;
+  string trace_id = 5;
+}
+
+message DeleteSearchHistoryReply {
+  int64 deleted = 1;   // 实际删除行数（0 表示无匹配，幂等）
+  bool hard_deleted = 2; // 是否已物理删除（本服务为 true：隐私数据不做软删保留）
+}
+
+message ClearSearchHistoryReq {
+  int64 mid = 1;      // 用户 ID（必填）
+  bool confirm = 2;   // 必须为 true：二次确认语义
+  string request_id = 3;
+  string trace_id = 4;
+}
+
+message ClearSearchHistoryReply {
+  int64 deleted = 1;     // 删除行数
+  bool hard_deleted = 2; // 是否物理删除
+}
+
+// --- 查询行为上报（SPM 链路，AGENTS.md §7：只服务分析与推荐，不含广告） ---
+
+message ReportQueryReq {
+  string query_id = 1;  // 幂等键（必填，唯一索引；重复上报返回 deduplicated=true）
+  string keyword = 2;   // 关键词（入库前按隐私策略做规范化，不存原始 IP/设备号）
+  SearchType search_type = 3;
+  int64 mid = 4;        // 0 表示游客
+  int64 hit_count = 5;  // 命中数（引擎返回；降级时为 0）
+  QueryResultState result_state = 6;
+  int64 latency_ms = 7; // 引擎耗时
+  string platform = 8;
+  string app_version = 9;
+  string ip_hash = 10;  // 受控标识（哈希后，不存原始 IP）
+  string trace_id = 11;
+  string device_id_hash = 12; // 受控设备标识（哈希）
+}
+
+message ReportQueryReply {
+  bool accepted = 1;      // 是否已落库（query_log + outbox 同事务）
+  bool deduplicated = 2;  // query_id 是否已存在（重复上报）
+  string event_id = 3;    // 事件信封 event_id（重复时为已存在的 ID，可能为空）
+}
+
+// SearchQuery 面向客户端的搜索查询服务。
+service SearchQuery {
+  // Search 关键词搜索（cursor 优先分页；引擎不可用时返回明确错误码）。
+  rpc Search(SearchReq) returns (SearchReply);
+  // Suggest 输入前缀联想（Redis ZSET 词典 + 冷启动回源索引前缀查询）。
+  rpc Suggest(SuggestReq) returns (SuggestReply);
+  // HotKeywords 全站/分区热词（读 DB 快照表 + Redis 缓存）。
+  rpc HotKeywords(HotKeywordsReq) returns (HotKeywordsReply);
+  // GetSearchConfig 该端/分区的排序与分页能力配置（无 UI 硬编码）。
+  rpc GetSearchConfig(GetSearchConfigReq) returns (GetSearchConfigReply);
+  // ListSearchHistory 用户搜索历史（cursor 倒序分页）。
+  rpc ListSearchHistory(ListSearchHistoryReq) returns (ListSearchHistoryReply);
+  // DeleteSearchHistory 删除单个历史词（需 confirm=true，物理删除）。
+  rpc DeleteSearchHistory(DeleteSearchHistoryReq) returns (DeleteSearchHistoryReply);
+  // ClearSearchHistory 清空用户全部历史（需 confirm=true，物理删除）。
+  rpc ClearSearchHistory(ClearSearchHistoryReq) returns (ClearSearchHistoryReply);
+  // ReportQuery 上报查询行为（写 query_log 与 search_outbox，同事务）。
+  rpc ReportQuery(ReportQueryReq) returns (ReportQueryReply);
+}

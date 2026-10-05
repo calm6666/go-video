@@ -1,0 +1,122 @@
+syntax = "proto3";
+
+package fingerprint.v1;
+
+option go_package = "go-video/services/content-fingerprint/rpc";
+
+// content-fingerprint 服务契约。
+// 数据所有权：fingerprint_task（指纹抽取任务）、fingerprint_record（指纹记录）。
+// 任务状态机：PENDING → SUCCEEDED / FAILED（由 Worker 回调推进）。
+// 依据 AGENTS.md §5，本服务仅持有指纹事实与匹配候选，不复制媒资主数据，
+// 不直接调用下游 RPC；匹配结果作为审核证据供 moderation-orchestrator 使用。
+// 依据 §8，回调只能推进合法状态，不能绕过审核直接下架内容。
+
+// 指纹类型
+enum FpType {
+  FP_TYPE_UNSPECIFIED = 0; // 未指定
+  FP_TYPE_VIDEO = 1;       // 视频指纹
+  FP_TYPE_AUDIO = 2;       // 音频指纹
+}
+
+// 任务状态
+enum TaskState {
+  TASK_STATE_UNSPECIFIED = 0; // 未指定
+  TASK_STATE_PENDING = 1;     // 待处理（任务已创建，等待 Worker 计算）
+  TASK_STATE_SUCCEEDED = 2;   // 成功（Worker 已回写指纹结果）
+  TASK_STATE_FAILED = 3;      // 失败（Worker 计算失败）
+}
+
+// 提交指纹任务请求
+message SubmitTaskReq {
+  int64 asset_id = 1;   // 关联媒资 ID
+  FpType fp_type = 2;    // 指纹类型
+  string trace_id = 3;   // 调用方 trace_id（用于事件溯源）
+  string operator = 4;   // 操作方（系统/Worker 标识）
+}
+
+// 任务详情回复
+message TaskReply {
+  int64 task_id = 1;       // 任务 ID
+  int64 asset_id = 2;      // 关联媒资 ID
+  FpType fp_type = 3;      // 指纹类型
+  string video_key = 4;   // 视频指纹 key（SUCCEEDED 后由 Worker 回写）
+  string audio_key = 5;   // 音频指纹 key（SUCCEEDED 后由 Worker 回写）
+  TaskState state = 6;    // 任务状态
+  int64 ctime = 7;        // 创建时间（Unix 秒）
+  int64 mtime = 8;        // 修改时间（Unix 秒）
+}
+
+// 查询单个任务请求
+message TaskReq {
+  int64 task_id = 1; // 任务 ID
+}
+
+// 分页查询任务请求
+message ListReq {
+  int64 asset_id = 1;    // 可选：按 asset_id 过滤（0 表示不过滤）
+  TaskState state = 2;   // 可选：按状态过滤（UNSPECIFIED 表示不过滤）
+  int32 pn = 3;          // 页码（从 1 开始）
+  int32 ps = 4;          // 每页大小（最大 50）
+}
+
+// 任务列表回复
+message TasksReply {
+  int32 total = 1;             // 总数
+  repeated TaskReply tasks = 2; // 任务列表
+}
+
+// Worker 回写任务结果请求（PENDING → SUCCEEDED / FAILED）
+message UpdateResultReq {
+  int64 task_id = 1;     // 任务 ID
+  string video_key = 2;  // 视频指纹 key（FAILED 时可空）
+  string audio_key = 3;  // 音频指纹 key（FAILED 时可空）
+  string video_hash = 4; // 视频指纹哈希（用于精确比对）
+  string audio_hash = 5; // 音频指纹哈希
+  TaskState state = 6;   // 目标状态：SUCCEEDED 或 FAILED
+  string operator = 7;   // 操作方（Worker 标识）
+}
+
+// 按指纹 key 查询匹配请求
+message MatchReq {
+  string fp_key = 1;  // 指纹 key
+  FpType fp_type = 2; // 指纹类型
+  int32 top_n = 3;    // 返回前 N 条（默认 10，最大 50）
+}
+
+// 单条匹配命中
+message MatchItem {
+  int64 asset_id = 1;  // 命中媒资 ID
+  string fp_key = 2;   // 命中指纹 key
+  string fp_hash = 3;  // 命中指纹哈希
+  double score = 4;    // 相似度评分（0~1，本期占位为 0）
+  FpType fp_type = 5;  // 指纹类型
+}
+
+// 匹配回复
+message MatchReply {
+  repeated MatchItem items = 1; // 命中列表（本期占位返回空）
+}
+
+// 按 asset_id 查询其指纹的所有匹配请求
+message AssetReq {
+  int64 asset_id = 1; // 媒资 ID
+  FpType fp_type = 2; // 可选：限定指纹类型
+}
+
+// ContentFingerprint 指纹和重复/侵权匹配服务。
+// 依据 AGENTS.md §5，本服务仅持有指纹事实与匹配候选，
+// 不复制媒资主数据，不调用下游 RPC；匹配结果作为审核证据。
+service ContentFingerprint {
+  // 创建指纹任务（PENDING）；本期不调用真实指纹算法，只建任务。
+  rpc SubmitTask(SubmitTaskReq) returns (TaskReply);
+  // 查询单个任务详情
+  rpc GetTask(TaskReq) returns (TaskReply);
+  // 分页查询任务（按 asset_id 或 state 过滤）
+  rpc ListTasks(ListReq) returns (TasksReply);
+  // Worker 回写任务结果（PENDING→SUCCEEDED/FAILED），同时写入 fingerprint_record
+  rpc UpdateTaskResult(UpdateResultReq) returns (TaskReply);
+  // 按指纹 key 查询匹配的 asset 列表（本期占位：返回空列表）
+  rpc MatchByFingerprint(MatchReq) returns (MatchReply);
+  // 按 asset_id 查询其指纹的所有匹配（本期占位：返回空列表）
+  rpc MatchByAsset(AssetReq) returns (MatchReply);
+}

@@ -1,0 +1,79 @@
+Name: audit.v1.rpc
+ListenOn: 0.0.0.0:8110
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: audit.v1.rpc
+Mode: dev
+
+# 日志与探针：本地开发保持控制台输出，生产由配置中心覆盖。
+Log:
+  ServiceName: audit.v1.rpc
+  Mode: console
+  Level: info
+
+# 幂等快路径缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，
+# 会触发 conflict key redis）。
+# 承载：event_id 已存在提示（audit:idem:<event_id>）。
+# 注意：缓存**不是**幂等性的依据，audit_entry.uniq_event_id 唯一索引才是；
+# 缓存不可用时服务退化直连 MySQL，判定结果不变（只是每次多一趟库）。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# 本服务自有库 DSN（库名 go_video_audit，表清单见 deploy/migrations/audit）。
+# 严禁指向其它服务的库：管理员/RBAC 在 go_video_operation，业务主数据在各自库，
+# 本库只存审计条目与链/导出/归档元信息（AGENTS.md §5）。
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_audit?charset=utf8mb4&parseTime=true&loc=Local
+
+# 脱敏与哈希。IpHashSaltRef 写的是**环境变量名**，真实盐值由 Secret/Vault 注入。
+# 该环境变量缺失时 AppendAudit/BatchAppendAudit 直接返回
+# "audit: hashing salt missing..."，不会退化成可被枚举反查的裸 SHA-256(IP)。
+Security:
+  IpHashSaltRef: AUDIT_IP_HASH_SALT
+  MaxUserAgentLen: 255
+
+# 查询硬约束：审计表是千万级大表，下面是接口约束而不是建议值。
+# 违反 MaxRangeDays / MaxPageSize 或缺少收窄维度的请求一律 InvalidArgument。
+Query:
+  MaxRangeDays: 92
+  MaxPageSize: 100
+  CountTotal: true
+
+# 写入约束。MaxBatchSize 同时是单事务持有链头行锁的时间上界；
+# MaxReasonLen 超长是**拒绝**而非截断（reason 参与哈希，截断会让哈希与库值不一致）。
+Write:
+  MaxBatchSize: 200
+  ChainRetry: 3
+  MaxReasonLen: 500
+
+# 哈希链校验单次上限（按 seq 升序重放，条数上限即内存上限）。
+Verify:
+  MaxEntriesPerCall: 50000
+
+# 导出任务：提交 → cron 推进 → 落对象存储 → 换短期签名地址。
+# MaxRowsPerTask 超限直接 failed，要求调用方按时间分片重新提交，
+# 不允许一个任务无限跑；ObjectTTLSeconds 保证高敏导出文件不会永久躺在桶里。
+Export:
+  BatchRows: 2000
+  MaxRowsPerTask: 2000000
+  ObjectTTLSeconds: 604800
+  PresignTTLSeconds: 300
+
+# 归档作业。VerifyBeforePurge 语义固定为「必须先校验清单哈希才允许标记热表已归档」，
+# 即使这里写 false 也不会放行 purged —— 保留这个字段只是为了让「谁关掉了校验」在配置里可见。
+Archive:
+  MaxEntriesPerBatch: 100000
+  VerifyBeforePurge: true
+
+# 归档/导出对象存储。凭据只写环境变量名，密钥不入库不入配置文件（AGENTS.md §4）。
+# Enabled: false 时导出与归档返回明确错误，不会「库里记成功、桶里没文件」。
+Storage:
+  Enabled: false
+  Endpoint: 127.0.0.1:9000
+  Region: us-east-1
+  Bucket: go-video-audit
+  AccessKeyRef: AUDIT_OSS_ACCESS_KEY
+  SecretKeyRef: AUDIT_OSS_SECRET_KEY
+  UseSSL: false
+  PathStyle: true

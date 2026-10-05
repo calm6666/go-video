@@ -1,0 +1,72 @@
+# go-video 搜索停用词（挂在写入分析器 go_video_title 上）
+# 格式：UTF-8 无 BOM，每行一个 token，# 开头为注释。
+# 生效方式：改这里只影响之后写入的文档；已索引内容需要走 search-indexer 的重建任务。
+#
+# 只放虚词/模板噪声：内容词（如「视频」）进停用词表就从索引里消失了，
+# 用户搜该词会零命中；这类词应该靠字段加权和 heat 排序降权，不靠停用词。
+#
+# token 形态决定命中率：
+#   Analyzer.Kind = cjk         → 中文 token 是二元组（下面的「的了」这类），单字命不中
+#   Analyzer.Kind = ik|smartcn  → 按词写；「哔哩哔哩」这种整词也只有这里才生效
+#   英文 token 由 standard tokenizer 产出，lowercase 在前，一律写小写
+
+# —— 英文/域名/格式噪声 ——
+a
+an
+and
+the
+this
+that
+is
+are
+was
+were
+be
+been
+do
+does
+did
+of
+to
+in
+on
+for
+with
+at
+by
+from
+as
+it
+its
+vs
+etc
+www
+http
+https
+com
+cn
+mp4
+flv
+m3u8
+
+# —— 中文虚词二元组（cjk 策略下的主要收益来源） ——
+的了
+的我
+的话
+是我
+不是
+可以
+一个
+什么
+怎么
+这样
+那样
+然后
+而且
+但是
+因为
+所以
+如果
+
+# —— 整词模板噪声（仅在 ik/smartcn 下生效） ——
+哔哩哔哩

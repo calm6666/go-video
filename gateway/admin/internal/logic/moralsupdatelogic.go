@@ -30,6 +30,9 @@ func (l *MoralsUpdateLogic) MoralsUpdate(req *types.ParamUpdateMorals) (resp *ty
 	if l.svcCtx.UserProfile == nil {
 		return nil, errors.New("user-profile service not configured")
 	}
+	if err := adminActorGate(l.ctx, "moralsUpdate", "operator", req.Operator); err != nil {
+		return nil, err
+	}
 	reply, err := l.svcCtx.UserProfile.BatchAddMoral(l.ctx, &userprofilerc.UpdateMoralsReq{
 		Mids:       req.Mids,
 		Delta:      req.Delta,

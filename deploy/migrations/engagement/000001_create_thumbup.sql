@@ -1,5 +1,7 @@
 -- 点赞用户记录
 -- 幂等：唯一索引 (business, mid, message_id) 保证同用户对同对象只有一条记录。
+-- owner：engagement 服务（deploy/migrations/engagement，库 go_video_engagement）；影响范围：新增 2 张表。
+-- 回滚：DROP TABLE IF EXISTS `thumbup_stat`; DROP TABLE IF EXISTS `thumbup_like`;
 CREATE TABLE IF NOT EXISTS `thumbup_like` (
   `id`         BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键 ID',
   `business`   VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '业务名（如 archive、dynamic）',

@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package moderation.worker.v1;
+
+option go_package = "go-video/services/moderation-worker/rpc";
+
+// 说明：本契约定义 moderation-worker 的对外 RPC。
+// 数据所有权：worker_task（识别任务执行记录，关联 orchestrator task_id）。
+// 调用方向：moderation-orchestrator → 本服务，被动接收任务，不主动调用其它服务。
+// 依据 AGENTS.md §8，Worker 不做最终发布决策；回调只能推进合法状态。
+// 本期 Run* 方法为占位实现，返回空结果 + TODO 注释，真实算法后续接入。
+
+// 识别能力类型
+enum CapabilityType {
+  CAPABILITY_UNSPECIFIED = 0; // 未指定
+  CAPABILITY_OCR = 1;          // 文本识别 OCR
+  CAPABILITY_ASR = 2;          // 语音识别 ASR
+  CAPABILITY_IMAGE = 3;        // 图像识别
+  CAPABILITY_AUDIO = 4;        // 音频识别
+}
+
+// 任务执行状态
+enum TaskState {
+  TASK_STATE_UNSPECIFIED = 0; // 未指定
+  TASK_STATE_PENDING = 1;     // 待执行
+  TASK_STATE_RUNNING = 2;     // 执行中
+  TASK_STATE_SUCCEEDED = 3;   // 成功
+  TASK_STATE_FAILED = 4;      // 失败
+  TASK_STATE_TIMEOUT = 5;    // 超时
+}
+
+// Run* 方法公共请求（由 moderation-orchestrator 触发）
+message RunTaskReq {
+  string task_id = 1;            // orchestrator 任务 ID（外部追踪号）
+  string worker_task_id = 2;     // worker 内部任务 ID（幂等键；为空时由 worker 生成）
+  CapabilityType capability = 3; // 识别能力（必须与调用的 Run* 方法一致）
+  string media_uri = 4;          // 媒体访问 URI（OSS/COS 路径或预签名 URL）
+  int64 duration_ms = 5;         // 媒体时长（毫秒，0 表示未知）
+  map<string, string> params = 6; // 算法参数（如 language、model_version、采样间隔）
+  int64 timeout_ms = 7;          // 单任务超时（毫秒，0 表示使用默认）
+  string trace_id = 8;           // 调用方 trace_id（透传给算法侧）
+}
+
+// 识别结果片段（OCR/ASR/图像/音频通用）
+message ResultSegment {
+  int64 start_ms = 1;            // 起始时间（毫秒，静态内容为 0）
+  int64 end_ms = 2;              // 结束时间（毫秒）
+  string text = 3;               // 识别文本（OCR/ASR/音频转写）
+  float confidence = 4;          // 置信度 [0,1]
+  string label = 5;              // 命中标签（图像/音频识别用）
+  string extra = 6;              // 附加结构化 JSON（如 bbox、说话人 ID 等）
+}
+
+// Run* 方法返回的执行结果（也是 GetTaskResult 的响应）
+message TaskResultReply {
+  string worker_task_id = 1;     // worker 内部任务 ID
+  string task_id = 2;            // orchestrator 任务 ID
+  CapabilityType capability = 3; // 识别能力
+  TaskState state = 4;           // 最终状态
+  string algorithm_version = 5;  // 算法版本（本期占位为空）
+  int64 elapsed_ms = 6;          // 执行耗时（毫秒）
+  repeated ResultSegment segments = 7; // 结构化结果片段
+  string error_message = 8;      // 失败原因（state=FAILED/TIMEOUT 时填）
+}
+
+// 结果查询请求（按 worker_task_id 优先，否则按 task_id 反查）
+message TaskResultReq {
+  string worker_task_id = 1; // worker 内部任务 ID（优先）
+  string task_id = 2;        // orchestrator 任务 ID（worker_task_id 为空时使用）
+}
+
+// ModerationWorker 内容识别 Worker 服务。
+// 被动接收 moderation-orchestrator 调用。
+// 本期 Run* 方法占位返回空结果 + TODO，真实算法（OCR/ASR/图像/音频）后续接入。
+service ModerationWorker {
+  // 执行 OCR 文本识别（本期占位）
+  rpc RunOCR(RunTaskReq) returns (TaskResultReply);
+  // 执行 ASR 语音识别（本期占位）
+  rpc RunASR(RunTaskReq) returns (TaskResultReply);
+  // 执行图像识别（本期占位）
+  rpc RunImage(RunTaskReq) returns (TaskResultReply);
+  // 执行音频识别（本期占位）
+  rpc RunAudio(RunTaskReq) returns (TaskResultReply);
+  // 查询任务执行结果
+  rpc GetTaskResult(TaskResultReq) returns (TaskResultReply);
+}

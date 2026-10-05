@@ -19,7 +19,7 @@ import (
 
 // Repository 是 user-profile 服务的数据访问入口。
 type Repository struct {
-	cache *Cache
+	cache Cacher
 
 	conn sqlx.SqlConn
 
@@ -48,39 +48,126 @@ type Repository struct {
 	officialMu sync.RWMutex
 	officials  map[int64]*model.OfficialInfo
 
-	async *fanout.Fanout
+	async asyncRunner
 
-	// outbox 事件发布器。
+	// outbox 事件发布器。测试装配（NewWithDeps）不启动发布器，故为 nil。
 	outbox *OutboxPublisher
 }
 
-// New 构造 Repository。
+// asyncRunner 抽象缓存回填的异步执行器。
+// 生产用 fanout.Fanout（入队后由 worker 协程执行）；测试装配用同步执行器（Do 内联执行），
+// 这样「回源后有没有回填、回填排在第几步」才是可断言的事实，而不是竞态。
+type asyncRunner interface {
+	Do(ctx context.Context, f func(ctx context.Context)) error
+	Close() error
+}
+
+// syncRunner 是 NewWithDeps 使用的同步执行器：Do 立即内联执行任务。
+type syncRunner struct{}
+
+func (syncRunner) Do(ctx context.Context, f func(ctx context.Context)) error {
+	f(ctx)
+	return nil
+}
+
+func (syncRunner) Close() error { return nil }
+
+// Options 是 NewWithDeps 的 non-model 依赖。零值即可用于测试：
+// Cryptor 为空串密钥（加解密必然报错，由用例显式注入 PEM），Async 为 nil 时同步执行回填。
+type Options struct {
+	// IMGURLTemplate 证件照 CDN URL 模板。
+	IMGURLTemplate string
+	// Cryptor 实名证件加解密器。
+	Cryptor *CardCryptor
+	// Async 异步回填执行器；nil 表示同步执行（测试口径），生产由 New 注入 fanout。
+	Async asyncRunner
+}
+
+// New 构造 Repository。生产路径唯一入口，全部依赖为真实实现。
 func New(rds *redis.Redis, conn sqlx.SqlConn, c config.Config) *Repository {
-	r := &Repository{
-		cache:            NewCache(rds),
-		conn:             conn,
-		baseModel:        model.NewUserBaseModel(conn),
-		expModel:         model.NewUserExpModel(conn),
-		flagModel:        model.NewUserFlagModel(conn),
-		moralModel:       model.NewUserMoralModel(conn),
-		officialModel:    model.NewUserOfficialModel(conn),
-		officialDocModel: model.NewOfficialDocModel(conn),
-		additModel:       model.NewOfficialDocAdditModel(conn),
-		monitorModel:     model.NewUserMonitorModel(conn),
-		reviewModel:      model.NewUserPropertyReviewModel(conn),
-		realnameModel:    model.NewRealnameInfoModel(conn),
-		applyModel:       model.NewRealnameApplyModel(conn),
-		applyImgModel:    model.NewRealnameApplyImageModel(conn),
-		logModel:         model.NewMemberLogModel(conn),
-		outboxModel:      model.NewMemberOutboxModel(conn),
-		cryptor:          NewCardCryptor(c.Realname.PublicKey, c.Realname.PrivateKey),
-		imgURLTemplate:   c.Realname.IMGURLTemplate,
-		officials:        map[int64]*model.OfficialInfo{},
-		async:            fanout.New("userProfileRepository", fanout.Worker(1), fanout.Buffer(10240)),
-	}
+	r := NewWithDeps(NewCache(rds), conn,
+		model.NewUserBaseModel(conn),
+		model.NewUserExpModel(conn),
+		model.NewUserFlagModel(conn),
+		model.NewUserMoralModel(conn),
+		model.NewUserOfficialModel(conn),
+		model.NewOfficialDocModel(conn),
+		model.NewOfficialDocAdditModel(conn),
+		model.NewUserMonitorModel(conn),
+		model.NewUserPropertyReviewModel(conn),
+		model.NewRealnameInfoModel(conn),
+		model.NewRealnameApplyModel(conn),
+		model.NewRealnameApplyImageModel(conn),
+		model.NewMemberLogModel(conn),
+		model.NewMemberOutboxModel(conn),
+		Options{
+			IMGURLTemplate: c.Realname.IMGURLTemplate,
+			Cryptor:        NewCardCryptor(c.Realname.PublicKey, c.Realname.PrivateKey),
+			Async:          fanout.New("userProfileRepository", fanout.Worker(1), fanout.Buffer(10240)),
+		})
 	r.outbox = NewOutboxPublisher(r.outboxModel, c.Outbox, NewAccountCacheClient(c.AccountRPC))
 	go r.loadOfficialProc()
 	r.outbox.Start()
+	return r
+}
+
+// NewWithDeps 是注入缝：显式给出缓存、事务连接与 14 个 model，供 internal/logic 的单测
+// 用内存依赖组装**真实 Repository**（见 cache.go 的 Cacher 注释）。
+//
+// 与 New 的差别只有三处，且不改变任何查询语义：
+//   - 不创建 OutboxPublisher、不启动发布协程（读侧用例不该看到后台投递）；
+//   - Async 未给出时用同步执行器，使缓存回填进入可断言的调用序列；
+//   - 官方认证快照在构造时**同步**装载一次（New 是由后台协程立即装载第一次，结论一致）。
+//
+// 生产代码不得调用本函数，一律走 New。
+func NewWithDeps(
+	cache Cacher,
+	conn sqlx.SqlConn,
+	baseMd model.UserBaseModel,
+	expMd model.UserExpModel,
+	flagMd model.UserFlagModel,
+	moralMd model.UserMoralModel,
+	officialMd model.UserOfficialModel,
+	officialDocMd model.OfficialDocModel,
+	additMd model.OfficialDocAdditModel,
+	monitorMd model.UserMonitorModel,
+	reviewMd model.UserPropertyReviewModel,
+	realnameMd model.RealnameInfoModel,
+	applyMd model.RealnameApplyModel,
+	applyImgMd model.RealnameApplyImageModel,
+	logMd model.MemberLogModel,
+	outboxMd model.MemberOutboxModel,
+	opt Options,
+) *Repository {
+	async := opt.Async
+	if async == nil {
+		async = syncRunner{}
+	}
+	r := &Repository{
+		cache:            cache,
+		conn:             conn,
+		baseModel:        baseMd,
+		expModel:         expMd,
+		flagModel:        flagMd,
+		moralModel:       moralMd,
+		officialModel:    officialMd,
+		officialDocModel: officialDocMd,
+		additModel:       additMd,
+		monitorModel:     monitorMd,
+		reviewModel:      reviewMd,
+		realnameModel:    realnameMd,
+		applyModel:       applyMd,
+		applyImgModel:    applyImgMd,
+		logModel:         logMd,
+		outboxModel:      outboxMd,
+		cryptor:          opt.Cryptor,
+		imgURLTemplate:   opt.IMGURLTemplate,
+		officials:        map[int64]*model.OfficialInfo{},
+		async:            async,
+	}
+	if err := r.loadOfficial(); err != nil {
+		logx.Errorf("user-profile: load official on init err=%v", err)
+	}
 	return r
 }
 
@@ -91,7 +178,9 @@ func (r *Repository) Ping(ctx context.Context) error {
 
 // Close 关闭 Outbox 发布器与异步任务执行器。
 func (r *Repository) Close() error {
-	r.outbox.Close()
+	if r.outbox != nil {
+		r.outbox.Close()
+	}
 	return r.async.Close()
 }
 

@@ -63,20 +63,28 @@ func (r *Repository) cacheDelayProc() {
 		case <-r.delayStop:
 			return
 		case <-ticker.C:
-			mids := r.delayQ.PopExpired(time.Now())
-			if len(mids) == 0 {
-				continue
-			}
-			logx.Infof("account/cache_delay: delete %d delayed cache item(s)", len(mids))
-			// 使用独立 context 保证退出时排空任务不被取消。
-			ctx := context.Background()
-			for _, mid := range mids {
-				errs := r.cache.DelCache(ctx, mid)
-				for _, e := range errs {
-					logx.Errorf("account/cache_delay: delayed del mid=%d err=%v", mid, e)
-				}
-				r.reWarm(ctx, mid)
-			}
+			r.DrainDelayedCache(time.Now())
 		}
+	}
+}
+
+// DrainDelayedCache 确定性地驱动一次「延迟二次失效」消费，处理所有到期时间不晚于 now 的任务。
+// 它就是 cacheDelayProc 的 ticker 分支（逻辑逐字搬移，无行为差异）：生产由后台协程按
+// cacheDelayInterval 触发；由 NewWithDeps 组装的 Repository 不启动协程，单测改由此方法
+// 以任意 now 驱动，避免用 sleep 等竞态。生产代码不应直接调用本方法。
+func (r *Repository) DrainDelayedCache(now time.Time) {
+	mids := r.delayQ.PopExpired(now)
+	if len(mids) == 0 {
+		return
+	}
+	logx.Infof("account/cache_delay: delete %d delayed cache item(s)", len(mids))
+	// 使用独立 context 保证退出时排空任务不被取消。
+	ctx := context.Background()
+	for _, mid := range mids {
+		errs := r.cache.DelCache(ctx, mid)
+		for _, e := range errs {
+			logx.Errorf("account/cache_delay: delayed del mid=%d err=%v", mid, e)
+		}
+		r.reWarm(ctx, mid)
 	}
 }

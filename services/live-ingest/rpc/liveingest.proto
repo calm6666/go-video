@@ -1,0 +1,717 @@
+syntax = "proto3";
+
+package liveingest.v1;
+
+option go_package = "go-video/services/live-ingest/rpc";
+
+// 说明：live-ingest 是「直播推流接入与流状态」领域服务，是推流密钥（含哈希与
+// 受控引用）、接入节点、流状态机、断流/重连记录和流状态事件的唯一所有者
+// （AGENTS.md §5）。
+//
+// 与 live-room / live-media / live-gateway 的边界（本期强约束）：
+//   - 房间业务状态（待完善/可开播/直播中/关闭/禁播）与场次生命周期归 live-room；
+//     本服务只保存 room_id / session_id / anchor_mid 引用，不校验、不回查、
+//     更不写 live-room 的表。
+//   - 开播门禁由 live-room 负责：本服务签发密钥时只做「调用方已具备开播资格」
+//     的入参校验（mid/room_id 必填 + 幂等），不复制 room 状态。
+//   - 转码/录制/回放归 live-media，长连接广播归 live-gateway：两者都只消费本
+//     服务产出的 live.state.v1 事件或按 stream_id 反查本服务 RPC。
+//   - 跨服务只传业务主键（room_id / session_id / stream_id / node_id / mid），
+//     本文件不 import 任何其他服务的 proto。
+//
+// 密钥安全约束（README「不保存长期明文推流密钥」）：
+//   - 明文密钥只在 IssueStreamKey / RotateStreamKey 的响应里出现一次，
+//     落库只有 SHA-256 哈希、Secret/Vault 引用与末 4 位辨认串；
+//   - 任何 Get/List 接口都不得回显明文；日志与错误消息同样禁止。
+//   - CDN/入口回调的签名密钥也不入库，配置里只放 Secret/Vault 引用位。
+//
+// 事件与幂等（README「流状态事件必须幂等并可追踪」）：
+//   - 每次合法状态迁移在同一个事务里写 live_stream_event（分配该流单调递增的
+//     seq）与 live_ingest_outbox（live.state.v1 信封 JSON），由独立发布器投递；
+//   - 所有写接口都带幂等键（request_id / report_id / nonce），重放返回首次结果
+//     且 reply.replayed=true，不产生新事件、不重复推进 seq；
+//   - 消费方（live-room.ReportStreamState、live-gateway、live-media）按
+//     event_id 去重、按 seq 拒绝乱序回退。
+
+// 通用空响应（幂等重放场景由业务 reply 自带 replayed 标记）
+message EmptyReply {}
+
+// 推流协议（与 live_stream_key.protocol_mask 的位、live_stream.protocol 列一致）
+enum IngestProtocol {
+  PROTOCOL_UNSPECIFIED = 0; // 未指定，视为非法入参
+  PROTOCOL_RTMP = 1;        // RTMP / RTMPS（OBS 等主流推流助手）
+  PROTOCOL_SRT = 2;         // SRT（低延迟、抗弱网）
+  PROTOCOL_WEBRTC = 3;      // WebRTC（超低延迟连麦）
+}
+
+// 推流密钥状态（与 live_stream_key.state 列一致，取值不可变更）
+enum StreamKeyState {
+  STREAM_KEY_STATE_UNSPECIFIED = 0; // 未指定
+  STREAM_KEY_STATE_ACTIVE = 1;      // 生效：可用于接入鉴权
+  STREAM_KEY_STATE_ROTATING = 2;    // 轮转中：旧密钥在 grace_until 前仍可用于重连
+  STREAM_KEY_STATE_RETIRED = 3;     // 已退役：轮转宽限期结束后的旧密钥终态
+  STREAM_KEY_STATE_EXPIRED = 4;     // 已过期：超过 expire_at，需重新签发
+  STREAM_KEY_STATE_REVOKED = 5;     // 已吊销：立即失效（禁播/泄露/风控），不可恢复
+}
+
+// 流状态机（与 live_stream.state 列一致，且与 live-room ReportStreamStateReq
+// 的 stream_state 取值严格一致：1 IDLE、2 PUBLISHING、3 INTERRUPTED、4 STOPPED）
+enum StreamState {
+  STREAM_STATE_UNSPECIFIED = 0; // 未指定
+  STREAM_STATE_IDLE = 1;        // 已建档：接入鉴权通过，等待推流真正到达
+  STREAM_STATE_PUBLISHING = 2;  // 推流中：媒体帧持续到达且健康度在阈值内
+  STREAM_STATE_INTERRUPTED = 3; // 断流：心跳/帧中断，宽限期内允许重连
+  STREAM_STATE_STOPPED = 4;     // 已停止：本次推流会话终态（重推是新 stream_id）
+}
+
+// 流健康判定（与 live_stream.health_state 列一致）
+enum HealthState {
+  HEALTH_STATE_UNSPECIFIED = 0; // 未指定
+  HEALTH_STATE_HEALTHY = 1;     // 正常：码率/帧率/丢包均在阈值内
+  HEALTH_STATE_DEGRADED = 2;    // 劣化：越过告警阈值但未断流（灰度降级、可提示主播）
+  HEALTH_STATE_CRITICAL = 3;    // 危险：接近断流（码率骤降、丢包高），logic 应触发 INTERRUPTED
+  HEALTH_STATE_NO_DATA = 4;     // 无采样：超过 no_data 宽限期未收到健康上报
+}
+
+// 断流结束原因（与 live_stream_interruption.end_reason 列一致）
+enum InterruptionEndReason {
+  INTERRUPTION_END_REASON_UNSPECIFIED = 0; // 未指定
+  INTERRUPTION_END_RECONNECTED = 1;        // 重连成功：INTERRUPTED → PUBLISHING
+  INTERRUPTION_END_TIMEOUT = 2;            // 断流超时：INTERRUPTED → STOPPED（宽限期耗尽）
+  INTERRUPTION_END_CLOSED = 3;             // 主动停流：INTERRUPTED → STOPPED（主播/运营关闭）
+}
+
+// 停流原因（与 live_stream.stop_reason 列一致）
+enum StopReason {
+  STOP_REASON_UNSPECIFIED = 0;  // 未指定
+  STOP_REASON_ANCHOR_STOP = 1;  // 主播正常下播（入口收到 RTMP publish_done/unpublish）
+  STOP_REASON_NODE_TIMEOUT = 2; // 接入节点心跳丢失且断流宽限期耗尽
+  STOP_REASON_UNHEALTHY = 3;    // 健康度持续危险，服务端主动切断
+  STOP_REASON_REVOKED = 4;      // 密钥被吊销（禁播/泄露），级联停流
+  STOP_REASON_ADMIN = 5;        // 运营强制停流
+  STOP_REASON_KEY_EXPIRED = 6;  // 密钥过期前未推流，IDLE 流回收
+}
+
+// 接入节点状态（与 live_ingest_node.state 列一致）
+enum IngestNodeState {
+  INGEST_NODE_STATE_UNSPECIFIED = 0; // 未指定
+  INGEST_NODE_STATE_ONLINE = 1;      // 在线可分配
+  INGEST_NODE_STATE_DRAINING = 2;    // 摘流中：不再分配新流，存量流跑完即下线
+  INGEST_NODE_STATE_OFFLINE = 3;     // 离线：心跳丢失或人工下线
+}
+
+// 节点分配记录状态（与 live_node_assignment.state 列一致）
+enum AssignmentState {
+  ASSIGNMENT_STATE_UNSPECIFIED = 0; // 未指定
+  ASSIGNMENT_STATE_ACTIVE = 1;      // 生效中：该流正占用节点配额
+  ASSIGNMENT_STATE_RELEASED = 2;    // 已释放：停流或主动释放
+  ASSIGNMENT_STATE_MIGRATED = 3;    // 已迁移：被更优节点替换（prev_node_id 记录来源）
+}
+
+// 事件发布状态（与 live_ingest_outbox.state 列一致）
+enum OutboxState {
+  OUTBOX_STATE_UNSPECIFIED = 0; // 未指定
+  OUTBOX_STATE_PENDING = 1;     // 待发布（含退避重试中）
+  OUTBOX_STATE_PUBLISHED = 2;   // 已发布
+  OUTBOX_STATE_FAILED = 3;      // 超过最大重试，等待运营 RetryFailedEvents
+}
+
+// --- 推流密钥主体 ---
+
+// 推流密钥元数据（DB 行投影，永不含明文密钥）
+message StreamKeyInfo {
+  int64 key_id = 1;               // 密钥 ID（自增主键）
+  string stream_name = 2;         // 流标识（推流 URL 的 name 段，可下发客户端，非密钥）
+  string key_hint_tail = 3;       // 明文末 4 位，仅供主播在多个密钥间辨认，不可用于鉴权
+  string key_ref = 4;             // Secret/Vault 引用（例如 vault:secret/live-ingest/stream-key/<id>）
+  StreamKeyState state = 5;       // 密钥状态
+  int32 version = 6;              // 轮转代次，从 1 递增
+  int64 prev_key_id = 7;          // 由哪个密钥轮转而来，0 表示首发
+  repeated IngestProtocol protocols = 8; // 允许的接入协议
+  int64 room_id = 9;              // 绑定房间引用（live-room 主键，本服务不校验）
+  int64 session_id = 10;          // 绑定场次引用，0 表示未绑定具体场次
+  int64 anchor_mid = 11;          // 主播用户 ID
+  int64 expire_at = 12;           // 过期时间（Unix 秒）
+  int64 grace_until = 13;         // 轮转宽限截止（Unix 秒），0 表示不适用
+  string current_stream_id = 14;  // 当前非终态流 ID，空串表示无活跃流
+  int64 rotate_to_key_id = 15;    // 轮转后继密钥 ID，0 表示无
+  string reason = 16;             // 最近一次状态变更原因（吊销/过期说明）
+  int64 ctime = 17;               // 创建时间（Unix 秒）
+  int64 mtime = 18;               // 修改时间（Unix 秒）
+}
+
+message IssueStreamKeyReq {
+  int64 room_id = 1;              // 绑定房间 ID，必须 > 0（引用值，由 live-room 侧保证存在）
+  int64 anchor_mid = 2;           // 主播用户 ID，必须 > 0（gateway 注入，本服务不解析 token）
+  int64 session_id = 3;           // 场次引用，0 表示不绑定具体场次
+  repeated IngestProtocol protocols = 4; // 允许协议，缺省为 [PROTOCOL_RTMP]
+  int64 ttl_seconds = 5;          // 密钥有效期（秒），<=0 时取配置默认 IssueTtlSeconds
+  int32 max_streams = 6;          // 该密钥并发流上限，<=0 时取配置默认 MaxStreamsPerKey
+  string request_id = 7;          // 幂等键，重试必须复用同一值
+  string trace_id = 8;            // 链路追踪 ID
+}
+
+message IssueStreamKeyReply {
+  int64 key_id = 1;               // 新密钥 ID
+  string stream_name = 2;         // 流标识
+  string plaintext_key = 3;       // 明文密钥：仅此一次返回，调用方必须即时展示并丢弃本地副本
+                                    //（密钥不落库，重放时无法找回，见 replayed 说明）
+  string publish_url = 4;         // 拼好的推流地址（含明文密钥，仅本次响应有效）
+  repeated IngestProtocol protocols = 5; // 生效协议
+  int64 expire_at = 6;            // 过期时间（Unix 秒）
+  bool replayed = 7;              // true 表示命中 request_id 的幂等重放：只回元数据，
+                                    // plaintext_key 与 publish_url 为空串——明文从未入库，
+                                    // 无法找回；调用方必须提示主播改走 RotateStreamKey
+}
+
+message RotateStreamKeyReq {
+  int64 key_id = 1;               // 被轮转的当前密钥 ID，必须 > 0
+  int64 grace_seconds = 2;        // 旧密钥宽限秒数，<=0 时取配置默认 RotateGraceSeconds
+  int64 ttl_seconds = 3;          // 新密钥有效期（秒），<=0 时取配置默认 IssueTtlSeconds
+  string request_id = 4;          // 幂等键
+  int64 operator_mid = 5;         // 操作者（主播本人或运营），必须 > 0
+  bool force = 6;                 // true 时不停止进行中的流（旧密钥在宽限期内继续可用）
+  string trace_id = 7;            // 链路追踪 ID
+}
+
+message RotateStreamKeyReply {
+  int64 key_id = 1;               // 新密钥 ID
+  int64 prev_key_id = 2;          // 被替换的旧密钥 ID
+  string plaintext_key = 3;       // 新明文密钥，仅此一次返回（replayed=true 时为空串）
+  string publish_url = 4;         // 新推流地址（含明文密钥，仅本次响应有效，replayed=true 时为空串）
+  int64 grace_until = 5;          // 旧密钥宽限截止（Unix 秒）
+  int32 version = 6;              // 新密钥轮转代次
+  bool replayed = 7;              // true 表示命中 request_id，未产生新密钥
+  string message = 8;             // 说明（宽限期内的重连语义等）
+}
+
+message RevokeStreamKeyReq {
+  int64 key_id = 1;               // 被吊销的密钥 ID，必须 > 0
+  int64 operator_mid = 2;         // 操作者（主播本人或运营），必须 > 0
+  bool admin = 3;                 // true 表示运营侧吊销（可吊销他人密钥）
+  bool stop_stream = 4;           // true 表示级联强制停止该密钥的进行中流
+  string reason = 5;              // 吊销原因（审计留存，禁播/泄露/风控等）
+  string request_id = 6;          // 幂等键
+  string trace_id = 7;            // 链路追踪 ID
+}
+
+message RevokeStreamKeyReply {
+  StreamKeyState state = 1;       // 吊销后的密钥状态（REVOKED）
+  repeated string stopped_stream_ids = 2; // 被级联停止的流 ID，未级联时为空
+  bool replayed = 3;              // true 表示命中 request_id
+  string message = 4;             // 说明（已是 REVOKED 时按幂等成功返回）
+}
+
+message GetStreamKeyReq {
+  int64 key_id = 1;               // 按密钥 ID 查询（与 stream_name 二选一，0 表示不按 ID）
+  string stream_name = 2;         // 按流标识查询当前生效密钥（接入排障用）
+}
+
+message GetStreamKeyReply {
+  StreamKeyInfo key = 1;          // 密钥元数据（无明文、无哈希）
+}
+
+message ListStreamKeysReq {
+  int64 room_id = 1;              // 房间过滤，0 不限制
+  int64 anchor_mid = 2;           // 主播过滤，0 不限制
+  StreamKeyState state = 3;       // 状态过滤，UNSPECIFIED 不限制
+  int32 pn = 4;                   // 页码，从 1 开始
+  int32 ps = 5;                   // 每页条数，服务端夹取到 MaxListPageSize
+  int64 operator_mid = 6;         // 调用者；非运营只能查自己的密钥
+  bool admin = 7;                 // true 表示运营侧查询
+}
+
+message ListStreamKeysReply {
+  repeated StreamKeyInfo keys = 1; // 密钥列表，按 key_id 倒序
+  int32 total = 2;                 // 符合条件的总行数
+  int32 pn = 3;                    // 回显页码
+  int32 ps = 4;                    // 回显每页条数
+}
+
+// --- 接入鉴权（RTMP/SRT/WebRTC 入口调用） ---
+
+message VerifyPublishAuthReq {
+  string stream_name = 1;         // 推流 URL 中的流标识
+  string plaintext_key = 2;       // 客户端上报的明文密钥；服务端只与哈希比对，绝不落库或写日志
+  IngestProtocol protocol = 3;    // 本次接入协议
+  int64 room_id = 4;              // 入口解析出的房间引用，0 表示由本服务按密钥回填
+  string client_ip = 5;           // 推流端来源 IP（只做当次校验与哈希留证，不入库明文）
+  string client_version = 6;      // 推流客户端标识（OBS 版本等，观测用）
+  bool create_stream = 7;         // true（入口默认）鉴权通过时建档 IDLE 流并返回 stream_id
+  string request_id = 8;          // 幂等键；同一 request_id 重放返回同一 stream_id
+  string trace_id = 9;            // 链路追踪 ID
+}
+
+message VerifyPublishAuthReply {
+  bool allowed = 1;               // 是否放行
+  string reason = 2;              // 拒绝原因码（key_not_found/key_revoked/key_expired/protocol_denied/quota_exceeded/room_mismatch）
+  int64 key_id = 3;               // 命中的密钥 ID，拒绝时可能为 0
+  int64 room_id = 4;              // 密钥绑定的房间引用
+  int64 session_id = 5;           // 场次引用，0 表示未绑定
+  int64 anchor_mid = 6;           // 主播 ID
+  string stream_id = 7;           // 本次推流会话 ID；未建档时为空
+  StreamState stream_state = 8;   // 建档后的流状态（IDLE）
+  int64 key_expire_at = 9;        // 密钥过期时间（Unix 秒），入口据此设定连接保活上限
+  int64 server_time = 10;         // 服务端当前时间（Unix 秒），入口用于校时
+  bool replayed = 11;             // true 表示命中 request_id，返回首次结果
+}
+
+// --- 流状态上报与查询 ---
+
+// 流状态与累计指标（live_stream 行投影）
+message StreamInfo {
+  string stream_id = 1;           // 推流会话 ID（ULID，主键）
+  int64 key_id = 2;               // 使用的密钥 ID
+  string stream_name = 3;         // 流标识（冗余，便于排障）
+  int64 room_id = 4;              // 房间引用（live-room 主键）
+  int64 session_id = 5;           // 场次引用，0 表示未绑定
+  int64 anchor_mid = 6;           // 主播 ID
+  IngestProtocol protocol = 7;    // 接入协议
+  string node_id = 8;             // 当前接入节点，空串表示未分配
+  StreamState state = 9;          // 当前流状态
+  int64 seq = 10;                 // 当前事件序号（live.state.v1 的 seq，单调递增）
+  int64 publish_started_at = 11;  // 首次进入 PUBLISHING 的时间（Unix 秒）
+  int64 state_changed_at = 12;    // 最近一次状态变更时间（Unix 秒）
+  int64 last_heartbeat_at = 13;   // 最近一次心跳/上报时间（Unix 秒）
+  int64 interrupted_total_seconds = 14; // 本次推流累计中断秒数
+  int32 interruption_count = 15;  // 本次推流累计断流次数
+  StopReason stop_reason = 16;    // 停流原因，非终态为 UNSPECIFIED
+  int32 health_state = 17;        // 健康判定，见 HealthState
+  int64 health_reported_at = 18;  // 最近健康上报时间（Unix 秒）
+  int64 video_bitrate_bps = 19;   // 最近一次视频码率采样（bps）
+  int64 audio_bitrate_bps = 20;   // 最近一次音频码率采样（bps）
+  int32 fps = 21;                 // 最近一次视频帧率（×100 存储后取整）
+  int32 packet_loss_ppm = 22;     // 最近一次丢包率（百万分比）
+  int64 ctime = 23;               // 建档时间（Unix 秒）
+  int64 mtime = 24;               // 修改时间（Unix 秒）
+}
+
+message ReportStreamStateReq {
+  string stream_id = 1;           // 流 ID（VerifyPublishAuth 返回值）
+  StreamState state = 2;          // 目标状态（PUBLISHING/INTERRUPTED/STOPPED）
+  string node_id = 3;             // 上报来源节点，可空
+  string reason = 4;              // 原因摘要（写入事件 payload，不含明文密钥）
+  int64 occurred_at = 5;          // 事件发生时间（Unix 秒），0 表示服务端取当前时间
+  string report_id = 6;           // 幂等键：同一 report_id 重放不产生新事件、不重复推进 seq
+  int64 expect_seq = 7;           // 乐观并发：非 0 时要求当前 seq 等于该值，否则返回冲突
+  string trace_id = 8;            // 链路追踪 ID
+}
+
+message ReportStreamStateReply {
+  string stream_id = 1;           // 流 ID
+  StreamState state = 2;          // 迁移后的状态
+  int64 seq = 3;                  // 本次迁移分配的事件序号（幂等重放时为首次的 seq）
+  string event_id = 4;            // live.state.v1 的 event_id（消费方去重锚点）
+  int64 room_id = 5;              // 房间引用（便于调用方对账）
+  int64 session_id = 6;           // 场次引用
+  bool replayed = 7;              // true 表示命中 report_id，未产生新事件
+  bool applied = 8;               // false 表示非法迁移或 seq 冲突，状态未变更
+  int64 interruption_id = 9;      // 关联的断流记录 ID，0 表示无
+  string message = 10;            // 说明（非法迁移/终态/冲突等）
+}
+
+message GetStreamStateReq {
+  string stream_id = 1;           // 按流 ID 查询（与 room_id 二选一）
+  int64 room_id = 2;              // 按房间查询其当前非终态流，0 表示不按房间查
+}
+
+message GetStreamStateReply {
+  StreamInfo stream = 1;          // 流状态；查不到时 stream_id 为空
+  bool found = 2;                 // 是否存在匹配记录
+}
+
+message ListStreamsReq {
+  repeated int64 room_ids = 1;    // 房间过滤（批量开播巡检），空表示不限制
+  string node_id = 2;             // 节点过滤，空表示不限制
+  StreamState state = 3;          // 状态过滤，UNSPECIFIED 表示只看非终态（IDLE/PUBLISHING/INTERRUPTED）
+  IngestProtocol protocol = 4;    // 协议过滤，UNSPECIFIED 不限制
+  int64 heartbeat_before = 5;     // 只返回 last_heartbeat_at <= 该值（Unix 秒）的流，用于断流扫描；0 不限制
+  int32 pn = 6;                   // 页码，从 1 开始
+  int32 ps = 7;                   // 每页条数，服务端夹取到 MaxListPageSize
+  int64 operator_mid = 8;         // 调用者（非运营只能看自己的流）
+  bool admin = 9;                 // true 表示运营侧查询
+}
+
+message ListStreamsReply {
+  repeated StreamInfo streams = 1; // 流列表，按 last_heartbeat_at 升序（最可疑的在前）
+  int32 total = 2;                 // 符合条件的总行数
+  int32 pn = 3;                    // 回显页码
+  int32 ps = 4;                    // 回显每页条数
+  int64 server_time = 5;           // 服务端当前时间（Unix 秒）
+}
+
+message CloseStreamReq {
+  string stream_id = 1;           // 目标流 ID
+  StopReason stop_reason = 2;     // 停流原因，UNSPECIFIED 时服务端按 ADMIN 记录
+  string reason = 3;              // 原因摘要（进事件 payload）
+  string request_id = 4;          // 幂等键
+  int64 operator_mid = 5;         // 操作者（主播本人或运营），必须 > 0
+  bool admin = 6;                 // true 表示运营侧强制停流
+  string trace_id = 7;            // 链路追踪 ID
+}
+
+message CloseStreamReply {
+  StreamState state = 1;          // 迁移后的状态（STOPPED；已终态时也是 STOPPED）
+  int64 seq = 2;                  // 本次停流事件序号
+  string event_id = 3;            // live.state.v1 的 event_id
+  int64 interrupted_total_seconds = 4; // 本次推流累计中断秒数
+  bool replayed = 5;              // true 表示命中 request_id
+  bool applied = 6;               // false 表示流已是终态且无变更（按幂等成功处理）
+  string message = 7;             // 说明
+}
+
+// --- 流健康检查 ---
+
+message ReportStreamHealthReq {
+  string stream_id = 1;           // 流 ID
+  string node_id = 2;             // 采样来源节点
+  int64 video_bitrate_bps = 3;    // 视频码率（bps）
+  int64 audio_bitrate_bps = 4;    // 音频码率（bps）
+  int32 fps_x100 = 5;             // 视频帧率 ×100 取整（29.97fps -> 2997）
+  int32 packet_loss_ppm = 6;      // 丢包率（百万分比）
+  int64 rtt_ms = 7;               // 往返时延（毫秒），0 表示未测
+  int32 sample_window_seconds = 8;// 本次采样窗口（秒），<=0 时取配置默认 HealthSampleWindowSeconds
+  int64 occurred_at = 9;          // 采样时间（Unix 秒），0 表示服务端当前时间
+  string report_id = 10;          // 幂等键：同一 report_id 重放只保留一条采样
+  string trace_id = 11;           // 链路追踪 ID
+}
+
+message ReportStreamHealthReply {
+  HealthState health_state = 1;   // 服务端判定（DEGRADED/CRITICAL 时 reason 给出越界指标）
+  bool triggered_interrupt = 2;   // true 表示本次上报已触发 INTERRUPTED 迁移
+  int64 seq = 3;                  // 若触发了迁移，本次事件序号；否则为流当前 seq
+  string event_id = 4;            // 若触发了迁移，事件 ID；否则空串
+  bool replayed = 5;              // true 表示命中 report_id，未新增采样
+  string message = 6;             // 说明
+}
+
+message GetStreamHealthReq {
+  string stream_id = 1;           // 流 ID
+  int32 window_seconds = 2;       // 聚合窗口（秒），<=0 时取配置默认 HealthSampleWindowSeconds
+  int32 sample_limit = 3;         // 附带返回的最近采样条数，服务端夹取到 MaxSamplePoints
+}
+
+message HealthSample {
+  int64 occurred_at = 1;          // 采样时间（Unix 秒）
+  int64 video_bitrate_bps = 2;    // 视频码率（bps）
+  int64 audio_bitrate_bps = 3;    // 音频码率（bps）
+  int32 fps_x100 = 4;             // 帧率 ×100
+  int32 packet_loss_ppm = 5;      // 丢包率（百万分比）
+  int64 rtt_ms = 6;               // 往返时延（毫秒）
+}
+
+message GetStreamHealthReply {
+  string stream_id = 1;           // 流 ID
+  StreamState state = 2;          // 当前流状态
+  HealthState health_state = 3;   // 当前判定
+  int64 health_reported_at = 4;   // 最近上报时间（Unix 秒）
+  int64 avg_video_bitrate_bps = 5;// 窗口内平均视频码率（bps）
+  int64 min_video_bitrate_bps = 6;// 窗口内最低视频码率（bps）
+  int32 max_packet_loss_ppm = 7;  // 窗口内最高丢包率（百万分比）
+  int32 sample_count = 8;         // 窗口内采样点数
+  repeated HealthSample samples = 9; // 最近采样点，按 occurred_at 升序
+  int64 interrupted_total_seconds = 10; // 累计中断秒数
+  int32 interruption_count = 11;  // 累计断流次数
+}
+
+// 断流与重连记录（live_stream_interruption 行投影）
+message StreamInterruptionInfo {
+  int64 interruption_id = 1;      // 记录 ID
+  string stream_id = 2;           // 所属流
+  int64 room_id = 3;              // 房间引用
+  int32 episode_no = 4;           // 该流第几次断流，从 1 递增
+  string node_id = 5;             // 断流时的接入节点
+  int64 started_at = 6;           // 断流开始（Unix 秒）
+  int64 ended_at = 7;             // 断流结束（Unix 秒），0 表示仍在中断中
+  int64 duration_seconds = 8;     // 本次中断时长（秒），未结束为 0
+  InterruptionEndReason end_reason = 9; // 结束原因
+  int32 reconnect_attempts = 10;  // 期间重连尝试次数
+  string start_event_id = 11;     // 开启该记录的 live.state.v1 event_id
+  string end_event_id = 12;       // 关闭该记录的 event_id，空串表示未关闭
+  string reason = 13;             // 原因摘要
+}
+
+message ListStreamInterruptionsReq {
+  string stream_id = 1;           // 按流查询（与 room_id 二选一）
+  int64 room_id = 2;              // 按房间查询其所有流的断流记录，0 表示不按房间查
+  bool only_open = 3;             // true 表示只返回未结束（ended_at=0）的记录
+  int64 start_time = 4;           // started_at 下界（Unix 秒），0 不限制
+  int64 end_time = 5;             // started_at 上界（Unix 秒），0 不限制
+  int32 limit = 6;                // 返回条数，服务端夹取到 MaxListPageSize
+  string trace_id = 7;            // 链路追踪 ID
+}
+
+message ListStreamInterruptionsReply {
+  repeated StreamInterruptionInfo interruptions = 1; // 记录，按 started_at 升序
+  int32 total = 2;                                   // 符合条件总行数（上限 MaxCountRows，超出为 -1）
+}
+
+// --- 接入节点 ---
+
+// 接入节点（live_ingest_node 行投影）
+message IngestNodeInfo {
+  string node_id = 1;             // 节点 ID（主键，运维分配的稳定标识）
+  string name = 2;                // 节点展示名
+  string region = 3;              // 地理区域码（例如 CN-East）
+  repeated IngestProtocol protocols = 4; // 支持的协议
+  string endpoint_rtmp = 5;       // RTMP 接入地址（明文可下发，不含密钥）
+  string endpoint_srt = 6;        // SRT 接入地址
+  string endpoint_webrtc = 7;     // WebRTC 接入地址（信令网关）
+  IngestNodeState state = 8;      // 节点状态
+  int32 capacity_streams = 9;     // 并发流配额
+  int32 active_streams = 10;      // 当前占用（由分配记录派生，允许短暂偏差）
+  int32 health_score = 11;        // 健康分 0~100，分配打分依据
+  int64 last_heartbeat_at = 12;   // 最近心跳（Unix 秒）
+  string labels = 13;             // 运维标签（k=v;k=v，灰度/机房隔离用）
+  int64 ctime = 14;               // 创建时间（Unix 秒）
+  int64 mtime = 15;               // 修改时间（Unix 秒）
+}
+
+message UpsertIngestNodeReq {
+  IngestNodeInfo node = 1;        // 节点信息；node_id 必填，其余按字段非空更新
+  bool create_if_absent = 2;      // true 表示节点注册（首次出现即建档）
+  bool heartbeat_only = 3;        // true 表示只刷新 last_heartbeat_at/active_streams/health_score
+  int64 operator_mid = 4;         // 操作者（运营或节点身份），必须 > 0
+  string request_id = 5;          // 幂等键
+  string trace_id = 6;            // 链路追踪 ID
+}
+
+message UpsertIngestNodeReply {
+  IngestNodeInfo node = 1;        // 落库后的节点
+  bool created = 2;               // true 表示本次新建
+  bool replayed = 3;              // true 表示命中 request_id
+}
+
+message ListIngestNodesReq {
+  string region = 1;              // 区域过滤，空不限制
+  IngestProtocol protocol = 2;    // 必须支持的协议，UNSPECIFIED 不限制
+  IngestNodeState state = 3;      // 状态过滤，UNSPECIFIED 不限制
+  int32 pn = 4;                   // 页码，从 1 开始
+  int32 ps = 5;                   // 每页条数，服务端夹取到 MaxListPageSize
+  int64 operator_mid = 6;         // 调用者，必须 > 0（节点信息属运维面）
+}
+
+message ListIngestNodesReply {
+  repeated IngestNodeInfo nodes = 1; // 节点列表，按 health_score 降序
+  int32 total = 2;                   // 符合条件总行数
+  int32 pn = 3;                      // 回显页码
+  int32 ps = 4;                      // 回显每页条数
+}
+
+message AssignIngestNodeReq {
+  string stream_id = 1;           // 目标流 ID
+  IngestProtocol protocol = 2;    // 需要的协议（必须与流的接入协议一致）
+  string prefer_region = 3;       // 期望区域（就近接入），空表示不限制
+  string prefer_node_id = 4;      // 指定节点（重连回到原节点），空表示服务端打分
+  bool force_reassign = 5;        // true 表示把已分配流迁移到新节点
+  string request_id = 6;          // 幂等键：同一 request_id 重放返回同一分配
+  string reason = 7;              // 分配/迁移原因（观测与审计）
+  string trace_id = 8;            // 链路追踪 ID
+}
+
+message AssignIngestNodeReply {
+  string node_id = 1;             // 分配到的节点
+  IngestNodeInfo node = 2;        // 节点接入地址，入口据此把客户端重定向到边缘
+  int64 assignment_id = 3;        // 分配记录 ID
+  int32 score = 4;                // 打分（观测：为何选它）
+  string prev_node_id = 5;        // 迁移前的节点，空串表示首次分配
+  bool replayed = 6;              // true 表示命中 request_id
+  string message = 7;             // 说明（无可用节点等）
+}
+
+message ReleaseIngestNodeReq {
+  string stream_id = 1;           // 释放该流的节点占用
+  string node_id = 2;             // 可选：仅当当前分配是该节点时释放（防止误释放）
+  string reason = 3;              // 释放原因
+  string request_id = 4;          // 幂等键
+  string trace_id = 5;            // 链路追踪 ID
+}
+
+message ReleaseIngestNodeReply {
+  bool released = 1;              // false 表示本就无生效分配
+  string node_id = 2;             // 被释放的节点，空串表示无
+  bool replayed = 3;              // true 表示命中 request_id
+}
+
+// 节点分配记录（live_node_assignment 行投影）
+message NodeAssignmentInfo {
+  int64 assignment_id = 1;        // 记录 ID
+  string stream_id = 2;           // 流 ID
+  int64 room_id = 3;              // 房间引用
+  string node_id = 4;             // 节点
+  IngestProtocol protocol = 5;    // 协议
+  AssignmentState state = 6;      // 记录状态
+  int32 score = 7;                // 分配打分
+  string prev_node_id = 8;        // 迁移来源节点
+  int64 assigned_at = 9;          // 分配时间（Unix 秒）
+  int64 released_at = 10;         // 释放时间（Unix 秒），0 表示未释放
+  string reason = 11;             // 分配/释放原因
+  string trace_id = 12;           // 链路追踪 ID
+}
+
+message ListNodeAssignmentsReq {
+  string stream_id = 1;           // 按流查询（与 node_id 二选一）
+  string node_id = 2;             // 按节点查询其分配
+  AssignmentState state = 3;      // 状态过滤，UNSPECIFIED 不限制
+  int32 pn = 4;                   // 页码，从 1 开始
+  int32 ps = 5;                   // 每页条数，服务端夹取到 MaxListPageSize
+  int64 operator_mid = 6;         // 调用者，必须 > 0
+}
+
+message ListNodeAssignmentsReply {
+  repeated NodeAssignmentInfo assignments = 1; // 分配记录，按 assignment_id 倒序
+  int32 total = 2;                             // 符合条件总行数
+  int32 pn = 3;                                // 回显页码
+  int32 ps = 4;                                // 回显每页条数
+}
+
+// --- 事件与发布位点（live.state.v1） ---
+
+// 流状态事件（live_stream_event 行投影，payload 与 live.state.v1 对齐）
+message StreamEventInfo {
+  string event_id = 1;            // 事件唯一 ID（ULID，消费方去重锚点）
+  string stream_id = 2;           // 流 ID
+  int64 room_id = 3;              // 房间引用
+  int64 session_id = 4;           // 场次引用
+  int64 seq = 5;                  // 该流单调递增序号（乱序回退依据）
+  StreamState from_state = 6;     // 迁移前状态
+  StreamState to_state = 7;       // 迁移后状态
+  string node_id = 8;             // 关联节点
+  int64 interruption_id = 9;      // 关联断流记录，0 表示无
+  int32 interrupted_seconds = 10; // to_state=STOPPED 时本次累计中断秒数
+  StopReason stop_reason = 11;    // 停流原因，非停流事件为 UNSPECIFIED
+  string reason = 12;             // 原因摘要（不含明文密钥）
+  int64 occurred_at = 13;         // 事件发生时间（Unix 秒）
+  int64 ctime = 14;               // 落库时间（Unix 秒）
+}
+
+message ListStreamEventsReq {
+  string stream_id = 1;           // 流 ID
+  int64 after_seq = 2;            // 只返回 seq > after_seq 的事件（对账/补偿游标），0 表示从头
+  int32 limit = 3;                // 条数，服务端夹取到 MaxEventPageSize
+  bool desc = 4;                  // true 表示按 seq 倒序（取最新事件）
+}
+
+message ListStreamEventsReply {
+  repeated StreamEventInfo events = 1; // 事件列表
+  int64 max_seq = 2;                   // 该流当前最大 seq（消费方据此判断是否追平）
+  bool has_more = 3;                   // 是否还有更新的事件
+}
+
+message GetEventPublishCheckpointReq {
+  int32 pending_limit = 1;        // 返回待发布样本条数，服务端夹取到 MaxEventPageSize
+  bool include_failed = 2;        // 是否附带失败事件样本
+}
+
+message EventPublishCheckpoint {
+  int64 last_published_id = 1;    // 已发布的最大 outbox id（位点）
+  int64 last_published_at = 2;    // 最近发布时间（Unix 秒）
+  int32 pending_count = 3;        // 待发布行数（含退避中）
+  int32 failed_count = 4;         // 失败行数（需 RetryFailedEvents）
+  int64 oldest_pending_id = 5;    // 最老待发布 outbox id，0 表示无
+  int64 oldest_pending_at = 6;    // 最老待发布事件的 occurred_at（Unix 秒），滞后度指标
+  int64 lag_seconds = 7;          // server_time - oldest_pending_at，无待发布时为 0
+  repeated StreamEventInfo pending_sample = 8;  // 待发布事件样本
+  repeated StreamEventInfo failed_sample = 9;   // 失败事件样本
+  int64 server_time = 10;         // 服务端当前时间（Unix 秒）
+}
+
+message GetEventPublishCheckpointReply {
+  EventPublishCheckpoint checkpoint = 1; // 位点快照
+}
+
+message RetryFailedEventsReq {
+  repeated string event_ids = 1;  // 指定重试的事件 ID，空表示按 limit 批量重试全部失败事件
+  int32 limit = 2;                // 批量上限，服务端夹取到 MaxEventRetryBatch
+  string request_id = 3;          // 幂等键
+  int64 operator_mid = 4;         // 操作者（运营），必须 > 0
+  string reason = 5;              // 重试原因（审计）
+  string trace_id = 6;            // 链路追踪 ID
+}
+
+message RetryFailedEventsReply {
+  int32 retried = 1;              // 本次被重置为待发布的事件数
+  int32 remaining_failed = 2;     // 仍处失败态的事件数
+  bool replayed = 3;              // true 表示命中 request_id
+  string message = 4;             // 说明
+}
+
+// --- CDN / 入口回调鉴权 ---
+
+message VerifyCdnCallbackReq {
+  string domain = 1;              // 触发回调的推流域名
+  string stream_name = 2;         // 回调解析出的流标识
+  string event_type = 3;          // 回调事件（publish/publish_done/unpublish 等，由厂商定义）
+  int64 timestamp = 4;            // 回调时间戳（Unix 秒）
+  string nonce = 5;               // 回调随机串（防重放，唯一索引）
+  string signature = 6;           // 厂商签名（服务端只与 HMAC 结果比对，不落库明文）
+  string client_ip = 7;           // 回调来源 IP（服务端只存哈希，不入库明文）
+  string raw_params_digest = 8;   // 原始参数摘要（SHA-256 hex，留证用；调用方可直接传摘要）
+  string trace_id = 9;            // 链路追踪 ID
+}
+
+message VerifyCdnCallbackReply {
+  bool allowed = 1;               // 签名与时间窗是否通过
+  string reason = 2;              // 拒绝原因码（signature_mismatch/timestamp_skew/replayed_nonce/domain_unbound/stream_not_found）
+  string stream_id = 3;           // 解析出的流 ID，空串表示无法归属
+  int64 key_id = 4;               // 关联密钥 ID，0 表示未解析
+  int64 room_id = 5;              // 房间引用
+  StreamState suggest_state = 6;  // 建议推进的流状态（仍需调用方经 ReportStreamState 走合法迁移）
+  int64 callback_log_id = 7;      // 本次回调留证记录 ID（live_cdn_callback）
+  bool replayed = 8;              // true 表示命中同一 nonce，回调已被处理过
+}
+
+// LiveIngest 推流接入与流状态服务。
+// 数据所有权见 AGENTS.md §5：推流密钥（哈希与受控引用）、接入节点、流状态机、
+// 断流/重连记录与流状态事件归本服务；房间业务状态归 live-room，
+// 外部只能通过带 event_id / report_id / request_id 幂等的入口推进合法状态。
+service LiveIngest {
+  // 签发推流密钥：入库只有哈希与 Secret/Vault 引用，明文只在本响应出现一次
+  rpc IssueStreamKey(IssueStreamKeyReq) returns (IssueStreamKeyReply);
+  // 接入鉴权（RTMP/SRT/WebRTC 入口在建连时调用）：比对哈希、协议、有效期、配额，可选建档 IDLE 流
+  rpc VerifyPublishAuth(VerifyPublishAuthReq) returns (VerifyPublishAuthReply);
+  // 轮转密钥：新密钥生效、旧密钥进入宽限期，重连不中断
+  rpc RotateStreamKey(RotateStreamKeyReq) returns (RotateStreamKeyReply);
+  // 吊销密钥：立即失效，可按需级联停止进行中的流
+  rpc RevokeStreamKey(RevokeStreamKeyReq) returns (RevokeStreamKeyReply);
+  // 查询密钥元数据（永不回显明文或哈希）
+  rpc GetStreamKey(GetStreamKeyReq) returns (GetStreamKeyReply);
+  // 分页查询密钥列表
+  rpc ListStreamKeys(ListStreamKeysReq) returns (ListStreamKeysReply);
+
+  // 节点注册/心跳上报（幂等 upsert，运维面）
+  rpc UpsertIngestNode(UpsertIngestNodeReq) returns (UpsertIngestNodeReply);
+  // 分页查询接入节点
+  rpc ListIngestNodes(ListIngestNodesReq) returns (ListIngestNodesReply);
+  // 为流分配接入节点（就近 + 配额 + 健康分打分；支持迁移）
+  rpc AssignIngestNode(AssignIngestNodeReq) returns (AssignIngestNodeReply);
+  // 释放流的节点占用（停流或运维摘流）
+  rpc ReleaseIngestNode(ReleaseIngestNodeReq) returns (ReleaseIngestNodeReply);
+  // 分页查询节点分配记录（容量对账与排障）
+  rpc ListNodeAssignments(ListNodeAssignmentsReq) returns (ListNodeAssignmentsReply);
+
+  // 上报流状态：按状态机 CAS 推进 + 分配 seq + 同事务写事件与 outbox（report_id 幂等）
+  rpc ReportStreamState(ReportStreamStateReq) returns (ReportStreamStateReply);
+  // 查询单流当前状态（按 stream_id 或房间的活跃流）
+  rpc GetStreamState(GetStreamStateReq) returns (GetStreamStateReply);
+  // 分页查询流列表（开播巡检、断流扫描）
+  rpc ListStreams(ListStreamsReq) returns (ListStreamsReply);
+  // 强制停流（主播下播、运营/风控切断；IDLE/PUBLISHING/INTERRUPTED → STOPPED）
+  rpc CloseStream(CloseStreamReq) returns (CloseStreamReply);
+  // 健康采样上报：更新最新健康字段并留采样点，越过危险阈值时触发 INTERRUPTED 迁移
+  rpc ReportStreamHealth(ReportStreamHealthReq) returns (ReportStreamHealthReply);
+  // 流健康检查：当前判定 + 窗口聚合 + 最近采样点
+  rpc GetStreamHealth(GetStreamHealthReq) returns (GetStreamHealthReply);
+  // 断流与重连记录查询
+  rpc ListStreamInterruptions(ListStreamInterruptionsReq) returns (ListStreamInterruptionsReply);
+
+  // 事件位点：按 seq 游标拉取状态事件（live-room/live-media 补偿与对账）
+  rpc ListStreamEvents(ListStreamEventsReq) returns (ListStreamEventsReply);
+  // Outbox 发布位点与滞后度（观测「事件必须可追踪」）
+  rpc GetEventPublishCheckpoint(GetEventPublishCheckpointReq) returns (GetEventPublishCheckpointReply);
+  // 把超过重试上限的失败事件重置为待发布（运营补偿，request_id 幂等）
+  rpc RetryFailedEvents(RetryFailedEventsReq) returns (RetryFailedEventsReply);
+
+  // CDN/入口回调鉴权：签名 + 时间窗 + nonce 防重放，只建议状态、由调用方走 ReportStreamState
+  rpc VerifyCdnCallback(VerifyCdnCallbackReq) returns (VerifyCdnCallbackReply);
+}

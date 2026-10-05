@@ -1,0 +1,51 @@
+Name: risk-control.v1.rpc
+ListenOn: 0.0.0.0:8105
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: risk-control.v1.rpc
+
+# 业务缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会触发 conflict key redis）
+# 用途：滑窗计数器 + 裁决短缓存 + 规则缓存
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL 主库 DSN（仅本地示例，生产从配置中心/Secret 注入）
+# 库名 go_video_risk_control，表见 deploy/migrations/risk-control/
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_risk_control?charset=utf8mb4&parseTime=true&loc=Local
+
+# 风控业务参数
+RiskControl:
+  DefaultWindowSeconds: 60
+  # 计数写入的窗口档位（秒）；规则 window_seconds 向上取齐到最近档位
+  CounterTiers:
+  - 60
+  - 600
+  - 3600
+  WindowBuckets: 6
+  ChallengeTTLSeconds: 300
+  DecisionCacheSeconds: 60
+  RuleCacheSeconds: 30
+  # DB 故障时按 BLOCK-on-error 处理的动作：1 投稿、5 登录、6 改名、7 直播开播
+  HighRiskActions:
+  - 1
+  - 5
+  - 6
+  - 7
+  # 其余低危动作（2 评论、3 弹幕、4 关注）DB 故障时 ALLOW-on-error
+  OnDbFailureDefault: allow
+  LocalFallbackPerWindow: 200
+  MaxHitRulesPerDecision: 20
+  CheckLogRetentionDays: 30
+
+# feature-store 服务已落地（rpc/featurestore.proto），但本服务侧尚未接线：
+# ServiceContext 不构造该 client，配置里也不留 Endpoints，避免产生死配置。
+# 未配置时设备风险特征降级为 risk_device_profile + 本地滑窗计数，
+# 不可观测的指标进入 skipped_rule_ids，不会被伪造为命中。
+# 接线时注意对端的 Etcd.Key 是 featurestore.v1.rpc（不是 feature-store.v1.rpc）。
+# FeatureStoreRPC:
+#   Etcd:
+#     Hosts:
+#       - 127.0.0.1:2379
+#     Key: featurestore.v1.rpc

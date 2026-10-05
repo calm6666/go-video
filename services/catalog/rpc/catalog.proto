@@ -1,0 +1,179 @@
+syntax = "proto3";
+
+package catalog.v1;
+
+option go_package = "go-video/services/catalog/rpc";
+
+// 版权内容目录服务。
+// 数据所有权：catalog_work / catalog_season / catalog_episode /
+//   catalog_zone / catalog_tag（见 AGENTS.md §5）。
+// 普通用户投稿整片由 video 服务负责，catalog 不接受 UGC 写入。
+// 发布集必须通过 rights 版权窗口与 asset 媒资就绪的跨服务校验，
+// catalog 不复制 rights/asset 的主数据，只通过 RPC 读取结论（AGENTS.md §5/§8）。
+// 字段命名遵循 snake_case，Go 生成代码由 goctl 产出 PascalCase。
+
+// 空请求（用于 ListZones）
+message EmptyReq {}
+
+// --- 作品（catalog_work） ---
+
+// 作品类型常量：1 电影、2 电视剧、3 番剧、4 纪录片
+// 作品状态常量：0 草稿、1 上架、2 下架
+
+// 作品回复。season_id 既是作品 ID，也指向其主季 ID（电影为本身）。
+message WorkReply {
+  int64 season_id = 1;  // 作品主季 ID（作品唯一标识）
+  string title = 2;     // 标题
+  string cover = 3;     // 封面 URL
+  int32 typeid = 4;     // 作品类型
+  string intro = 5;    // 简介
+  int32 state = 6;      // 状态
+}
+
+message CreateWorkReq {
+  string title = 1;     // 标题
+  string cover = 2;     // 封面 URL
+  int32 typeid = 3;     // 作品类型
+  string intro = 4;     // 简介
+  string operator = 5;  // 运营操作人
+}
+
+message WorkReq {
+  int64 season_id = 1;  // 作品主季 ID
+}
+
+message ListReq {
+  int32 typeid = 1;  // 可选类型过滤（0 不过滤）
+  int32 state = 2;   // 可选状态过滤（-1 不过滤）
+  int32 pn = 3;       // 页码（从 1 开始）
+  int32 ps = 4;       // 每页大小（最大 50）
+}
+
+message WorksReply {
+  int32 total = 1;            // 总数
+  repeated WorkReply works = 2; // 作品列表
+}
+
+// --- 季（catalog_season） ---
+
+// 季状态常量：0 草稿、1 上架、2 下架
+message SeasonReply {
+  int64 season_id = 1;  // 季 ID（本季自身标识）
+  int32 season_no = 2;  // 季编号
+  string title = 3;     // 季标题
+  string cover = 4;     // 季封面
+  int32 state = 5;      // 状态
+}
+
+message CreateSeasonReq {
+  int64 season_id = 1;  // 所属作品的主季 ID（父作品）
+  int32 season_no = 2;  // 季编号
+  string title = 3;     // 季标题
+  string cover = 4;      // 季封面
+  string operator = 5;  // 运营操作人
+}
+
+// SeasonReq 在不同 RPC 中语义：
+//   ListSeasons：season_id 为作品主季 ID，返回该作品的全部季。
+//   ListEpisodes：season_id 为具体季 ID，返回该季的全部集。
+message SeasonReq {
+  int64 season_id = 1;  // 作品主季 ID（ListSeasons）或季 ID（ListEpisodes）
+}
+
+message SeasonsReply {
+  repeated SeasonReply seasons = 1; // 季列表
+}
+
+// --- 集（catalog_episode） ---
+
+// 集状态常量：0 草稿、1 上架（PUBLISHED）、2 下架
+message EpisodeReply {
+  int64 epid = 1;       // 集 ID
+  int64 season_id = 2;  // 所属季 ID
+  int32 ep_no = 3;      // 集编号
+  string title = 4;     // 集标题
+  int64 asset_id = 5;   // 关联媒资 ID（由 asset 服务拥有）
+  int64 duration = 6;   // 时长（秒）
+  int32 state = 7;      // 状态
+}
+
+message CreateEpisodeReq {
+  int64 season_id = 1;  // 所属季 ID
+  int32 ep_no = 2;      // 集编号
+  string title = 3;     // 集标题
+  int64 asset_id = 4;   // 关联媒资 ID
+  int64 duration = 5;   // 时长（秒）
+  string operator = 6;  // 运营操作人
+}
+
+message EpisodeReq {
+  int64 epid = 1;  // 集 ID
+  // operator_mid / region 供 PublishEpisode 做上架审计与按地区的版权窗口校验。
+  // 只追加字段号，不复用历史编号，旧客户端不传时按 0/"" 处理（服务端回落到配置默认地区）。
+  int64 operator_mid = 2;  // 运营操作人 MID（0 表示上游未透传，仅记录不阻塞）
+  string region = 3;       // 上架地区代码（如 CN）；留空时回落到 catalog 配置的 DefaultRegion
+}
+
+message EpisodesReply {
+  repeated EpisodeReply episodes = 1; // 集列表
+}
+
+// --- 分区（catalog_zone） ---
+
+message ZoneReply {
+  int32 zoneid = 1;  // 分区 ID
+  string name = 2;   // 分区名
+  int32 parent = 3;  // 父分区 ID（0 为顶级）
+}
+
+message ZonesReply {
+  repeated ZoneReply zones = 1; // 分区列表（扁平，由调用方组装树）
+}
+
+// --- 标签（catalog_tag） ---
+
+message TagReply {
+  int64 tagid = 1;  // 标签 ID
+  string name = 2;  // 标签名
+}
+
+message ListTagsReq {
+  string name = 1;            // 模糊匹配名（为空时按 tagids 查询）
+  repeated int64 tagids = 2;  // 指定 ID 列表（name 为空时生效，最多 100）
+  int32 pn = 3;               // 页码（从 1 开始）
+  int32 ps = 4;               // 每页大小（最大 50）
+}
+
+message TagsReply {
+  repeated TagReply tags = 1; // 标签列表
+}
+
+// Catalog 版权内容目录服务。
+// 依据 AGENTS.md §1，不实现商业化；依据 §5，只持有本域主数据，
+// 跨服务通过 RPC 或版本化领域事件（content.published.v1）通信。
+service Catalog {
+  // 运营创建作品
+  rpc CreateWork(CreateWorkReq) returns (WorkReply);
+  // 查询作品
+  rpc GetWork(WorkReq) returns (WorkReply);
+  // 分页查询作品
+  rpc ListWorks(ListReq) returns (WorksReply);
+  // 运营创建季
+  rpc CreateSeason(CreateSeasonReq) returns (SeasonReply);
+  // 查询某作品的季列表
+  rpc ListSeasons(SeasonReq) returns (SeasonsReply);
+  // 运营创建集（关联 asset_id；建集前经 asset RPC 校验媒资存在且已完成扫描探测）
+  rpc CreateEpisode(CreateEpisodeReq) returns (EpisodeReply);
+  // 查询某季的集列表
+  rpc ListEpisodes(SeasonReq) returns (EpisodesReply);
+  // 查询集详情
+  rpc GetEpisode(EpisodeReq) returns (EpisodeReply);
+  // 上架集（状态流转到 PUBLISHED；先经 rights 版权窗口与 asset 媒资就绪校验）
+  rpc PublishEpisode(EpisodeReq) returns (EpisodeReply);
+  // 下架集
+  rpc OfflineEpisode(EpisodeReq) returns (EpisodeReply);
+  // 分区树（扁平列表）
+  rpc ListZones(EmptyReq) returns (ZonesReply);
+  // 标签查询（按名字模糊或 ID 列表）
+  rpc ListTags(ListTagsReq) returns (TagsReply);
+}

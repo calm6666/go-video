@@ -1,0 +1,64 @@
+Name: spm.v1.rpc
+# 端口分配：8120 live-media / 8121 live-gateway / 8123 recommend-rank / 8130 feature-store /
+# 8150 private-message / 8151 open-platform / 8152 event-collector 已占用，
+# 本批次（B1）给 spm 取 8131，与 feature-store 同段且相邻，便于成组冒烟。
+# 不能用 0.0.0.0:8080 —— 那是 gateway/app 的 HTTP 端口，同机启动会撞。
+ListenOn: 0.0.0.0:8131
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: spm.v1.rpc
+Mode: dev
+
+# 业务缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会触发 conflict key redis）。
+# 只放可重建的东西：热榜分页短缓存与口径 ACTIVE 指针缓存，丢失只回源，不影响任何指标值。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL DSN（仅本地示例，生产从配置中心/Secret 注入）。
+# 库名固定 go_video_spm：本服务只写自己的 schema（AGENTS.md §5），
+# 跨服务内容维度靠 spm_content_projection 本地只读投影，不做跨库 JOIN。
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_spm?charset=utf8mb4&parseTime=true&loc=Local
+
+# 行为分析领域参数。每个上界都对应 model 层的一处硬约束，收紧可以、放宽会在启动期被 Validate 拒绝。
+Spm:
+  # 分页：契约声明 ps 上限 100，配到 100 以上时 model 会静默 clamp（total 与实得不一致）。
+  PageSize: 20
+  MaxPageSize: 100
+  # BatchGetMetrics 单次 50 口径 × 30 窗口，再大就顶到 gRPC 默认消息上限。
+  MaxMetricKeysPerRequest: 50
+  MaxWindowCount: 30
+  # 单个聚合作业的窗口跨度上限（超限拒绝而不是拆半执行，2880 = 5 分钟窗口 × 10 天）。
+  MaxWindowsPerJob: 2880
+  # WriteMetricWindow 单批点数上限（model.maxMetricPointsPerBatch）。
+  MaxWritePoints: 500
+  # GetRetention 的 max_day 上限；同时要求 <= BehaviorRetentionDays。
+  MaxRetentionDay: 90
+  # 用户兴趣画像：写侧每个 mid 最多裁 100 行，读侧 top_n 不可能超过它。
+  InterestTopN: 20
+  MaxInterestTopN: 100
+  # 实时聚合器推进的窗口粒度：1=5 分钟、2=1 小时（day/week/total 属离线回填）。
+  RealtimeWindowType: 1
+  # 迟到容忍必须小于实时窗口长度，否则每个已闭合窗口都会被反复改写。
+  LateToleranceSeconds: 120
+  # 画像超过 1 天没更新即回 stale=true，调用方走冷启动而不是拿旧权重继续排序。
+  InterestStaleAfterSeconds: 86400
+  # 水位落后超过 15 分钟视为聚合器停摆（热榜仍返回最近闭合窗口）。
+  WatermarkLagSeconds: 900
+  # 行为事实留存天数：到期分批删除；<=0 只允许一次性调试实例。
+  BehaviorRetentionDays: 180
+  # 投影必须比事实活得久，否则口径变更后连旧投影都被一起删掉，历史无法解释。
+  ProjectionRetentionDays: 400
+  # 清理必须分批（model.maxBatch 上限 10000）。
+  DeleteBatchSize: 2000
+  # 作业租约与重试上限：没有租约就无法判断作业是否被别的进程抢占。
+  JobLeaseSeconds: 300
+  JobMaxRetry: 3
+  MaxRetryIntervalSeconds: 600
+  # 死信预览只用于「认出是哪条消息」，事件原文一律不入库。
+  DeadLetterPreviewBytes: 512
+  # 进程级令牌桶（读侧保护投影表，写侧挡住离线回填引擎的洪峰）。
+  ReadQps: 2000
+  WriteQps: 200
+  WriteBurst: 100

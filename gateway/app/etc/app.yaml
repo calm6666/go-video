@@ -15,6 +15,136 @@ UserProfileRPC:
     - 127.0.0.1:2379
     Key: user-profile.v1.rpc
 
+# 本次新接入的下游领域服务 RPC（etcd 占位，部署时按真实 Key 替换）。
+VideoRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: video.v1.rpc
+SocialGraphRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: socialgraph.v1.rpc
+FeedRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: feed.v1.rpc
+UploadRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: upload.v1.rpc
+CatalogRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: catalog.v1.rpc
+EngagementRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: engagement.v1.rpc
+
+# 阶段1-2 新接入：播放授权、时间轴弹幕、搜索查询、站内信。
+# TranscodeRPC 只用于把 aid/epid 解析成可播放版次的 object_key（AGENTS.md §5：
+# 媒资与转码版本归 asset/transcode，playback 只对网关解析出的路径签名）。
+PlaybackRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: playback.v1.rpc
+DanmakuRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: danmaku.v1.rpc
+SearchQueryRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: search-query.v1.rpc
+InboxRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: inbox.v1.rpc
+TranscodeRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: transcode.v1.rpc
+
+# 评论/楼中楼、终端通知偏好、创作者身份、审核申诉。
+CommentRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: comment.v1.rpc
+NotificationRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: notification.v1.rpc
+CreatorRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: creator.v1.rpc
+ModerationRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: moderation.v1.rpc
+
+# 本轮新接入：私信与直播间。Key 与服务侧 etc 的注册键逐字一致
+# （services/private-message/etc/privatemessage.v1.yaml -> privatemessage.v1.rpc，
+#  services/live-room/etc/liveroom.v1.yaml -> liveroom.v1.rpc）。
+# 本地直连排查时可把 Etcd 段换成 Endpoints: [127.0.0.1:8150] / [127.0.0.1:8119]
+# （private-message 监听 8150、live-room 监听 8119）；示例配置不含任何凭据。
+PrivateMessageRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: privatemessage.v1.rpc
+LiveRoomRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: liveroom.v1.rpc
+
+# 本轮新接入：商业化五服务。Key 与服务侧 etc 的注册键逐字一致
+# （membership.v1.rpc / payment.v1.rpc / tradeorder.v1.rpc / coin.v1.rpc / creatorrevenue.v1.rpc，
+#  全部**不带连字符**——写成 trade-order.v1.rpc 会永远发现不了对端，服务能起、网关只会超时）。
+# 未配置的下游对应的路由返回明确「service not configured」，不伪造空台账（AGENTS.md §9）。
+# 本地直连排查时可把 Etcd 段换成 Endpoints: [127.0.0.1:8160..8164]。
+MembershipRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: membership.v1.rpc
+PaymentRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: payment.v1.rpc
+TradeOrderRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: tradeorder.v1.rpc
+CoinRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: coin.v1.rpc
+CreatorRevenueRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: creatorrevenue.v1.rpc
+
 # /account/privacy 白名单 appkey（对应参考仓库 conf.AppkeyFilter.Privacy）。
 # 留空表示不启用校验（仅限开发环境）。
 PrivacyAppKeys:

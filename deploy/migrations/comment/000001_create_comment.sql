@@ -1,6 +1,8 @@
 -- 评论主表
 -- 对应 obc reply 模块的 reply_subject + reply 的简化合并。
 -- rpid 为全局雪花 ID（由 model.Insert 调用方传入或由 comment 序列表生成）。
+-- owner：comment 服务（deploy/migrations/comment，库 go_video_comment）；影响范围：新增 2 张表。
+-- 回滚：DROP TABLE IF EXISTS `comment_report`; DROP TABLE IF EXISTS `comment`;
 CREATE TABLE IF NOT EXISTS `comment` (
   `rpid`        BIGINT       NOT NULL COMMENT '评论 ID',
   `oid`         BIGINT       NOT NULL COMMENT '目标 ID（视频 aid 等）',

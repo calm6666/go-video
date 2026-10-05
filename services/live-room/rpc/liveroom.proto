@@ -1,0 +1,620 @@
+syntax = "proto3";
+
+package liveroom.v1;
+
+option go_package = "go-video/services/live-room/rpc";
+
+// 说明：live-room 是「直播间业务状态」领域服务，是房间/主播绑定/场次/回放引用/
+// 禁播与分区数据的唯一所有者（AGENTS.md §5）。
+//
+// 与 live-ingest 的边界（本期强约束，见 services/live-room/README.md §1）：
+//   - 房间状态与推流状态分离：本服务不保存推流密钥（含哈希）、不保存流健康度、
+//     不做接入节点分配；这些一律归 live-ingest。
+//   - 本服务只保存 stream_id 引用（不校验、不回查 ingest 库），流状态由
+//     live-ingest 产出的 live.state.v1 事件经 ReportStreamState 推进，
+//     按 event_id 去重、按 seq 拒绝乱序回退。
+//   - 跨服务只传业务主键（mid / room_id / session_id / asset_id / aid），
+//     本文件不 import 任何其他服务的 proto。
+//
+// 开播前置检查的外部读依赖：creator（主播身份，UpAttr from=2/3）、
+// risk-control（GuardedAction.ACTION_LIVE_START）、
+// moderation-orchestrator（ContentType.CONTENT_TYPE_LIVE 送审）。
+// 一律走 RPC 只读，禁止直连他人库表。
+
+// 通用空响应（幂等重放场景由业务 reply 自带 replayed 标记）
+message EmptyReply {}
+
+// 房间业务状态机（与 live_room.state 列一致，取值不可变更）
+enum RoomState {
+  ROOM_STATE_UNSPECIFIED = 0; // 未指定，视为非法入参
+  ROOM_STATE_PENDING = 1;     // 待完善：创建后的初始态，资料未审核通过
+  ROOM_STATE_READY = 2;       // 可开播：资料审核通过 + 主播资格与风控检查通过
+  ROOM_STATE_LIVING = 3;      // 直播中：存在一个 LIVING 场次
+  ROOM_STATE_FINISHED = 4;    // 已关闭：终态，房间不再复用（历史与审计保留）
+  ROOM_STATE_BANNED = 5;      // 违规禁播：由 BanRoom 进入，LiftBan 或到期回 READY
+  ROOM_STATE_DISABLED = 6;    // 停用：主播自行停用或运营下架（非违规），可回 READY
+}
+
+// 资料审核状态（与 live_room.verify_state 列一致）
+enum VerifyState {
+  VERIFY_STATE_UNSPECIFIED = 0; // 未指定
+  VERIFY_STATE_NONE = 1;        // 未提交审核
+  VERIFY_STATE_REVIEWING = 2;   // 审核中（已提交 moderation）
+  VERIFY_STATE_PASSED = 3;      // 通过
+  VERIFY_STATE_REJECTED = 4;    // 驳回：需改资料后重新送审
+}
+
+// 直播场次状态（与 live_session.state 列一致）
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0; // 未指定
+  SESSION_STATE_PENDING = 1;     // 已建档，等待推流到达
+  SESSION_STATE_LIVING = 2;      // 直播中
+  SESSION_STATE_ENDED = 3;       // 正常下播（终态）
+  SESSION_STATE_TERMINATED = 4;  // 异常终止：禁播/关闭房间/断流超时（终态）
+}
+
+// 场次终止原因（与 live_session.end_reason 列一致）
+enum EndReason {
+  END_REASON_UNSPECIFIED = 0; // 未指定
+  END_REASON_ANCHOR_STOP = 1; // 主播主动下播
+  END_REASON_BANNED = 2;      // 风控/运营禁播
+  END_REASON_ROOM_CLOSED = 3; // 房间被关闭
+  END_REASON_STREAM_TIMEOUT = 4; // 断流超过宽限期未重连
+  END_REASON_STREAM_REPLAY = 5;  // 收到更晚序号的停止事件补偿
+}
+
+// 回放状态（与 live_session.replay_state 列一致）
+enum ReplayState {
+  REPLAY_STATE_UNSPECIFIED = 0; // 未指定
+  REPLAY_STATE_NONE = 1;        // 无回放
+  REPLAY_STATE_PROCESSING = 2;  // 录制/转码中（由 live-media 推进）
+  REPLAY_STATE_AVAILABLE = 3;   // 可回放
+  REPLAY_STATE_REMOVED = 4;     // 回放已下架（版权撤回或违规）
+}
+
+// 主播绑定角色（与 live_room_anchor.role 列一致）
+enum AnchorRole {
+  ANCHOR_ROLE_UNSPECIFIED = 0; // 未指定
+  ANCHOR_ROLE_OWNER = 1;       // 房主：一个房间同一时刻只有一个生效房主
+  ANCHOR_ROLE_COHOST = 2;      // 联合主播（连麦嘉宾，不含商业化分成语义）
+  ANCHOR_ROLE_MANAGER = 3;     // 房间管理员（房管）
+}
+
+// 主播绑定动作
+enum AnchorAction {
+  ANCHOR_ACTION_UNSPECIFIED = 0; // 未指定，服务端拒绝
+  ANCHOR_ACTION_BIND = 1;        // 绑定或重新启用
+  ANCHOR_ACTION_UNBIND = 2;      // 解绑（保留行，state=0）
+}
+
+// 禁播类型（与 live_room_ban.ban_type 列一致）
+enum BanType {
+  BAN_TYPE_UNSPECIFIED = 0; // 未指定
+  BAN_TYPE_TEMPORARY = 1;   // 临时禁播，end_at 必须 > start_at
+  BAN_TYPE_PERMANENT = 2;   // 永久禁播，end_at = 0，必须 LiftBan 解除
+}
+
+// 审核结论（取值与 moderation.v1.Verdict 对齐，本服务自定义以避免 import）
+enum ModerationVerdict {
+  VERDICT_UNSPECIFIED = 0; // 未指定，服务端拒绝
+  VERDICT_PASS = 1;        // 通过：资料审核置为 PASSED
+  VERDICT_REVIEW = 2;      // 转人审：保持 REVIEWING
+  VERDICT_REJECT = 3;      // 驳回：置为 REJECTED，房间回 PENDING
+}
+
+// 客户端平台（与 live_room.platform 列一致，AGENTS.md §6 不写死单一端）
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0; // 未指定（服务端按 android 记录）
+  PLATFORM_ANDROID = 1;
+  PLATFORM_IOS = 2;
+  PLATFORM_HARMONY = 3;
+  PLATFORM_DESKTOP = 4;     // 电脑客户端（含直播 OBS 类推流助手）
+}
+
+// 房间列表排序
+enum RoomOrder {
+  ROOM_ORDER_UNSPECIFIED = 0; // 默认：room_id 倒序
+  ROOM_ORDER_LIVING_FIRST = 1; // 直播中优先，其次 room_id 倒序
+  ROOM_ORDER_CTIME_DESC = 2;   // 创建时间倒序
+}
+
+// 直播间主体（live_room 行投影）
+message RoomInfo {
+  int64 room_id = 1;              // 房间 ID
+  int64 owner_mid = 2;            // 房主用户 ID（live_room_anchor 生效房主的投影）
+  string title = 3;              // 房间标题
+  string cover = 4;              // 封面对象引用（object key 或站内相对地址，不含签名）
+  int64 area_id = 5;              // 直播分区 ID
+  RoomState state = 6;            // 房间业务状态
+  VerifyState verify_state = 7;   // 资料审核状态
+  int64 active_session_id = 8;    // 当前场次 ID，0 表示无进行中场次
+  string active_stream_id = 9;    // 当前场次关联的 stream_id 引用（无则空串）
+  int32 state_version = 10;       // 状态版本号，每次状态迁移 +1（乐观并发与事件乱序守卫）
+  string reject_reason = 11;      // 资料驳回原因（verify_state=REJECTED 时有值）
+  int64 ban_until = 12;           // 生效禁播的到期时间（Unix 秒），0 表示无禁播/永久
+  int64 ctime = 13;               // 创建时间（Unix 秒）
+  int64 mtime = 14;               // 修改时间（Unix 秒）
+}
+
+// 直播配置（live_room_setting 行投影）
+message RoomSetting {
+  int64 room_id = 1;             // 房间 ID
+  bool danmaku_enabled = 2;      // 是否开启弹幕
+  bool reply_enabled = 3;        // 是否开启回复/评论
+  bool record_enabled = 4;       // 是否录制回放（回放归 live-media 产出，本服务只存开关）
+  bool linkmic_enabled = 5;      // 是否允许连麦
+  int32 live_type = 6;           // 直播类型：1 视频直播、2 语音直播、3 屏幕分享
+  int32 min_client_version_code = 7; // 允许的最低客户端版本号（0 不限制）
+  int64 mtime = 8;               // 修改时间（Unix 秒）
+}
+
+// 直播场次（live_session 行投影）
+message SessionInfo {
+  int64 session_id = 1;           // 场次 ID
+  int64 room_id = 2;              // 房间 ID
+  int64 mid = 3;                  // 开播主播 ID
+  SessionState state = 4;         // 场次状态
+  string title_snapshot = 5;      // 开播时标题快照（改标题不影响历史）
+  int64 area_id_snapshot = 6;     // 开播时分区的快照
+  string stream_id = 7;           // 推流标识引用（由 live-ingest 拥有，本字段只存值）
+  int64 started_at = 8;           // 实际开播时间（Unix 秒，0 表示未开播）
+  int64 ended_at = 9;             // 结束时间（Unix 秒，0 表示进行中）
+  int64 duration_seconds = 10;    // 直播时长（秒）
+  EndReason end_reason = 11;      // 终止原因
+  int64 last_stream_seq = 12;     // 已应用的最大流事件序号（乱序守卫）
+  ReplayState replay_state = 13;  // 回放状态
+  int64 record_id = 14;           // live-media 录制记录 ID 引用，0 表示无
+  int64 record_asset_id = 15;     // 回放媒资 asset_id 引用，0 表示无
+  int64 record_aid = 16;          // 回放稿件 aid 引用，0 表示无
+  int64 moderation_task_id = 17;  // 开播送审任务 ID（0 表示未送审）
+  int64 ctime = 18;               // 创建时间（Unix 秒）
+  int64 mtime = 19;               // 修改时间（Unix 秒）
+}
+
+// 禁播记录（live_room_ban 行投影）
+message RoomBanInfo {
+  int64 ban_id = 1;               // 禁播记录 ID
+  int64 room_id = 2;              // 房间 ID
+  int64 mid = 3;                  // 被禁主播 ID
+  BanType ban_type = 4;           // 禁播类型
+  string reason = 5;              // 禁播原因（运营内部说明，不下发终端）
+  int64 start_at = 6;             // 生效时间（Unix 秒）
+  int64 end_at = 7;               // 结束时间（Unix 秒），0 表示永久
+  int32 state = 8;                // 1 生效、2 已解除、3 已过期
+  int64 operator_mid = 9;         // 下发运营/系统 ID
+  int64 lift_operator_mid = 10;   // 解除运营 ID，0 表示未解除
+  string lift_reason = 11;        // 解除原因
+  int64 lifted_at = 12;           // 解除时间（Unix 秒）
+  int64 ctime = 13;               // 创建时间（Unix 秒）
+}
+
+// 直播分区（live_area 行投影）
+message AreaInfo {
+  int64 area_id = 1;              // 分区 ID
+  string area_name = 2;           // 分区名
+  int64 parent_area_id = 3;       // 上级分区 ID，0 表示一级分区
+  int32 sort = 4;                 // 排序权重（越小越前）
+  int32 state = 5;                // 1 启用、0 停用
+  int64 operator_mid = 6;         // 最近操作运营 ID
+  int64 ctime = 7;                // 创建时间（Unix 秒）
+  int64 mtime = 8;                // 修改时间（Unix 秒）
+}
+
+// 开播前置检查结果（PrepareLive 明细，逐项可解释，不做静默放行）
+message PrepareCheckItem {
+  string code = 1;                // 检查项稳定 key：anchor_qualification / risk_control / room_verified / not_banned / setting_ok
+  bool passed = 2;                // 是否通过
+  string detail = 3;              // 脱敏说明（不含下游原始响应与任何凭据）
+  bool degraded = 4;              // true 表示下游不可用导致该项未能评估（按未通过处理）
+}
+
+// --- 房间生命周期 ---
+
+message CreateRoomReq {
+  int64 mid = 1;                  // 主播用户 ID（gateway 注入，本服务不解析 token）
+  string title = 2;               // 房间标题（1~80 字符）
+  string cover = 3;               // 封面对象引用
+  int64 area_id = 4;              // 直播分区 ID（必须启用）
+  Platform platform = 5;          // 创建端
+  string app_version = 6;         // 客户端版本号
+  RoomSetting setting = 7;        // 初始配置，缺省按服务端默认
+  string request_id = 8;          // 幂等键，客户端重试必须复用同一个值
+  string trace_id = 9;            // 链路追踪 ID
+}
+
+message CreateRoomReply {
+  int64 room_id = 1;              // 房间 ID（幂等重放返回原值）
+  RoomState state = 2;            // 初始状态，恒为 ROOM_STATE_PENDING
+  VerifyState verify_state = 3;   // 初始资料审核状态
+  bool replayed = 4;              // true 表示命中 request_id，未产生新写入
+  int64 moderation_task_id = 5;   // 送审任务 ID，0 表示未送审
+}
+
+message UpdateRoomInfoReq {
+  int64 room_id = 1;              // 房间 ID
+  int64 operator_mid = 2;         // 操作者：房主或生效联合主播
+  string title = 3;               // 新标题，空串表示不修改
+  string cover = 4;               // 新封面引用，空串表示不修改
+  int64 area_id = 5;              // 新分区 ID，0 表示不修改
+  string request_id = 6;          // 幂等键
+  string trace_id = 7;            // 链路追踪 ID
+}
+
+message UpdateRoomInfoReply {
+  RoomInfo room = 1;              // 更新后的房间
+  bool replayed = 2;              // true 表示命中 request_id，返回既有结果
+  int64 moderation_task_id = 3;   // 触发重新送审时的任务 ID，0 表示未送审
+}
+
+message GetRoomReq {
+  int64 room_id = 1;              // 房间 ID（与 owner_mid 二选一，room_id 优先）
+  int64 owner_mid = 2;            // 按房主查其生效中的房间（0 表示不按此查）
+  bool with_setting = 3;          // 是否附带配置
+  bool with_active_session = 4;   // 是否附带进行中场次
+}
+
+message GetRoomReply {
+  RoomInfo room = 1;              // 房间；不存在时 reply 为空且 code 由 gRPC 错误表达
+  RoomSetting setting = 2;        // with_setting=true 时返回
+  SessionInfo active_session = 3; // with_active_session=true 且进行中场次存在时返回
+}
+
+message ListRoomsReq {
+  int64 owner_mid = 1;            // 按房主过滤（0 不过滤）
+  int64 area_id = 2;              // 按分区过滤（0 不过滤）
+  RoomState state = 3;            // 按状态过滤（ROOM_STATE_UNSPECIFIED 不过滤）
+  RoomOrder order = 4;            // 排序
+  int32 page = 5;                 // 页码，从 1 开始
+  int32 page_size = 6;            // 每页大小（服务端截断到上限）
+}
+
+message ListRoomsReply {
+  repeated RoomInfo rooms = 1;    // 房间列表
+  int32 total = 2;                // 符合条件的总数
+  int32 page = 3;                 // 实际返回页码
+  int32 page_size = 4;            // 实际每页大小
+}
+
+// --- 开播 / 下播 ---
+
+message PrepareLiveReq {
+  int64 room_id = 1;              // 房间 ID
+  int64 mid = 2;                  // 申请开播的主播 ID（必须是生效绑定主播）
+  Platform platform = 3;          // 客户端平台
+  string device_hash = 4;         // 设备摘要（风控入参，禁止传明文设备号）
+  string ip_hash = 5;             // 调用方预哈希的 IP 摘要（禁止传明文 IP）
+  string request_id = 6;          // 幂等键
+  string trace_id = 7;            // 链路追踪 ID
+}
+
+message PrepareLiveReply {
+  int64 room_id = 1;              // 房间 ID
+  RoomState state = 2;            // 检查后的房间状态
+  repeated PrepareCheckItem checks = 3; // 逐项检查结果（可解释，顺序稳定）
+  bool ready = 4;                 // 全部通过并可迁移到 READY 时为 true
+  string deny_code = 5;           // 未通过时的稳定错误码（anchor_not_verified / risk_denied / not_ready ...）
+  int64 retry_after_seconds = 6;  // 建议重试间隔（秒），0 表示无需定时重试
+  bool replayed = 7;              // true 表示命中 request_id 的结果回放
+}
+
+message StartLiveReq {
+  int64 room_id = 1;              // 房间 ID
+  int64 mid = 2;                  // 开播主播 ID
+  string stream_id = 3;           // live-ingest 分配的推流标识引用（可空：推流到达后再回填）
+  string request_id = 4;          // 幂等键（同 request_id 重放返回同一 session_id）
+  string trace_id = 5;            // 链路追踪 ID
+}
+
+message StartLiveReply {
+  int64 session_id = 1;           // 新建场次 ID
+  RoomState state = 2;            // 迁移后的房间状态（LIVING）
+  int64 started_at = 3;           // 开播时间（Unix 秒）
+  int32 state_version = 4;        // 迁移后的状态版本号
+  bool replayed = 5;              // true 表示命中 request_id，未产生新场次
+}
+
+message EndLiveReq {
+  int64 room_id = 1;              // 房间 ID
+  int64 session_id = 2;           // 场次 ID（0 表示该房间当前进行中场次）
+  int64 mid = 3;                  // 操作主播 ID
+  EndReason end_reason = 4;       // 结束原因（仅允许 ANCHOR_STOP/STREAM_REPLAY，其余由内部方法写）
+  string request_id = 5;          // 幂等键
+  string trace_id = 6;            // 链路追踪 ID
+}
+
+message EndLiveReply {
+  int64 session_id = 1;           // 被结束的场次 ID
+  SessionState session_state = 2; // 终态（ENDED）
+  RoomState room_state = 3;       // 房间状态（回到 READY）
+  int64 duration_seconds = 4;     // 本场时长（秒）
+  bool replayed = 5;              // true 表示幂等重放
+}
+
+message CloseRoomReq {
+  int64 room_id = 1;              // 房间 ID
+  int64 operator_mid = 2;         // 操作者：房主或运营（operator 权限由 gateway/admin 侧判定）
+  bool admin = 3;                 // true 表示运营侧关闭
+  string reason = 4;              // 关闭原因（审计留存）
+  string request_id = 5;          // 幂等键
+  string trace_id = 6;            // 链路追踪 ID
+}
+
+message CloseRoomReply {
+  RoomState state = 1;            // 迁移后的状态（FINISHED）
+  int64 terminated_session_id = 2; // 被强制终止的进行中场次，0 表示无
+  bool replayed = 3;              // true 表示幂等重放
+}
+
+// --- 推流状态事件入口（live-ingest → live-room） ---
+
+message ReportStreamStateReq {
+  string event_id = 1;            // 事件唯一 ID（live.state.v1 的 event_id，去重锚点）
+  int64 room_id = 2;              // 房间 ID
+  int64 session_id = 3;           // 场次 ID，0 表示由本服务按进行中场次解析
+  string stream_id = 4;           // 推流标识引用
+  int32 stream_state = 5;         // live-ingest 流状态：1 IDLE、2 PUBLISHING、3 INTERRUPTED、4 STOPPED
+  int64 stream_seq = 6;           // 该流的单调事件序号（小于已应用序号的事件被丢弃）
+  int64 occurred_at = 7;          // 事件发生时间（Unix 秒）
+  int64 interrupted_seconds = 8;  // stream_state=4 时的本次累计中断秒数（观测用，可为 0）
+  string reason = 9;              // 原因摘要
+  string trace_id = 10;           // 链路追踪 ID
+}
+
+message ReportStreamStateReply {
+  int32 result = 1;               // 1 已应用、2 重复投递、3 乱序丢弃、4 非法迁移未变更、5 房间/场次不匹配
+  RoomState room_state = 2;       // 处理后的房间状态
+  int64 session_id = 3;           // 关联场次 ID
+  SessionState session_state = 4; // 处理后的场次状态
+  string message = 5;             // 说明
+}
+
+// --- 审核结论回写（moderation.result.v1 消费者入口） ---
+
+message ApplyRoomModerationResultReq {
+  int64 room_id = 1;              // 房间 ID
+  int64 task_id = 2;              // moderation 任务 ID
+  ModerationVerdict verdict = 3;  // 审核结论
+  string reason = 4;              // 结论原因
+  int64 operator = 5;             // 处理人，0 表示机审
+  string event_id = 6;            // moderation.result.v1 的 event_id，消费去重
+  string trace_id = 7;            // 链路追踪 ID
+}
+
+message ApplyRoomModerationResultReply {
+  int64 room_id = 1;              // 房间 ID
+  VerifyState verify_state = 2;   // 迁移后的资料审核状态
+  RoomState room_state = 3;       // 迁移后的房间状态
+  bool applied = 4;               // false 表示重复投递或无需迁移
+  string message = 5;             // 说明
+}
+
+// --- 禁播与解封 ---
+
+message BanRoomReq {
+  int64 room_id = 1;              // 房间 ID
+  BanType ban_type = 2;           // 禁播类型
+  int64 duration_seconds = 3;     // 临时禁播时长（秒），BAN_TYPE_TEMPORARY 必填且 > 0
+  string reason = 4;              // 禁播原因
+  int64 operator_mid = 5;         // 下发运营 ID，必须 > 0
+  string request_id = 6;          // 幂等键
+  string trace_id = 7;            // 链路追踪 ID
+}
+
+message BanRoomReply {
+  int64 ban_id = 1;               // 禁播记录 ID（重放返回原值）
+  RoomState state = 2;            // 房间状态（BANNED）
+  int64 terminated_session_id = 3; // 被强制终止的场次，0 表示无
+  int64 end_at = 4;               // 禁播到期时间（Unix 秒），0 表示永久
+  bool replayed = 5;              // true 表示幂等重放
+}
+
+message LiftBanReq {
+  int64 room_id = 1;              // 房间 ID
+  int64 ban_id = 2;               // 指定解除的禁播记录，0 表示解除当前生效记录
+  int64 operator_mid = 3;         // 解除运营 ID，必须 > 0
+  string reason = 4;              // 解除原因
+  string request_id = 5;          // 幂等键
+  string trace_id = 6;            // 链路追踪 ID
+}
+
+message LiftBanReply {
+  int64 ban_id = 1;               // 被解除的记录 ID，0 表示无生效记录
+  RoomState state = 2;            // 房间状态（BANNED → READY）
+  bool replayed = 3;              // true 表示幂等重放
+  string message = 4;             // 说明
+}
+
+message ListRoomBansReq {
+  int64 room_id = 1;              // 按房间过滤（0 不过滤）
+  int64 mid = 2;                  // 按主播过滤（0 不过滤）
+  int32 state = 3;                // 1 生效、2 已解除、3 已过期，0 不过滤
+  int32 page = 4;                 // 页码，从 1 开始
+  int32 page_size = 5;            // 每页大小（最大 100）
+  int64 operator_mid = 6;         // 查询运营 ID，必须 > 0
+}
+
+message ListRoomBansReply {
+  repeated RoomBanInfo bans = 1;  // 禁播记录
+  int32 total = 2;                // 总数
+  int32 page = 3;                 // 实际页码
+  int32 page_size = 4;            // 实际每页大小
+}
+
+// --- 场次与回放 ---
+
+message GetSessionReq {
+  int64 session_id = 1;           // 场次 ID（与 room_id 二选一，session_id 优先）
+  int64 room_id = 2;              // room_id>0 且 session_id=0 时取该房间最近一场
+  int32 offset = 3;               // 从最近一场往前的偏移（0 表示最近一场）
+}
+
+message GetSessionReply {
+  SessionInfo session = 1;        // 场次
+}
+
+message ListSessionsReq {
+  int64 room_id = 1;              // 房间 ID，必填
+  int64 mid = 2;                  // 按主播过滤（0 不过滤）
+  SessionState state = 3;         // 状态过滤（SESSION_STATE_UNSPECIFIED 不过滤）
+  string cursor = 4;              // 上一页 next_cursor，空表示第一页
+  int32 page_size = 5;            // 每页大小（最大 100）
+}
+
+message ListSessionsReply {
+  repeated SessionInfo sessions = 1; // 场次列表，session_id 倒序
+  string next_cursor = 2;            // 空表示到底
+}
+
+message AttachReplayReq {
+  int64 session_id = 1;           // 场次 ID（必须已终态）
+  int64 room_id = 2;              // 房间 ID（校验归属，防串改）
+  int64 record_id = 3;            // live-media 录制记录 ID 引用
+  int64 record_asset_id = 4;      // 回放媒资 asset_id 引用（只存主键，不查 asset 库）
+  int64 record_aid = 5;           // 回放稿件 aid 引用（0 表示未生成稿件）
+  ReplayState replay_state = 6;   // 目标状态，仅允许 PROCESSING/AVAILABLE/REMOVED
+  string request_id = 7;          // 幂等键
+  string trace_id = 8;            // 链路追踪 ID
+}
+
+message AttachReplayReply {
+  int64 session_id = 1;           // 场次 ID
+  ReplayState replay_state = 2;   // 迁移后的回放状态
+  bool replayed = 3;              // true 表示幂等重放
+}
+
+// --- 配置 ---
+
+message UpdateRoomSettingReq {
+  int64 room_id = 1;              // 房间 ID
+  int64 operator_mid = 2;         // 操作者（房主或运营）
+  RoomSetting setting = 3;        // 新配置（整段落库，字段为 0/false 视为显式关闭）
+  string request_id = 4;          // 幂等键
+  string trace_id = 5;            // 链路追踪 ID
+}
+
+message UpdateRoomSettingReply {
+  RoomSetting setting = 1;        // 更新后的配置
+  bool replayed = 2;              // true 表示幂等重放
+}
+
+// --- 主播绑定 ---
+
+message MutateAnchorReq {
+  int64 room_id = 1;              // 房间 ID
+  int64 operator_mid = 2;         // 操作者：房主或运营
+  int64 target_mid = 3;           // 被绑定/解绑的主播 ID
+  AnchorAction action = 4;        // 动作
+  AnchorRole role = 5;            // BIND 时必填；UNBIND 时可选（0 表示按 target_mid 解绑全部非房主）
+  string request_id = 6;          // 幂等键
+  string trace_id = 7;            // 链路追踪 ID
+}
+
+message MutateAnchorReply {
+  int64 room_id = 1;              // 房间 ID
+  int64 target_mid = 2;           // 目标主播
+  int32 state = 3;                // 1 生效、0 已解绑
+  int32 bound_count = 4;          // 该主播当前生效的房主房间数（上限校验结果）
+  bool replayed = 5;              // true 表示幂等重放
+}
+
+message ListAnchorsReq {
+  int64 room_id = 1;              // 房间 ID
+  AnchorRole role = 2;            // 角色过滤（ANCHOR_ROLE_UNSPECIFIED 不过滤）
+  bool only_enabled = 3;          // 仅生效绑定
+  int32 page = 4;                 // 页码
+  int32 page_size = 5;            // 每页大小（最大 100）
+}
+
+message ListAnchorsReply {
+  repeated AnchorInfo anchors = 1; // 绑定列表
+  int32 total = 2;                 // 总数
+}
+
+// 主播绑定条目（live_room_anchor 行投影）
+message AnchorInfo {
+  int64 id = 1;                   // 记录 ID
+  int64 room_id = 2;              // 房间 ID
+  int64 mid = 3;                  // 主播 ID
+  AnchorRole role = 4;            // 角色
+  int32 state = 5;                // 1 生效、0 已解绑
+  int64 ctime = 6;                // 创建时间（Unix 秒）
+  int64 mtime = 7;                // 修改时间（Unix 秒）
+}
+
+// --- 分区（运营侧） ---
+
+message UpsertAreaReq {
+  int64 area_id = 1;              // 0 表示新建，> 0 表示修改
+  string area_name = 2;           // 分区名（1~32 字符，全局唯一）
+  int64 parent_area_id = 3;       // 上级分区 ID，0 表示一级
+  int32 sort = 4;                 // 排序权重
+  int32 state = 5;                // 1 启用、0 停用
+  int64 operator_mid = 6;         // 操作运营 ID，必须 > 0
+  string request_id = 7;          // 幂等键
+}
+
+message UpsertAreaReply {
+  int64 area_id = 1;              // 分区 ID
+  bool created = 2;               // true 表示本次新建
+}
+
+message ListAreasReq {
+  int64 parent_area_id = 1;       // 按上级过滤（-1 不过滤，0 表示只取一级）
+  int32 state = 2;                // 1 启用、0 停用，-1 不过滤
+  int32 page = 3;                 // 页码
+  int32 page_size = 4;            // 每页大小（最大 200）
+}
+
+message ListAreasReply {
+  repeated AreaInfo areas = 1;    // 分区列表
+  int32 total = 2;                // 总数
+}
+
+// LiveRoom 直播间业务状态服务。
+// 数据所有权见 AGENTS.md §5：房间、主播绑定、场次、禁播、分区、配置与回放引用
+// 全部归本服务；房间状态只能由本服务状态机推进，
+// 外部（live-ingest 事件、moderation 结论）只能通过带 event_id 幂等的入口推进合法状态。
+service LiveRoom {
+  // 创建直播间：校验分区有效与房间数上限 → 落 PENDING → 建绑定与配置 → 送资料审核
+  rpc CreateRoom(CreateRoomReq) returns (CreateRoomReply);
+  // 修改标题/封面/分区：终态房间不可改；改动后重新送审（PENDING/READY 才允许）
+  rpc UpdateRoomInfo(UpdateRoomInfoReq) returns (UpdateRoomInfoReply);
+  // 读房间（可按 room_id 或房主 mid），可附带配置与进行中场次
+  rpc GetRoom(GetRoomReq) returns (GetRoomReply);
+  // 分页浏览房间（发现页/主播主页/运营列表）
+  rpc ListRooms(ListRoomsReq) returns (ListRoomsReply);
+  // 开播前置检查：主播资格(creator) + 风控(risk-control) + 资料审核 + 未禁播，全通过才 PENDING→READY
+  rpc PrepareLive(PrepareLiveReq) returns (PrepareLiveReply);
+  // 开播：READY→LIVING 并新建场次（不接收推流密钥，只登记 stream_id 引用）
+  rpc StartLive(StartLiveReq) returns (StartLiveReply);
+  // 下播：LIVING→READY 并把场次置为 ENDED（时长簿记）
+  rpc EndLive(EndLiveReq) returns (EndLiveReply);
+  // 关闭房间：任意非终态 → FINISHED，强制终止进行中场次并保留审计
+  rpc CloseRoom(CloseRoomReq) returns (CloseRoomReply);
+  // 推流状态事件入口（live.state.v1 消费者或 live-ingest 直调）：event_id 去重 + seq 乱序守卫
+  rpc ReportStreamState(ReportStreamStateReq) returns (ReportStreamStateReply);
+  // 资料审核结论回写（moderation.result.v1 消费者入口），按合法状态机推进
+  rpc ApplyRoomModerationResult(ApplyRoomModerationResultReq) returns (ApplyRoomModerationResultReply);
+  // 禁播：进入 BANNED 并终止进行中场次（运营/系统，需 operator_mid）
+  rpc BanRoom(BanRoomReq) returns (BanRoomReply);
+  // 解除禁播：BANNED→READY
+  rpc LiftBan(LiftBanReq) returns (LiftBanReply);
+  // 分页查询禁播记录（运营侧审计）
+  rpc ListRoomBans(ListRoomBansReq) returns (ListRoomBansReply);
+  // 读场次（按 session_id，或按 room_id 取最近 N 场之一）
+  rpc GetSession(GetSessionReq) returns (GetSessionReply);
+  // cursor 分页拉取历史场次
+  rpc ListSessions(ListSessionsReq) returns (ListSessionsReply);
+  // 关联回放：只写 record/asset/aid 引用与回放状态，不落媒资数据
+  rpc AttachReplay(AttachReplayReq) returns (AttachReplayReply);
+  // 更新直播配置（弹幕/回复/录制/连麦/直播类型）
+  rpc UpdateRoomSetting(UpdateRoomSettingReq) returns (UpdateRoomSettingReply);
+  // 绑定或解绑主播（房主/联合主播/房管），含单主播房间数上限校验
+  rpc MutateAnchor(MutateAnchorReq) returns (MutateAnchorReply);
+  // 分页查询房间主播绑定
+  rpc ListAnchors(ListAnchorsReq) returns (ListAnchorsReply);
+  // 运营侧新建/修改直播分区
+  rpc UpsertArea(UpsertAreaReq) returns (UpsertAreaReply);
+  // 分区列表（客户端与运营共用）
+  rpc ListAreas(ListAreasReq) returns (ListAreasReply);
+}

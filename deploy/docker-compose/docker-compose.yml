@@ -1,3 +1,7 @@
+# 本地依赖编排：只含基础设施（MySQL/Redis/MinIO/Redpanda/OpenSearch），不含 services/* 与 gateway/*。
+# 注意：下面 mysql 把宿主 3306 映射出来，与 Windows 上已服务的 MySQL80 冲突——
+# 本机跑过真实 MySQL 时不要 `docker compose up mysql`，改用隔离实例（如 3399，数据目录 .gotmp/mysql-data），
+# 并给 scripts/migrate.ps1 显式传 -OverrideHost/-OverridePort，避免误写本机 3306。
 services:
   mysql:
     image: mysql:8.0
@@ -49,7 +53,36 @@ services:
     ports:
       - "9092:9092"
 
+  # 搜索投影与检索集群（search-indexer 写、search-query 读同一个别名）。
+  # 仅本地开发：禁用 security 插件后集群无认证，所以 search-indexer 侧必须显式
+  # OpenSearch.AllowAnonymousWrites: true 才允许写；生产走独立集群 + Secret 注入。
+  # 词典目录只读挂载到容器 config 下，配置里的路径必须是容器内绝对路径。
+  # 需要 ik/smartcn 时按 deploy/opensearch/README.md 自建带插件的镜像，不要改这里假装已装。
+  opensearch:
+    image: opensearchproject/opensearch:2.11.1
+    environment:
+      discovery.type: single-node
+      cluster.name: go-video-local
+      node.name: go-video-os-0
+      plugins.security.disabled: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+      - ../opensearch/analysis:/usr/share/opensearch/config/analysis:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
 volumes:
   mysql-data:
   redis-data:
   minio-data:
+  opensearch-data:

@@ -1,0 +1,99 @@
+Name: cron.v1.rpc
+# 8112：cron 的 gRPC 监听端口。8080/8081 是 gateway/app、gateway/admin 的 HTTP 端口，
+# 8100-8109 已被阶段 1-2 服务占用、8110 给 audit（见 docs/roadmap.md 实现进度表），
+# 本服务与 event-collector 落在 8112/8113；8114-8119 留给阶段 3-4 的其它新服务。
+ListenOn: 0.0.0.0:8112
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: cron.v1.rpc
+
+# 调度缓存（到期索引、健康度计数）；键名不能写 Redis：
+# zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会触发 conflict key redis。
+# 真值恒在 MySQL：CacheRedis 丢失只影响扫描开销，不影响调度正确性。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL 主库 DSN（仅本地示例，生产从配置中心/Secret 注入，AGENTS.md §4）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_cron?charset=utf8mb4&parseTime=true&loc=Local
+
+# 调度循环。多副本可以安全并行 tick：并发由 cron_task_lease +
+# cron_task_run.UNIQUE(task_key, planned_at, attempt) 裁决，不需要选主。
+Scheduler:
+  Enabled: true
+  TickSeconds: 5
+  BatchSize: 64
+  LookaheadSeconds: 0
+  MaxConcurrentRuns: 8
+  ReclaimIntervalSeconds: 60
+  # 实例标识前缀，留空则使用 hostname-pid-random
+  WorkerIDPrefix: ""
+  GracefulStopSeconds: 30
+
+# 租约：TTL 到期即可被抢占，fence_token 单调递增；
+# 丢失租约的实例不得再写下游（AbortOnLeaseLost 只决定是否主动取消）。
+Lease:
+  HeartbeatSeconds: 20
+  DefaultTTLSeconds: 300
+  MinTTLSeconds: 30
+  MaxTTLSeconds: 86400
+  PreemptionEnabled: true
+  AbortOnLeaseLost: true
+
+Task:
+  DefaultPageSize: 20
+  MaxPageSize: 100
+  MaxParamsBytes: 4096
+  MaxResultSummaryBytes: 1024
+  RunRetentionDays: 30
+  AuditRetentionDays: 180
+  DeleteBatchSize: 1000
+  DefaultTimezone: Asia/Shanghai
+
+# 下游领域服务 RPC。留空（Target 与 Etcd.Hosts 都为空）时不构造客户端，
+# 对应任务运行时以 ErrDownstreamNotConfigured 失败并退避重试；
+# cron 永不直连这些服务的库/表/Redis key（AGENTS.md §5）。
+# Target 用于本地直连，生产走 Etcd 服务发现（Key 见各服务 etc yaml）。
+RightsRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: rights.v1.rpc
+  NonBlock: true
+CatalogRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: catalog.v1.rpc
+  NonBlock: true
+VideoRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: video.v1.rpc
+  NonBlock: true
+SearchIndexerRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: searchindexer.v1.rpc
+  NonBlock: true
+NotificationRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: notification.v1.rpc
+  NonBlock: true
+EngagementRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: engagement.v1.rpc
+  NonBlock: true
+InboxRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: inbox.v1.rpc
+  NonBlock: true

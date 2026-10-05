@@ -83,7 +83,7 @@ type realnameCachePayload struct {
 func (r *Repository) realnameInfo(ctx context.Context, mid int64) (*realnameCachePayload, error) {
 	cacheOK := true
 	var payload realnameCachePayload
-	if err := r.cache.getJSON(ctx, keyRealname(mid), &payload); err != nil {
+	if err := r.cache.GetJSON(ctx, keyRealname(mid), &payload); err != nil {
 		cacheOK = false
 		logx.Errorf("user-profile/realname: get realname cache mid=%d err=%v", mid, err)
 	}
@@ -123,7 +123,7 @@ func (r *Repository) realnameInfo(ctx context.Context, mid int64) (*realnameCach
 	if cacheOK {
 		p := payload
 		_ = r.async.Do(ctx, func(c context.Context) {
-			r.cache.setJSON(c, keyRealname(mid), p, cacheTTLRealname)
+			r.cache.SetJSON(c, keyRealname(mid), p, cacheTTLRealname)
 		})
 	}
 	return &payload, nil
@@ -294,13 +294,15 @@ func (r *Repository) RealnameCheck(ctx context.Context, mid int64, cardType int8
 }
 
 // MidByRealnameCard 按证件号批量反查 mid（参考 service.MidByRealnameCard）。
+// 哈希对号串做了大小写归一，所以一次请求里可能有多条入参撞同一把哈希
+// （身份证末位 x/X 是常态）：一个哈希要回连所有入参键，否则调用方少拿到结果。
 func (r *Repository) MidByRealnameCard(ctx context.Context, cardCodes []string, country, cardType int32) (map[string]int64, error) {
-	md5ToCode := make(map[string]string, len(cardCodes))
+	md5ToCodes := make(map[string][]string, len(cardCodes))
 	cardMD5s := make([]string, 0, len(cardCodes))
 	for _, code := range cardCodes {
 		hashed := cardMD5(code, int(cardType), int(country))
 		cardMD5s = append(cardMD5s, hashed)
-		md5ToCode[hashed] = code
+		md5ToCodes[hashed] = append(md5ToCodes[hashed], code)
 	}
 	md5ToMid, err := r.realnameModel.FindMidsByCardMD5s(ctx, cardMD5s)
 	if err != nil {
@@ -308,7 +310,7 @@ func (r *Repository) MidByRealnameCard(ctx context.Context, cardCodes []string, 
 	}
 	codeToMid := make(map[string]int64, len(md5ToMid))
 	for hashed, mid := range md5ToMid {
-		if code, ok := md5ToCode[hashed]; ok {
+		for _, code := range md5ToCodes[hashed] {
 			codeToMid[code] = mid
 		}
 	}
@@ -319,12 +321,12 @@ func (r *Repository) MidByRealnameCard(ctx context.Context, cardCodes []string, 
 // 参考仓库通过 SMS 服务发送；notification 服务未接入前仅记录验证码日志
 // （开发模式），验证码仍写入 Redis 供校验流程使用。
 func (r *Repository) RealnameTelCapture(ctx context.Context, mid int64) (int, error) {
-	times, err := r.cache.captureTimes(ctx, mid)
+	times, err := r.captureTimes(ctx, mid)
 	if err != nil {
 		return 0, err
 	}
 	if times < 0 {
-		if err := r.cache.setCaptureTimes(ctx, mid, 0); err != nil {
+		if err := r.setCaptureTimes(ctx, mid, 0); err != nil {
 			return 0, err
 		}
 		times = 0
@@ -335,13 +337,13 @@ func (r *Repository) RealnameTelCapture(ctx context.Context, mid int64) (int, er
 	capture := rand.Intn(900000) + 100000
 	// SMS 发送：notification 服务未接入，记录日志供开发联调（生产接入后替换为真实下发）
 	logx.Infof("user-profile/realname: send capture mid=%d code=%06d (sms not integrated)", mid, capture)
-	if err := r.cache.setCaptureCode(ctx, mid, capture); err != nil {
+	if err := r.setCaptureCode(ctx, mid, capture); err != nil {
 		return 0, err
 	}
-	if err := r.cache.incrCaptureTimes(ctx, mid); err != nil {
+	if err := r.incrCaptureTimes(ctx, mid); err != nil {
 		return 0, err
 	}
-	if err := r.cache.delCaptureErrTimes(ctx, mid); err != nil {
+	if err := r.delCaptureErrTimes(ctx, mid); err != nil {
 		return 0, err
 	}
 	return capture, nil
@@ -349,7 +351,7 @@ func (r *Repository) RealnameTelCapture(ctx context.Context, mid int64) (int, er
 
 // RealnameTelCaptureCheck 校验手机验证码（参考 service.RealnameTelCaptureCheck）。
 func (r *Repository) RealnameTelCaptureCheck(ctx context.Context, mid int64, captureCode int) error {
-	serverCode, err := r.cache.captureCode(ctx, mid)
+	serverCode, err := r.captureCode(ctx, mid)
 	if err != nil {
 		return err
 	}
@@ -444,25 +446,25 @@ func (r *Repository) RealnameApply(ctx context.Context, arg *RealnameApplyArg) e
 		return err
 	}
 	_ = r.async.Do(ctx, func(c context.Context) {
-		_ = r.cache.delCaptureCode(c, arg.Mid)
-		_ = r.cache.delRealnameCache(c, arg.Mid)
+		_ = r.delCaptureCode(c, arg.Mid)
+		_ = r.delRealnameCache(c, arg.Mid)
 	})
 	return nil
 }
 
 // checkCapture 校验验证码（含错误次数限制，参考 service.checkCapture）。
 func (r *Repository) checkCapture(ctx context.Context, mid int64, capture int) error {
-	errTimes, err := r.cache.captureErrTimes(ctx, mid)
+	errTimes, err := r.captureErrTimes(ctx, mid)
 	if err != nil {
 		return err
 	}
 	if errTimes > 3 {
 		_ = r.async.Do(ctx, func(c context.Context) {
-			_ = r.cache.delCaptureCode(c, mid)
+			_ = r.delCaptureCode(c, mid)
 		})
 		return ErrRealnameCaptureErrTooMany
 	}
-	serverCode, err := r.cache.captureCode(ctx, mid)
+	serverCode, err := r.captureCode(ctx, mid)
 	if err != nil {
 		return err
 	}
@@ -472,9 +474,9 @@ func (r *Repository) checkCapture(ctx context.Context, mid int64, capture int) e
 	if capture != serverCode {
 		_ = r.async.Do(ctx, func(c context.Context) {
 			if errTimes < 0 {
-				_ = r.cache.setCaptureErrTimes(c, mid, 0)
+				_ = r.setCaptureErrTimes(c, mid, 0)
 			}
-			_ = r.cache.incrCaptureErrTimes(c, mid)
+			_ = r.incrCaptureErrTimes(c, mid)
 		})
 		return ErrRealnameCaptureErr
 	}

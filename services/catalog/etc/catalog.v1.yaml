@@ -1,0 +1,43 @@
+Name: catalog.v1.rpc
+ListenOn: 0.0.0.0:8096
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: catalog.v1.rpc
+
+# 业务缓存连接（Work/Season/Episode 详情、分区树）。
+# 键名不能写 Redis：zrpc.RpcServerConf 内嵌了同名的 RedisKeyConf 字段，
+# 同名会让 go-zero 加载配置时报 "conflict key redis"。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL 主库 DSN（仅本地示例，生产从配置中心/Secret 注入）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_catalog?charset=utf8mb4&parseTime=true&loc=Local
+
+# 跨服务前置校验客户端（AGENTS.md §5/§8）。
+# Key 必须与下游服务的 Name 一致：rights.v1.rpc、asset.v1.rpc。
+# Timeout 是单次调用上限（毫秒）；超时按“校验器不可用”处理并拒绝上架。
+RightsRPC:
+  Timeout: 2000
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: rights.v1.rpc
+
+AssetRPC:
+  Timeout: 2000
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: asset.v1.rpc
+
+# PublishEpisode 请求未带 region 时的兜底地区代码（版权窗口按地区授予）。
+# 单地区部署可保留 CN；多地区部署应由运营入口逐次显式传 region，
+# 留空且请求不带 region 时返回 catalog: region is required，拒绝上架。
+DefaultRegion: CN
+
+# 灰度/回滚开关：默认全部为 false（严格校验，rights/asset 不可用即拒绝）。
+# 仅在下游故障演练或紧急回滚时置 true，会在日志里留下 Error 级“已跳过校验”记录。
+# DisableRightsCheck: false
+# DisableAssetCheck: false

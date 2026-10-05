@@ -1,0 +1,135 @@
+syntax = "proto3";
+
+package transcode.v1;
+
+option go_package = "go-video/services/transcode/rpc";
+
+// transcode 服务负责转码任务和播放版本管理。
+// 依据 AGENTS.md §5，transcode 拥有"转码任务和播放版本"数据；
+// 依据 §8，转码完成才能让稿件进入 READY_FOR_REVIEW，但本服务不直接写稿件状态。
+// 本期 SubmitTask 为占位实现：仅创建 PENDING 任务，不调用 FFmpeg；
+// 实际转码由独立 Worker 消费 MQ 拉起 FFmpeg（本期不实现 Worker）。
+
+// 转码任务状态机：PENDING → PROCESSING → SUCCEEDED/FAILED
+enum TaskState {
+  TASK_STATE_UNSPECIFIED = 0; // 未指定
+  TASK_STATE_PENDING = 1;     // 待处理（任务已创建，等待 Worker 拉起）
+  TASK_STATE_PROCESSING = 2; // 处理中（Worker 已开始转码）
+  TASK_STATE_SUCCEEDED = 3;   // 成功（转码完成，可推进稿件状态机）
+  TASK_STATE_FAILED = 4;      // 失败（终态，需重试或人工介入）
+}
+
+// 创建转码任务请求
+message SubmitTaskReq {
+  int64 asset_id = 1;       // 媒资 ID（由 asset 服务分配）
+  int64 template_id = 2;    // 转码模板 ID
+  string input_bucket = 3;  // 输入对象存储桶
+  string input_key = 4;     // 输入对象 key
+  string output_bucket = 5; // 输出对象存储桶
+  string output_key = 6;    // 输出对象 key
+}
+
+// 转码任务详情
+message TaskReply {
+  int64 task_id = 1;        // 任务 ID
+  int64 asset_id = 2;       // 媒资 ID
+  int64 template_id = 3;   // 转码模板 ID
+  string input_bucket = 4;  // 输入对象存储桶
+  string input_key = 5;     // 输入对象 key
+  string output_bucket = 6; // 输出对象存储桶
+  string output_key = 7;    // 输出对象 key
+  TaskState state = 8;      // 任务状态
+  int32 progress = 9;       // 进度（0-100）
+  int32 errno = 10;         // 错误码（失败时填）
+  string err_msg = 11;      // 错误信息（失败时填）
+  int64 ctime = 12;         // 创建时间（Unix 秒）
+  int64 mtime = 13;         // 修改时间（Unix 秒）
+}
+
+// 查询单个任务请求
+message TaskReq {
+  int64 task_id = 1; // 任务 ID
+}
+
+// 任务分页查询请求
+message ListReq {
+  int64 asset_id = 1;    // 按媒资 ID 过滤（<=0 表示不过滤）
+  TaskState state = 2;   // 按状态过滤（UNSPECIFIED 表示不过滤）
+  int32 pn = 3;          // 页码（从 1 开始）
+  int32 ps = 4;          // 每页大小（最大 50）
+}
+
+// 任务分页查询响应
+message TasksReply {
+  int32 total = 1;            // 总数
+  repeated TaskReply tasks = 2; // 任务列表
+}
+
+// Worker 上报进度请求
+message UpdateProgressReq {
+  int64 task_id = 1;   // 任务 ID
+  int32 progress = 2;  // 进度（0-100）
+  TaskState state = 3; // 目标状态（PROCESSING/SUCCEEDED/FAILED）
+  int32 errno = 4;     // 错误码（state=FAILED 时填）
+  string err_msg = 5;  // 错误信息（state=FAILED 时填）
+}
+
+// 转码模板详情
+message TemplateReply {
+  int64 template_id = 1;       // 模板 ID
+  string name = 2;             // 模板名
+  string codec = 3;            // 编码器（如 h264/hevc/aac）
+  int32 width = 4;             // 视频宽（0 表示自适应）
+  int32 height = 5;            // 视频高（0 表示自适应）
+  int32 bitrate = 6;           // 目标码率（kbps，0 表示自适应）
+  int32 fps = 7;               // 帧率（0 表示跟随源）
+  int32 segment_seconds = 8;   // HLS 分片时长（秒，0 表示不分片）
+}
+
+// 模板分页查询请求
+message ListTemplatesReq {
+  int32 pn = 1; // 页码（从 1 开始）
+  int32 ps = 2; // 每页大小（最大 50）
+}
+
+// 模板分页查询响应
+message TemplatesReply {
+  int32 total = 1;                  // 总数
+  repeated TemplateReply templates = 2; // 模板列表
+}
+
+// 查询单个模板请求
+message TemplateReq {
+  int64 template_id = 1; // 模板 ID
+}
+
+// 运营创建模板请求
+message CreateTemplateReq {
+  string name = 1;           // 模板名
+  string codec = 2;          // 编码器
+  int32 width = 3;           // 视频宽
+  int32 height = 4;          // 视频高
+  int32 bitrate = 5;         // 目标码率（kbps）
+  int32 fps = 6;             // 帧率
+  int32 segment_seconds = 7; // HLS 分片时长（秒）
+}
+
+// Transcode 转码任务与播放版本管理服务。
+// 依据 AGENTS.md §5，本服务只持有转码任务和模板；
+// 依据 §1，不实现任何商业化能力。
+service Transcode {
+  // 创建转码任务（PENDING 状态，本期占位不调用 FFmpeg）
+  rpc SubmitTask(SubmitTaskReq) returns (TaskReply);
+  // 查询任务详情
+  rpc GetTask(TaskReq) returns (TaskReply);
+  // 分页查询任务（按 asset_id 或 state 过滤）
+  rpc ListTasks(ListReq) returns (TasksReply);
+  // Worker 上报进度（校验状态机：PENDING→PROCESSING→SUCCEEDED/FAILED）
+  rpc UpdateProgress(UpdateProgressReq) returns (TaskReply);
+  // 分页查询模板列表
+  rpc ListTemplates(ListTemplatesReq) returns (TemplatesReply);
+  // 查询模板详情
+  rpc GetTemplate(TemplateReq) returns (TemplateReply);
+  // 运营创建模板
+  rpc CreateTemplate(CreateTemplateReq) returns (TemplateReply);
+}

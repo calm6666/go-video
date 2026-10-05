@@ -6,7 +6,7 @@ Etcd:
   Key: user-profile.v1.rpc
 Mode: dev
 
-Redis:
+CacheRedis:
   Host: 127.0.0.1:6379
   Type: node
 
@@ -25,7 +25,7 @@ Outbox:
   BatchSize: 100
   MaxAttempts: 10
 
-# account 服务 RPC 客户端：资料更新事件(user.profile_updated)通过
+# account 服务 RPC 客户端：资料更新事件(user.profile.updated)通过
 # account 的 DelCache RPC 失效 account 侧缓存（替代参考仓库 databus 通知）。
 AccountRPC:
   Etcd:

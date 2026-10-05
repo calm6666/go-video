@@ -1,0 +1,116 @@
+Name: livemedia.v1.rpc
+ListenOn: 0.0.0.0:8120
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: livemedia.v1.rpc
+
+# 日志与 trace_id：本地开发保持控制台输出，生产由配置中心覆盖
+Log:
+  ServiceName: livemedia.v1.rpc
+  Mode: console
+  Level: info
+
+# 业务缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，
+# 会触发 conflict key redis，导致启动即失败；全仓统一用 CacheRedis）。
+# 用途：任务详情短缓存、房间档位列表缓存、Worker 领取任务的互斥标记。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# 本服务自有库 DSN（go_video_live_media）。只允许访问 live_* 表，
+# 禁止直连 asset/video/transcode/live-room 的库表（AGENTS.md §5）。
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_live_media?charset=utf8mb4&parseTime=true&loc=Local
+
+# 下游 RPC 客户端配置位（zrpc + etcd 服务发现）。
+# 本轮（契约轮）ServiceContext 不构造这些客户端：调用点在 internal/repository 的
+# 显式 stub 里，接线步骤见 services/live-media/README.md「已知缺口」。
+AssetRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: asset.v1.rpc
+  NonBlock: true
+
+VideoRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: video.v1.rpc
+  NonBlock: true
+
+ModerationRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: moderation.v1.rpc
+  NonBlock: true
+
+# 领域参数：任务超时、分片默认值、分页上限、缓存 TTL。
+# 全部走配置，不在代码里写死；生产由配置中心覆盖。
+LiveMedia:
+  DefaultTranscodeTimeoutSeconds: 60   # 转码任务无心跳判超时（请求未指定时）
+  DefaultRecordTimeoutSeconds: 90      # 录制任务无心跳判超时
+  DefaultMaxAttempts: 3                # 转码任务默认重试上限
+  DefaultRecordSegmentSeconds: 10      # 录制分片默认时长（秒）
+  MaxRecordSegmentSeconds: 60          # 录制分片时长上限（秒）
+  MaxSegmentPageSize: 500              # ListRecordSegments 单次上限
+  DefaultSegmentPageSize: 200          # ListRecordSegments 默认页大小
+  MaxReplayGapSegments: 0              # 区间内允许的缺口切片数（超出直接拒绝提交回放）
+  ReplayTitleMaxLength: 80             # 回放标题 rune 上限（透传给 video 前本地夹取）
+  DefaultRetentionBatchLimit: 100      # 回收任务默认批量
+  MaxRetentionBatchLimit: 500          # 回收任务批量上限
+  MaxListPageSize: 50                  # pn/ps 分页的每页上限
+  TaskCacheTTLSeconds: 60              # 任务详情缓存
+  StreamOutputCacheTTLSeconds: 15      # 房间档位列表缓存（直播档位变化快）
+  TaskTimeoutSweepIntervalSeconds: 15  # 超时清扫 Worker 轮询间隔（本轮未启动）
+  TaskTimeoutSweepEnabled: false       # 本轮显式关闭：超时清扫依赖 logic 实现
+
+# 事件链路（Outbox 发布 + live.state.v1 消费）。
+# 发布侧已接线：internal/publisher 把 live_media_outbox 的待发行投递到下面 9 个 topic，
+# 循环复用 common/outbox（顺序、退避、判死都在引擎里）。
+# 消费侧已接线：internal/consumer 把 live.state.v1 的 Stopped 事件翻译成
+# logic.OfflineSessionOutputs（该场次在线档位整场下线 + 每档位一条 livemedia.stream.output.offline）。
+# **一个 Enabled 管两条链路**：发布循环与消费循环读同一个开关，
+# 因此两侧的配置键都必须完整（ValidateKafka / ValidatePublishKafka 都会在缺键时拒绝启动）。
+# Enabled 必须保持 false：默认构建没有链接 kq（要 `-tags livemedia_kafka`），
+# 置 true 后 NewSender/NewKqFactory 即失败、进程启动即失败。逐服务口径见 services/live-media/README.md。
+Kafka:
+  Brokers:
+  - 127.0.0.1:9092
+  Group: live-media.v1
+  # 只允许本服务有映射的 topic。livemedia.*.v1 是本服务自己的出站 topic，
+  # 订阅它们等于自己消费自己发的事件，因此 ValidateKafka 会直接拒绝。
+  SubscribeTopics:
+  - live.state.v1
+  # 逐事件 topic：Topic = event_type + ".v" + schema_version（common/eventenvelope.Topic），
+  # 不存在「一个服务一个 topic」的聚合写法。这 9 条必须与 model/live_media_outbox.go 的
+  # EventType* 常量派生的 topic **集合相等**（启动时由 ValidatePublishKafka 校验）：
+  # 少一条 → 该事件每轮投递都撞「没有发送通道」直到判死；多一条 → 白占一条写入通道。
+  # 新增事件类型必须同时改这里和 docs/api-and-events.md §5。
+  PublishTopics:
+  - livemedia.transcode.state.changed.v1
+  - livemedia.record.state.changed.v1
+  - livemedia.record.stopped.v1
+  - livemedia.record.gap.detected.v1
+  - livemedia.stream.output.online.v1
+  - livemedia.stream.output.offline.v1
+  - livemedia.replay.review.submitted.v1
+  - livemedia.replay.content.state.changed.v1
+  - livemedia.retention.finished.v1
+  Enabled: false
+  MaxRetries: 5                # 两侧共用：发布侧单事件累计尝试上限（达到即 state=2）；消费侧同一 event_id 的进程内尝试上限
+  RetryBackoffSec: 5           # 退避基数：第 n 次失败后等 5 * 2^(n-1) 秒
+  RetryMaxBackoffSec: 1800     # 退避上限（秒），不得小于基数
+  PollIntervalSec: 2           # 发布循环轮询间隔（进程启动时先立刻扫一轮）
+  BatchLimit: 100              # 单轮取到的到期事件数上限
+  SendTimeoutSec: 5            # 单条投递超时；超时按一次失败计入退避，不算已投递
+  # 以下 8 项只作用于消费循环（kq.NewQueue）；发送端 kq.NewPusher 读不到它们。
+  Offset: last                 # first 会重放保留窗口：重复断流事件由 MarkOfflineTx 的 state=在线 CAS 兜住
+  Conns: 1                     # 每个 topic 的 reader 连接数
+  Consumers: 2                 # 每条连接的拉取协程数
+  Processors: 4                # 每条连接的并发处理协程数
+  ForceCommit: false           # 失败不提交位点，让 broker 重投；置 true 会丢掉「重试没救回」的下线
+  Username:                    # SASL 用户名，生产由 Secret 注入（不得写进仓库）
+  Password:                    # SASL 口令，与 Username 成对配置，不得写进仓库
+  CaFile:                      # TLS 根证书路径，为空表示不启用 TLS；不可读时启动即失败

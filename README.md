@@ -1,6 +1,6 @@
 # Go-Video：面向视频社区的 go-zero 微服务项目
 
-> 当前仓库先建立可开发的单仓骨架和领域契约，业务实现按路线图逐步补齐。支持 Android、iOS、HarmonyOS、电脑客户端和管理后台 Web；不支持小程序，不实现会员、付费、广告和创作者分成。
+> 当前仓库先建立可开发的单仓骨架和领域契约，业务实现按路线图逐步补齐。支持 Android、iOS、HarmonyOS、电脑客户端和管理后台 Web；不支持小程序。会员、订单、支付/充值、投币和创作者分成已纳入本期范围（只走沙箱台账，不接真实支付渠道），广告投放、广告位分析和广告推荐仍在范围外——口径与理由见 [AGENTS.md](AGENTS.md) §1。
 
 ## 项目入口
 
@@ -12,16 +12,20 @@
 - [docs/operations.md](docs/operations.md)：配置、部署、监控、备份和故障处理。
 - [docs/roadmap.md](docs/roadmap.md)：按迭代阶段落地功能，避免一次性启动全部服务。
 - [docs/commands.md](docs/commands.md)：所有安装、goctl 生成、运行、测试、迁移、部署和排障命令；也是命令的唯一维护位置。
+- [docs/api/](docs/api/README.md)：逐接口清单，按域分组（终端面/运营面 HTTP 各一组文件 + 每个 RPC 服务一份契约文档）。
+- [postman/](postman/README.md)：与上面同一份契约派生的 Postman 集合（folder 按域分组）和本地环境变量。
 
 HTTP 响应统一规范见 [docs/api-and-events.md](docs/api-and-events.md)：所有接口返回 `code`、`message`、`data`、`ttl` 四字段。
 
 ## 当前仓库状态
 
-当前仓库提供 `gateway/`（拆分为 `gateway/app` 和 `gateway/admin`）、`services/`、`common/`、`api/`、`deploy/`、`scripts/`、`docs/` 的可开发骨架，以及各领域服务说明文件。`gateway/app`、`gateway/admin` 和 `account` 已有 goctl 生成的 HTTP 框架代码，其余服务暂保留目录和职责说明，不伪造已经完成的业务实现；每个服务的 `README.md` 标明职责、数据所有权和当前阶段。
+当前仓库提供 `gateway/`（拆分为 `gateway/app` 和 `gateway/admin`）、`services/`、`common/`、`api/`、`deploy/`、`scripts/`、`docs/` 的可开发骨架，以及各领域服务说明文件。`gateway/app`、`gateway/admin` 已有 goctl 生成的 HTTP 框架代码（分别为 198 和 313 条路由，按 `internal/handler/routes.go` 的
+`Method:` 条目数；admin 侧 313 = `AdminPermission` 保护 125 条 + 免鉴权读写 188 条），43 个领域服务都已落地 `rpc/*.proto` 契约、goctl RPC 生成代码、`model`、`etc/*.yaml`（含 `Validate()` 与配置加载用例）、可运行入口和 `deploy/migrations/` 迁移脚本（迁移在隔离实例 `127.0.0.1:3399` 逐个 `up` + `status` 复验为 `applied`；唯一例外是 2026-10-05 为事件链路新增的 `upload/000003` 与 `video/000004` 两个文件，仍是 `pending`，逐目录状态以 [deploy/migrations/README.md](deploy/migrations/README.md) 为权威）。
+**完成度并不齐平**：43 个服务目录的 `internal/logic` 已全部落地，不再有返回 `model.ErrNotImplemented` 的空桩，也不返回伪造成功的空 Reply（仍会返回该哨兵的只剩三处**显式降级**而非空桩：`recommend-rank` 的未接线特征源替身、`account` 在 user-profile client 未注入时的委托分支、`cron` registry 对空结果的防线）；测试覆盖的强度按服务差异很大，逐包的用例数与「哪些层没有单测」以各服务 README 的「测试覆盖」一节为准（2026-10-05 实测样例：`live-media/internal/logic` 12 个测试文件、`251/252` 顶层/子用例，`open-platform/internal/logic` 10 个文件、`147/338`）；全仓也**没有做过端到端联调**，MQ 侧只有「可编译 / 可 `go vet` / 该包单测通过」这一级证据，不能按「已在生产提供的服务」对待。逐服务进度、刻意不通过 HTTP 暴露的内部方法、以及跨服务契约缺口见 [docs/roadmap.md](docs/roadmap.md)。
 
 除业务逻辑、仓储实现、消费者、领域策略、迁移、事件 schema 和测试外，**所有服务目录中的 go-zero 框架代码必须由 goctl/protoc 生成或更新，禁止手写** handler、路由、types、ServiceContext、RPC client/server、`.pb.go` 和入口模板。修改 `.api`/`.proto` 后必须执行 [docs/commands.md](docs/commands.md) 中的增量更新命令。详见 [AGENTS.md](AGENTS.md)。
 
-> 本文是产品与技术架构基线，不是把所有模块一次性拆成微服务的施工清单。设计参考哔哩哔哩公开可见的产品形态：视频投稿、创作中心、分区与标签、评论/弹幕、动态、直播、番剧/电影、搜索、推荐和开放平台。本项目不实现会员、付费、广告和创作者分成；电影、电视剧只是内容目录中的一种，不应被建模成“普通用户上传后即可播放”。
+> 本文是产品与技术架构基线，不是把所有模块一次性拆成微服务的施工清单。设计参考哔哩哔哩公开可见的产品形态：视频投稿、创作中心、分区与标签、评论/弹幕、动态、直播、番剧/电影、搜索、推荐和开放平台。会员、订单、支付/充值（只走沙箱台账）、投币与创作者分成已在范围内（2026-09-22 修订，见 [AGENTS.md](AGENTS.md) §1）；广告投放、广告位分析与广告推荐仍不实现；电影、电视剧只是内容目录中的一种，不应被建模成“普通用户上传后即可播放”。
 
 ## 1. 结论与设计原则
 
@@ -300,13 +304,16 @@ Android / iOS / HarmonyOS / 电脑客户端 / 管理后台 Web / 开放平台
 
 | 主题 | 生产者 | 消费者 | 语义 |
 |---|---|---|---|
-| `media.task.v1` | upload/asset/transcode | transcode/content-fingerprint | 转码、截图、字幕、指纹 |
-| `content.published.v1` | video/catalog/rights | search-indexer/recommend-recall/spm/inbox | 稿件发布或下架 |
+| `media.task.v1` | upload（发布器已接线）/asset/transcode | transcode/content-fingerprint（两侧都无消费者实现） | 转码、截图、字幕、指纹 |
+| `content.published.v1` | video（发布器已接线）/catalog/rights | search-indexer/inbox（消费者已接线）、recommend/spm（无消费者实现） | 稿件发布或下架 |
 | `engagement.action.v1` | engagement/social-graph | event-collector/spm/recommend-recall/inbox | 赞、收藏、关注、分享 |
 | `moderation.result.v1` | moderation-orchestrator | video/catalog/comment/danmaku | 审核结论 |
 | `playback.heartbeat.v1` | playback | event-collector/spm | 播放进度和质量指标 |
 
 事件必须包含 `event_id`、`event_type`、`schema_version`、`occurred_at`、`trace_id`、`producer` 和业务主键；禁止把完整个人敏感信息直接放进公共 Topic。
+
+本表只是主题规划口径。**逐条的接线状态（哪条有生产者、哪条有消费者、挂在哪个构建标签上）以
+[docs/api-and-events.md §5](docs/api-and-events.md) 为准**，两处不一致时以该节与服务 README 为权威。
 
 ## 8. 项目目录结构（go-zero 规范）
 

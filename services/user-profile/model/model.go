@@ -230,9 +230,9 @@ const (
 const (
 	// EventProfileUpdated 资料更新事件：消费者为 account 服务的
 	// POST /account/cache/clear（参考仓库 databus 的 MemberService-AccountNotify 主题）。
-	EventProfileUpdated = "user.profile_updated"
+	EventProfileUpdated = "user.profile.updated"
 	// EventMoralNotice 节操阈值通知事件：消费者为 notification 服务（待接入）。
-	EventMoralNotice = "user.moral_notice"
+	EventMoralNotice = "user.moral.notice"
 )
 
 // Outbox 状态。

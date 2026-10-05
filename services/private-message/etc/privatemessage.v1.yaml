@@ -1,0 +1,62 @@
+Name: privatemessage.v1.rpc
+# 8150：批次 D1 分配给 private-message 的端口（8110 起已被阶段1-2 与批次 A/B/C 占用，
+# 本批次从 8150 起跳，避免与并行创建中的服务撞端口）。
+# 不能用 8080——那是 gateway/app 的 HTTP 监听端口。
+ListenOn: 0.0.0.0:8150
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: privatemessage.v1.rpc
+
+# 业务缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会触发 conflict key redis）
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL DSN（仅本地示例，生产从配置中心/Secret 注入）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_private_message?charset=utf8mb4&parseTime=true&loc=Local
+
+# 下游 RPC。三者都是反骚扰与审核门禁的判定真值来源：
+# 未配置时相关方法返回 model.Err*NotConfigured，绝不伪造「已放行」。
+SocialGraphRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: socialgraph.v1.rpc
+RiskControlRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: risk-control.v1.rpc
+ModerationRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: moderation.v1.rpc
+
+# 私信业务参数
+PrivateMessage:
+  PageSize: 20
+  MaxPageSize: 50
+  MaxTextLength: 2000
+  PreviewRunes: 30
+  # 站点级默认「仅我关注的人可发」，比「所有人」更保守
+  DefaultAllowFrom: 2
+  RejectStrangerByDefault: true
+  KeywordFilterEnabled: true
+  MachineReviewEnabled: true
+  MaxPerUserPerMinute: 20
+  MaxStrangerConversationsPerDay: 10
+  WithdrawWindowSeconds: 120
+  # 正文密文留存天数：到期清空 content_cipher、保留行与审计（0 只允许一次性调试实例）
+  MessageRetentionDays: 180
+  PurgeBatchSize: 500
+  PostQps: 400
+  PostBurst: 100
+
+# 正文加密与内容指纹：密钥材料只从 Secret/Vault 注入，示例配置必须留空（AGENTS.md §4）。
+# 留空时发送/读取路径返回 model.ErrCipherKeyMissing，不会退化成明文入库。
+Cipher:
+  KeyVersion: 1
+  DataKeyBase64: ""
+  HashPepper: ""

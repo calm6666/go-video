@@ -1,0 +1,493 @@
+syntax = "proto3";
+
+package featurestore.v1;
+
+option go_package = "go-video/services/feature-store/rpc";
+
+// feature-store：在线特征读写 + 特征定义/版本/回填的所有者。
+//
+// 硬边界（AGENTS.md §7、services/feature-store/README.md）
+//   * 不保存广告特征、支付特征、会员/订单/投币/分成特征。注册特征时
+//     FeatureSource 与 feature_key 都要过白名单校验，来源枚举里根本不提供这些语义，
+//     新增来源必须先评审契约（见 RegisterFeature 注释）。
+//   * 特征值只能由「上游计算链路」写入：spm 指标、离线模型产出、风控自有滑窗。
+//     本契约不提供任何「把排序结果写回特征」的方法。
+//   * privacy_level 是必填项且不可为空：未声明隐私级别的特征一律拒绝注册与写入。
+//
+// 数据所有权（AGENTS.md §5）
+//   * 本服务拥有 6 张自有表，库名 go_video_feature_store：
+//     feature_definition（特征定义与版本）、feature_value（特征值，含 TTL）、
+//     feature_active_version（每个 feature_key 对外的 ACTIVE 版本指针）、
+//     feature_version_switch（版本切换审计，只追加）、
+//     feature_backfill_job（回填任务与断点）、feature_write_receipt（批量写幂等回执）。
+//   * 跨服务只传主键与受控标识：mid/aid/zone_id 的十进制字符串、设备与 IP 的哈希摘要。
+//     明文手机号、身份证、原始 IP、明文设备号禁止出现在任何字段里。
+//   * spm 的行为指标、video 的稿件、risk-control 的名单都不在本库复制，
+//     本库只保存「加工后的特征值 + 定义 + 版本 + 回填任务」。
+//
+// 读链路与缓存策略
+//   * 主读 Redis（key 见 README「缓存」一节），DB 兜底；Redis 缺失或过期时回源
+//     feature_value 并按 Spm.BatchGetMetrics 的窗口口径判断是否仍然可用。
+//   * 任何降级都必须显式表达（FeatureDegradation），调用方据此决定是否降级到冷启动策略；
+//     服务绝不把「读不到」伪装成「值为 0」。
+//
+// 通用约定
+//   * 时间统一 Unix 秒；分页统一 pn（从 1 开始）/ ps（上限见方法注释）+ total。
+//   * 写接口全部要求 request_id 幂等键。批量读有硬上限（MaxBatchEntries / MaxBatchEntities），
+//     超上限直接报错而不是截断，避免调用方以为拿到了全集。
+
+// 特征主体类型。entity_id 是字符串，因为设备/IP 维度只有哈希摘要形态。
+enum EntityScope {
+  ENTITY_SCOPE_UNSPECIFIED = 0; // 未指定，任何请求出现即拒绝
+  ENTITY_SCOPE_MID = 1;         // 用户，entity_id = mid 十进制串
+  ENTITY_SCOPE_AID = 2;         // 稿件，entity_id = aid 十进制串
+  ENTITY_SCOPE_ZONE = 3;        // 分区，entity_id = zone_id 十进制串
+  ENTITY_SCOPE_DEVICE = 4;      // 设备，entity_id = 设备哈希摘要（禁止明文设备号）
+  ENTITY_SCOPE_QUERY = 5;       // 搜索词，entity_id = 归一化后的词
+  ENTITY_SCOPE_CATALOG_ITEM = 6; // 版权内容条目，entity_id = item_id 十进制串
+  ENTITY_SCOPE_IP_HASH = 7;     // IP 摘要，entity_id = ip_hash（禁止原始 IP）
+}
+
+// 特征值类型。注册后不可变更：类型漂移会让历史值无法解释。
+enum FeatureValueType {
+  FEATURE_VALUE_TYPE_UNSPECIFIED = 0;
+  FEATURE_VALUE_TYPE_INT64 = 1;
+  FEATURE_VALUE_TYPE_DOUBLE = 2;
+  FEATURE_VALUE_TYPE_BOOL = 3;
+  FEATURE_VALUE_TYPE_STRING = 4;
+  FEATURE_VALUE_TYPE_INT64_LIST = 5;   // 定长 ID 列表（如最近点击的 aid）
+  FEATURE_VALUE_TYPE_DOUBLE_LIST = 6;  // 定长数值向量（维度受定义约束，不引入外部向量库）
+}
+
+// 特征来源。隐私与范围双重约束：不存在 AD / PAYMENT / MEMBERSHIP 等来源。
+enum FeatureSource {
+  FEATURE_SOURCE_UNSPECIFIED = 0; // 未指定，拒绝
+  FEATURE_SOURCE_SPM_METRIC = 1;  // spm 指标投影（内容热度、完播率等）
+  FEATURE_SOURCE_SPM_INTEREST = 2; // spm 用户兴趣画像
+  FEATURE_SOURCE_SPM_RETENTION = 3; // spm 留存口径
+  FEATURE_SOURCE_OFFLINE_MODEL = 4; // 离线模型产出（经回填作业导入）
+  FEATURE_SOURCE_REALTIME_RULE = 5; // 本服务/上游实时规则滑窗（如风控滑窗计数）
+  FEATURE_SOURCE_STATIC_CONFIG = 6; // 运营静态配置（内容属性、分区先验等非行为数据）
+}
+
+// 隐私级别（必填）。数值越大越敏感，读写两侧的约束越严。
+enum PrivacyLevel {
+  PRIVACY_LEVEL_UNSPECIFIED = 0; // 未声明：RegisterFeature/WriteFeatures 一律拒绝
+  PRIVACY_LEVEL_PUBLIC_AGGREGATE = 1; // 全站或内容级聚合，不含个体：热度、完播率
+  PRIVACY_LEVEL_CONTENT_ATTRIBUTE = 2; // 内容属性派生，与个体身份无关
+  PRIVACY_LEVEL_PSEUDONYMOUS = 3;     // 与受控标识（设备哈希/IP 摘要）关联，可反推到设备
+  PRIVACY_LEVEL_USER_PROFILE = 4;     // 与 mid 关联的个体画像，最敏感：只允许白名单调用方读
+}
+
+// 降级原因。读接口的每条结果都必须带该字段，NONE 之外的值都要求调用方按冷启动处理。
+enum FeatureDegradation {
+  FEATURE_DEGRADATION_UNSPECIFIED = 0;
+  FEATURE_DEGRADATION_NONE = 1;          // 正常值
+  FEATURE_DEGRADATION_DEFAULT_VALUE = 2; // 无该主体特征，返回定义里的 default_value
+  FEATURE_DEGRADATION_PREVIOUS_VERSION = 3; // 目标版本无值，回退到上一个 ACTIVE 版本
+  FEATURE_DEGRADATION_EXPIRED = 4;        // 已超过 TTL，返回旧值仅供兜底，不可用于训练
+  FEATURE_DEGRADATION_SOURCE_UNAVAILABLE = 5; // 上游（DB/Redis/spm）不可用，返回上次快照或默认值
+  FEATURE_DEGRADATION_FEATURE_RETIRED = 6;     // 特征已下线，返回默认值
+}
+
+// 特征状态机：DRAFT → ACTIVE → RETIRED。RETIRED 不再接受写入，读侧返回默认值并标降级。
+enum FeatureState {
+  FEATURE_STATE_UNSPECIFIED = 0;
+  FEATURE_STATE_DRAFT = 1;
+  FEATURE_STATE_ACTIVE = 2;
+  FEATURE_STATE_RETIRED = 3;
+}
+
+// 回填作业状态机：PENDING → RUNNING → SUCCEEDED / FAILED / CANCELLED。
+enum BackfillState {
+  BACKFILL_STATE_UNSPECIFIED = 0;
+  BACKFILL_STATE_PENDING = 1;
+  BACKFILL_STATE_RUNNING = 2;
+  BACKFILL_STATE_SUCCEEDED = 3;
+  BACKFILL_STATE_FAILED = 4;
+  BACKFILL_STATE_CANCELLED = 5;
+}
+
+// 空响应
+message EmptyReply {}
+
+// --- 特征定义 ---
+
+message FeatureDefinition {
+  string feature_key = 1;      // 特征键，如 u_play_finish_rate_7d
+  int32 version = 2;           // 版本号，>= 1；同一 key 可多版本共存
+  string name = 3;             // 展示名
+  FeatureValueType value_type = 4;   // 值类型，注册后不可变
+  EntityScope entity_scope = 5;      // 主体类型，注册后不可变
+  FeatureSource source = 6;          // 来源，注册后不可变
+  PrivacyLevel privacy_level = 7;    // 隐私级别，必填且不可为 UNSPECIFIED；可经审计提升/降低
+  int64 window_seconds = 8;          // 统计时间窗口（秒），0 = 无窗口（静态属性）
+  int64 ttl_seconds = 9;             // 值存活时间（秒），<=0 视为「未声明 TTL」并拒绝注册
+  string default_value = 10;         // 缺失降级用的默认值（按 value_type 序列化的字符串形态）
+  int32 dimension = 11;              // 列表/向量类特征的元素个数上限，标量类填 0
+  FeatureState state = 12;
+  string description = 13;     // 口径说明：为什么存在、怎么算
+  string change_note = 14;     // 本版本的变更说明
+  string created_by = 15;
+  int64 ctime = 16;
+  int64 mtime = 17;
+}
+
+message RegisterFeatureReq {
+  // 新增特征版本。(feature_key, version) 已存在时：定义完全一致则幂等返回，
+  // 任一不可变字段（value_type/entity_scope/source/window_seconds/dimension）不同则
+  // 返回 ErrFeatureDefinitionImmutable。已有版本永不原地改写。
+  FeatureDefinition definition = 1; // 必填
+  string operator = 2;              // 必填（登记人，admin:<id> 或 system:<svc>）
+  string request_id = 3;            // 幂等键，必填
+}
+
+message RegisterFeatureReply {
+  bool created = 1;      // true = 新增了版本
+  bool reused = 2;       // true = request_id 命中已有请求
+  FeatureDefinition definition = 3;
+}
+
+message UpdateFeatureStateReq {
+  string feature_key = 1;    // 必填
+  int32 version = 2;         // 必填
+  FeatureState state = 3;    // 目标状态
+  string operator = 4;       // 必填
+  string reason = 5;         // 必填
+  string request_id = 6;     // 幂等键，必填
+}
+
+message UpdateFeatureStateReply {
+  FeatureDefinition definition = 1;
+  bool reused = 2;
+}
+
+message UpdateFeaturePrivacyReq {
+  // 隐私级别调整是独立入口：它不改变值语义，但改变谁能读，必须单独留痕。
+  string feature_key = 1;        // 必填
+  int32 version = 2;             // 必填
+  PrivacyLevel privacy_level = 3; // 必填，不允许 UNSPECIFIED
+  string operator = 4;
+  string reason = 5;
+  string request_id = 6;
+}
+
+message UpdateFeaturePrivacyReply {
+  FeatureDefinition definition = 1;
+  bool reused = 2;
+}
+
+message GetFeatureDefinitionReq {
+  string feature_key = 1; // 必填
+  int32 version = 2;      // 0 = 当前 ACTIVE 版本
+}
+
+message GetFeatureDefinitionReply {
+  FeatureDefinition definition = 1;
+  bool found = 2;
+}
+
+message ListFeatureDefinitionsReq {
+  string feature_key_prefix = 1; // 空 = 不限
+  EntityScope entity_scope = 2;  // UNSPECIFIED = 不限
+  FeatureSource source = 3;      // UNSPECIFIED = 不限
+  FeatureState state = 4;        // UNSPECIFIED = 不限
+  PrivacyLevel max_privacy_level = 5; // 未填 = 不限；调用方按自身授权收敛
+  int32 pn = 6;
+  int32 ps = 7;                  // 上限 100
+}
+
+message ListFeatureDefinitionsReply {
+  repeated FeatureDefinition definitions = 1;
+  int64 total = 2;
+}
+
+// --- 特征值 ---
+
+// FeatureValue 承载一个特征值。必须按 value_type 填充对应字段，多余填充视为格式错误。
+message FeatureValue {
+  FeatureValueType value_type = 1;
+  int64 int64_value = 2;
+  double double_value = 3;
+  bool bool_value = 4;
+  string string_value = 5;
+  repeated int64 int64_list = 6;
+  repeated double double_list = 7;
+}
+
+message EntityRef {
+  EntityScope entity_scope = 1; // 必填
+  string entity_id = 2;         // 必填：主键十进制串或受控哈希摘要
+}
+
+message FeatureRef {
+  string feature_key = 1; // 必填
+  int32 version = 2;      // 0 = 当前 ACTIVE 版本
+}
+
+message GetFeatureReq {
+  FeatureRef feature = 1;   // 必填
+  EntityRef entity = 2;     // 必填
+  bool allow_stale = 3;     // true = TTL 过期时仍返回旧值并标 EXPIRED；默认 false
+}
+
+message FeatureEntry {
+  FeatureRef feature = 1;
+  EntityRef entity = 2;
+  FeatureValue value = 3;
+  int32 resolved_version = 4;        // 实际返回的版本（可能与请求不同，见 degradation）
+  FeatureDegradation degradation = 5; // 必有值；NONE 表示正常
+  int64 event_time = 6;              // 该值的产出时间（Unix 秒）
+  int64 expire_at = 7;               // TTL 到期时间（Unix 秒），0 = 未设
+  string source_metric_key = 8;      // 上游口径追溯：来自 spm 时是 "<metric_key>@v<n>"
+  int64 ttl_seconds = 9;             // 定义里的 TTL，便于调用方判断新鲜度
+}
+
+message GetFeatureReply {
+  // entry 一定存在：找不到时返回降级条目（default/previous_version），
+  // 由 degradation 表达真实情况，绝不返回空 reply 让调用方猜。
+  FeatureEntry entry = 1;
+  bool found = 2; // false 表示只能给默认值级别的降级
+}
+
+message BatchGetFeaturesReq {
+  // 交叉读：feature × entity 的笛卡尔积，条目数上限 Spm 风格的硬限制（见 README）。
+  repeated FeatureRef features = 1; // 最多 50
+  repeated EntityRef entities = 2;  // 最多 20，且 entity_scope 必须与 feature 定义的 scope 匹配
+  bool allow_stale = 3;
+}
+
+message BatchGetFeaturesReply {
+  repeated FeatureEntry entries = 1; // 缺失项以降级条目补齐，调用方可按 feature_key+entity_id 索引
+  int32 requested = 2;               // 请求的笛卡尔积条目数
+  int32 degraded = 3;                // 其中降级条目数
+}
+
+message FeatureWrite {
+  FeatureRef feature = 1;
+  EntityRef entity = 2;
+  FeatureValue value = 3;
+  int64 event_time = 4;   // 该特征值的产出时间（Unix 秒），0 = 服务端当前时间
+  string source_metric_key = 5; // 上游口径追溯，来自 spm 时必填 "<metric_key>@v<n>"
+}
+
+message WriteFeaturesReq {
+  // 批量写：整批按 request_id 幂等。命中已完成的 request_id 时不重复写，
+  // 返回首次结果（reused=true）。逐行结果在 results 里，格式/授权错误不会中断整批。
+  repeated FeatureWrite writes = 1; // 单次上限 500 行
+  FeatureSource writer = 2;         // 写入方身份，必须与特征定义的 source 一致或为受控系统
+  string request_id = 3;            // 幂等键，必填
+  string operator = 4;              // 写入者（system:<svc> / offline-job:<id>）
+}
+
+message WriteFeaturesReply {
+  message RowResult {
+    string feature_key = 1;
+    string entity_id = 2;
+    bool ok = 3;
+    string error = 4; // 哨兵错误的短码，不含 SQL 与特征值原文
+  }
+  int32 written = 1;
+  int32 rejected = 2;
+  repeated RowResult results = 3;
+  bool reused = 4;
+}
+
+// --- 版本切换 ---
+
+message SwitchFeatureVersionReq {
+  // 原子切换某个 feature_key 对外提供读的版本：ACTIVE 版本指针从 from 移到 to。
+  // expected_from_version 是乐观并发控制：与服务端当前值不一致时失败，不静默覆盖。
+  string feature_key = 1;         // 必填
+  int32 from_version = 2;         // 必填
+  int32 to_version = 3;           // 必填，目标版本必须已 ACTIVE 且不可变字段与 from 一致
+  int32 expected_from_version = 4; // 乐观校验；0 = 不校验（仅回填作业内部使用）
+  string operator = 5;            // 必填
+  string reason = 6;              // 必填：切换依据（离线评估结论、回滚单号）
+  string request_id = 7;          // 幂等键，必填
+}
+
+message SwitchFeatureVersionReply {
+  bool switched = 1;
+  bool reused = 2;
+  int32 active_version = 3; // 切换后对外生效的版本
+  int64 switch_id = 4;
+}
+
+message ListVersionSwitchesReq {
+  string feature_key = 1; // 空 = 全部
+  int64 since = 2;        // 0 = 不限
+  int32 pn = 3;
+  int32 ps = 4;           // 上限 100
+}
+
+message ListVersionSwitchesReply {
+  message SwitchRecord {
+    int64 switch_id = 1;
+    string feature_key = 2;
+    int32 from_version = 3;
+    int32 to_version = 4;
+    string operator = 5;
+    string reason = 6;
+    string request_id = 7;
+    int64 ctime = 8;
+  }
+  repeated SwitchRecord items = 1;
+  int64 total = 2;
+}
+
+// --- 回填任务 ---
+
+message SubmitBackfillJobReq {
+  // 为某个特征版本补历史值。source 说明从哪里取数：
+  // 离线快照走「可替换的分析存储接口」（当前为 stub，见 README「契约缺口」）。
+  string feature_key = 1;    // 必填
+  int32 version = 2;         // 必填，目标版本必须处于 DRAFT（回填完成后才允许切 ACTIVE）
+  EntityScope entity_scope = 3; // 必填
+  repeated string entity_ids = 4; // 空 = 全量扫描；显式列表时上限 1000
+  int64 window_from = 5;     // 回填数据的时间范围起点（Unix 秒）
+  int64 window_to = 6;       // 0 = 当前时间
+  FeatureSource source = 7;  // 取数来源，必须与特征定义一致
+  bool auto_switch = 8;      // true = 回填成功后自动切 ACTIVE（要求 from_version 唯一确定）
+  int32 from_version = 9;    // auto_switch 时的乐观校验基线，0 = 不校验
+  string request_id = 10;    // 幂等键，必填
+  string operator = 11;      // 必填
+  string reason = 12;        // 必填
+}
+
+message SubmitBackfillJobReply {
+  int64 job_id = 1;
+  bool reused = 2;
+  BackfillJob job = 3;
+}
+
+message BackfillJob {
+  int64 job_id = 1;
+  string feature_key = 2;
+  int32 version = 3;
+  EntityScope entity_scope = 4;
+  FeatureSource source = 5;
+  BackfillState state = 6;
+  int64 window_from = 7;
+  int64 window_to = 8;
+  int64 entities_total = 9;  // 计划处理主体数，扫描前为 0
+  int64 entities_done = 10;
+  int64 entities_failed = 11;
+  int64 cursor_entity_id = 12; // 断点续跑的游标（按主键升序）
+  bool auto_switch = 13;
+  string request_id = 14;
+  string operator = 15;
+  string reason = 16;
+  string last_error = 17; // 截断保存，不含 SQL 与特征值原文
+  int64 ctime = 18;
+  int64 mtime = 19;
+  int64 finished_at = 20;
+}
+
+message GetBackfillJobReq {
+  int64 job_id = 1;      // 与 request_id 二选一
+  string request_id = 2;
+}
+
+message GetBackfillJobReply {
+  BackfillJob job = 1;
+  bool found = 2;
+}
+
+message ListBackfillJobsReq {
+  string feature_key = 1;    // 空 = 全部
+  BackfillState state = 2;   // UNSPECIFIED = 全部
+  int64 since = 3;
+  int32 pn = 4;
+  int32 ps = 5;              // 上限 100
+}
+
+message ListBackfillJobsReply {
+  repeated BackfillJob jobs = 1;
+  int64 total = 2;
+}
+
+// --- 生命周期与隐私 ---
+
+message PurgeExpiredReq {
+  // TTL 过期值清理，由 services/cron 周期调用（本服务不写别人的表，别人也不能写本表）。
+  int32 limit = 1;        // 单次清理行数上限，最大 5000
+  int64 before = 2;       // 只清 expire_at < before 的行；0 = 当前时间
+  string request_id = 3;  // 幂等键，必填（同一 request_id 重放返回首次结果）
+  string operator = 4;    // 必填
+}
+
+message PurgeExpiredReply {
+  int32 purged = 1;      // 本次删除行数
+  int64 remaining = 2;   // 估计的剩余过期行数（用于收敛判断，允许近似）
+  bool reused = 3;
+}
+
+message EraseEntityFeaturesReq {
+  // 隐私删除：抹掉某个主体的全部个体特征值（保留定义与审计）。
+  // 高隐私级别特征（PRIVACY_LEVEL_USER_PROFILE / PSEUDONYMOUS）只允许受控调用方触发。
+  EntityRef entity = 1;      // 必填
+  PrivacyLevel min_privacy_level = 2; // 只删 >= 该级别的特征；未填 = 全部个体特征
+  string operator = 3;       // 必填（隐私工单执行者）
+  string reason = 4;         // 必填（工单号）
+  string request_id = 5;     // 幂等键，必填
+}
+
+message EraseEntityFeaturesReply {
+  int32 erased_rows = 1;
+  int32 features_touched = 2;
+  bool reused = 3;
+}
+
+message ListEntityFeaturesReq {
+  // 主体维度的特征导出（隐私自助查询/擦除前核对用）。只读，分页有上限。
+  EntityRef entity = 1;        // 必填
+  PrivacyLevel min_privacy_level = 2; // 未填 = 全部
+  int32 pn = 3;
+  int32 ps = 4;                // 上限 100
+}
+
+message ListEntityFeaturesReply {
+  repeated FeatureEntry entries = 1;
+  int64 total = 2;
+}
+
+// FeatureStore 在线特征读写、版本与回填服务。
+service FeatureStore {
+  // 注册特征版本（privacy_level 必填，不可变字段命中冲突时拒绝）
+  rpc RegisterFeature(RegisterFeatureReq) returns (RegisterFeatureReply);
+  // 变更特征状态（DRAFT/ACTIVE/RETIRED）
+  rpc UpdateFeatureState(UpdateFeatureStateReq) returns (UpdateFeatureStateReply);
+  // 调整隐私级别（独立入口，单独留痕）
+  rpc UpdateFeaturePrivacy(UpdateFeaturePrivacyReq) returns (UpdateFeaturePrivacyReply);
+  // 查询单个特征定义
+  rpc GetFeatureDefinition(GetFeatureDefinitionReq) returns (GetFeatureDefinitionReply);
+  // 特征定义列表（分页、按 scope/source/state/隐私级别过滤）
+  rpc ListFeatureDefinitions(ListFeatureDefinitionsReq) returns (ListFeatureDefinitionsReply);
+
+  // 批量写入特征值（request_id 整批幂等，逐行返回结果）
+  rpc WriteFeatures(WriteFeaturesReq) returns (WriteFeaturesReply);
+  // 读取单个特征值（缺失必降级，降级必须显式表达）
+  rpc GetFeature(GetFeatureReq) returns (GetFeatureReply);
+  // 批量读取（feature × entity 笛卡尔积，有硬上限）
+  rpc BatchGetFeatures(BatchGetFeaturesReq) returns (BatchGetFeaturesReply);
+
+  // 切换对外生效的版本（乐观校验 + 审计留痕）
+  rpc SwitchFeatureVersion(SwitchFeatureVersionReq) returns (SwitchFeatureVersionReply);
+  // 版本切换审计列表
+  rpc ListVersionSwitches(ListVersionSwitchesReq) returns (ListVersionSwitchesReply);
+
+  // 提交回填任务（request_id 幂等）
+  rpc SubmitBackfillJob(SubmitBackfillJobReq) returns (SubmitBackfillJobReply);
+  // 查询回填任务（按 job_id 或 request_id）
+  rpc GetBackfillJob(GetBackfillJobReq) returns (GetBackfillJobReply);
+  // 回填任务列表（分页）
+  rpc ListBackfillJobs(ListBackfillJobsReq) returns (ListBackfillJobsReply);
+
+  // 清理 TTL 过期值（cron 调用）
+  rpc PurgeExpired(PurgeExpiredReq) returns (PurgeExpiredReply);
+  // 按主体删除个体特征（隐私工单执行）
+  rpc EraseEntityFeatures(EraseEntityFeaturesReq) returns (EraseEntityFeaturesReply);
+  // 按主体导出特征（隐私核对）
+  rpc ListEntityFeatures(ListEntityFeaturesReq) returns (ListEntityFeaturesReply);
+}

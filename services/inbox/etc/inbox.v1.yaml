@@ -1,0 +1,54 @@
+Name: inbox.v1.rpc
+# 8104：阶段1-2 批次分配给 inbox 的端口（8102 playback、8103 danmaku、8105 risk-control）。
+# 不能用 8080——那是 gateway/app 的 HTTP 监听端口。
+ListenOn: 0.0.0.0:8104
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: inbox.v1.rpc
+
+# 业务缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会触发 conflict key redis）
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL 主库 DSN（仅本地示例，生产从配置中心/Secret 注入）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_inbox?charset=utf8mb4&parseTime=true&loc=Local
+
+# Kafka 事件消费。Enabled=false 时本进程不启动消费者，站内信只来自 SendSystemMessage RPC；
+# Enabled=true 时要求链接了 Kafka 运行时（go build -tags inbox_kafka），否则启动即失败，
+# 不会静默不消费。原因见 services/inbox/README.md「消费者启动方式」。
+Kafka:
+  Enabled: false
+  # 退避重投清扫器只依赖 MySQL，不依赖 MQ，默认随进程启动
+  RetrySweeperEnabled: true
+  Brokers:
+  - 127.0.0.1:9092
+  Group: inbox.v1.consumer
+  # Topics 为空时使用 config.DefaultTopics（engagement.action.v1 / content.published.v1 / live.state.v1）
+  Topics:
+  - engagement.action.v1
+  - content.published.v1
+  - live.state.v1
+  Offset: last
+  Conns: 1
+  Consumers: 2
+  Processors: 4
+  # false：处理失败时不提交位点，由 Kafka 与 inbox_consumer_offset 的退避窗口共同兜底
+  ForceCommit: false
+  MaxAttempts: 8
+  RetryBaseSeconds: 10
+  RetryMaxSeconds: 1800
+  StaleProcessingSeconds: 300
+  # SASL 与 TLS 只在生产启用，密钥走环境变量/Secret，示例配置必须留空（AGENTS.md §4）
+  Username: ""
+  Password: ""
+  CaFile: ""
+
+# 站内信业务参数
+Inbox:
+  PageSize: 20
+  MaxPageSize: 50
+  MaxRecipients: 500
+  UnreadCacheSeconds: 1800
+  MaxContentBytes: 4096

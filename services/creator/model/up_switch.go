@@ -21,7 +21,10 @@ type UpSwitchModel interface {
 	// FindOne 查询开关状态；不存在返回 nil（调用方按默认关闭处理）。
 	FindOne(ctx context.Context, mid int64, from int32) (*UpSwitch, error)
 	// Upsert 新增或更新开关状态（INSERT ... ON DUPLICATE KEY UPDATE）。
-	Upsert(ctx context.Context, mid, from, state int32) error
+	// mid 与 FindOne 同为 int64：表列是 BIGINT UNSIGNED
+	// （deploy/migrations/creator/000004_create_up_switch.sql:16）。
+	// 原签名是 int32，会把 mid > 2^31-1 的号截断成另一个号，写出一条不属于请求方的开关行。
+	Upsert(ctx context.Context, mid int64, from, state int32) error
 }
 
 type defaultUpSwitchModel struct {
@@ -45,7 +48,7 @@ func (m *defaultUpSwitchModel) FindOne(ctx context.Context, mid int64, from int3
 	return &s, nil
 }
 
-func (m *defaultUpSwitchModel) Upsert(ctx context.Context, mid, from, state int32) error {
+func (m *defaultUpSwitchModel) Upsert(ctx context.Context, mid int64, from, state int32) error {
 	query := "INSERT INTO up_switch (mid, `from`, state) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE state = VALUES(state)"
 	_, err := m.conn.ExecCtx(ctx, query, mid, from, state)
 	return err

@@ -1,0 +1,81 @@
+Name: operation.v1.rpc
+ListenOn: 0.0.0.0:8109
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: operation.v1.rpc
+Mode: dev
+
+# 业务缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会触发 conflict key redis）
+# 承载权限快照（op:rbac:*）、运营配置（op:cfg:*）、菜单树（op:menu:*）、后台会话（op:sess:*）。
+# 缓存不可用时服务降级直连 MySQL，判定结果不变（只影响时延）。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# 本服务自有库 DSN（库名 go_video_operation，表清单见 deploy/migrations/operation）。
+# 严禁指向其它服务的库：稿件/目录/版权/审核/用户数据一律走下游 RPC（AGENTS.md §5）。
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_operation?charset=utf8mb4&parseTime=true&loc=Local
+
+# 后台会话（token）。TokenSecretRef 写环境变量名，真实密钥由 Secret/Vault 注入。
+# 该环境变量未注入时 AdminLogin 直接返回「admin token signing secret missing」，
+# 不会签发无摘要段的弱 token（本地格式校验这条防线不允许被配置疏漏绕过）。
+AdminSession:
+  TokenTTL: 7200
+  TokenSecretRef: OPERATION_ADMIN_TOKEN_SECRET
+  Issuer: op
+
+# 登录防爆破：连续失败 MaxFail 次锁定 LockMinutes 分钟；锁定期到期后允许重试。
+Login:
+  MaxFail: 5
+  LockMinutes: 15
+
+# 缓存 TTL 与任务推进批量。
+# PermissionTTL 同时是 gateway/admin 缓存权限判定结果的秒数上限：
+# 授权关系写入会立即失效服务端快照，网关侧最多再延迟该秒数。
+Cache:
+  PermissionTTL: 60
+  ConfigTTL: 60
+  MenuTTL: 300
+  RunSteps: 100
+
+# --- 下游领域服务客户端（全部 optional；留空即不构造客户端）---
+# 管理任务只通过这些公开 RPC 完成业务写入，本服务不直连它们的库表。
+# 未配置时对应步骤标记 failed 并在 err_msg 说明「downstream not configured」。
+
+# video：稿件下架（batch_offline_submission → TransitionState(OFFLINE)）
+VideoRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: video.v1.rpc
+
+# catalog：目录集下架（batch_offline_episode → OfflineEpisode）
+CatalogRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: catalog.v1.rpc
+
+# rights：版权窗口提前失效（batch_expire_window → ExpireWindow）
+RightsRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: rights.v1.rpc
+
+# moderation-orchestrator：申诉处理（batch_reject_appeal → ProcessAppeal）
+ModerationRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: moderation.v1.rpc
+
+# account：仅用于管理员登录的二次校验码通道（CheckCapture）。
+# 管理员账号与终端用户账号完全隔离：不读写 account 的用户表，
+# 后台 token（adm_ 前缀 + op_admin_session）与用户 token 互不通用。
+AccountRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: account.v1.rpc

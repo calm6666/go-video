@@ -1,0 +1,185 @@
+syntax = "proto3";
+
+package asset.v1;
+
+option go_package = "go-video/services/asset/rpc";
+
+// 媒资状态机。依据 AGENTS.md §8：
+//   UPLOADED → SCANNED → TRANSCODED
+// asset 不负责稿件发布状态（PUBLISHED 由 video 服务推进）。
+enum AssetState {
+  STATE_UNSPECIFIED = 0; // 未指定
+  STATE_UPLOADED = 1;    // 上传完成，待扫描
+  STATE_SCANNED = 2;     // 文件扫描与探测完成
+  STATE_TRANSCODED = 3;  // 转码完成，可投入发布
+  STATE_FAILED = 4;      // 处理失败
+}
+
+// 媒资元数据
+message AssetReply {
+  int64 asset_id = 1;     // 媒资 ID
+  int64 upload_id = 2;    // 关联 upload ID
+  int64 mid = 3;          // 上传用户 ID
+  string bucket = 4;      // 对象存储桶
+  string object_key = 5;  // 对象键
+  int64 size = 6;          // 文件大小（字节）
+  string md5 = 7;          // 文件 MD5
+  int64 duration = 8;      // 时长（毫秒，transcode 回填写入）
+  int32 width = 9;         // 视频宽（transcode 回填写入）
+  int32 height = 10;       // 视频高（transcode 回填写入）
+  string codec = 11;       // 编码（transcode 回填写入）
+  AssetState state = 12;   // 当前状态
+  int64 ctime = 13;        // 创建时间（Unix 秒）
+  int64 mtime = 14;        // 修改时间（Unix 秒）
+}
+
+// 空响应
+message EmptyReply {}
+
+// --- 媒资登记与查询 ---
+
+// RegisterAsset：upload 完成后由 upload 服务调用，
+// 创建 asset_meta 记录，关联 upload_id 与 OSS 路径；返回 asset_id。
+// 本期不立即触发转码，转码由 video 服务直接调用 transcode 触发（占位）。
+message RegisterAssetReq {
+  int64 upload_id = 1;    // upload 服务返回的上传 ID
+  int64 mid = 2;          // 上传用户 ID
+  string bucket = 3;      // 对象存储桶
+  string object_key = 4;  // 对象键
+  int64 size = 5;          // 文件大小（字节）
+  string md5 = 6;          // 文件 MD5
+  string ip = 7;           // 调用方 IP
+}
+
+// 单个媒资查询
+message AssetReq {
+  int64 asset_id = 1; // 媒资 ID
+  string ip = 2;       // 调用方 IP
+}
+
+// 分页列表查询：可按 mid 或 state 过滤
+message ListReq {
+  int64 mid = 1;              // 按上传用户过滤（0 表示不过滤）
+  AssetState state = 2;       // 按状态过滤（0 表示不过滤）
+  int32 pn = 3;               // 页码（从 1 开始）
+  int32 ps = 4;               // 每页大小（最大 50）
+  string ip = 5;              // 调用方 IP
+}
+
+message AssetsReply {
+  int32 total = 1;             // 总数
+  repeated AssetReply items = 2; // 媒资列表
+}
+
+// 元数据更新：由 transcode 完成回调更新 duration/width/height/codec
+message UpdateAssetReq {
+  int64 asset_id = 1;  // 媒资 ID
+  int64 duration = 2;  // 时长（毫秒）
+  int32 width = 3;     // 视频宽
+  int32 height = 4;    // 视频高
+  string codec = 5;    // 编码
+  string ip = 6;       // 调用方 IP
+}
+
+// 状态推进
+message TransitionReq {
+  int64 asset_id = 1;        // 媒资 ID
+  AssetState to_state = 2;   // 目标状态
+  string ip = 3;             // 调用方 IP
+}
+
+// --- 封面 ---
+
+message CoverReply {
+  int64 cover_id = 1;    // 封面 ID
+  int64 asset_id = 2;   // 关联媒资 ID
+  string bucket = 3;     // 对象存储桶
+  string object_key = 4; // 对象键
+  int32 width = 5;      // 宽
+  int32 height = 6;     // 高
+  int64 ctime = 7;      // 创建时间（Unix 秒）
+}
+
+message AddCoverReq {
+  int64 asset_id = 1;   // 关联媒资 ID
+  string bucket = 2;     // 对象存储桶
+  string object_key = 3; // 对象键
+  int32 width = 4;       // 宽
+  int32 height = 5;      // 高
+  string ip = 6;         // 调用方 IP
+}
+
+message CoversReply {
+  repeated CoverReply items = 1; // 封面列表
+}
+
+// --- 字幕 ---
+
+message SubtitleReply {
+  int64 sub_id = 1;     // 字幕 ID
+  int64 asset_id = 2;   // 关联媒资 ID
+  string lang = 3;      // 语言代码（如 zh-CN、en-US）
+  string bucket = 4;    // 对象存储桶
+  string object_key = 5; // 对象键
+  int64 ctime = 6;      // 创建时间（Unix 秒）
+}
+
+message AddSubtitleReq {
+  int64 asset_id = 1;   // 关联媒资 ID
+  string lang = 2;       // 语言代码
+  string bucket = 3;     // 对象存储桶
+  string object_key = 4; // 对象键
+  string ip = 5;         // 调用方 IP
+}
+
+message SubtitlesReply {
+  repeated SubtitleReply items = 1; // 字幕列表
+}
+
+// --- 截图 ---
+
+message ScreenshotReply {
+  int64 shot_id = 1;    // 截图 ID
+  int64 asset_id = 2;   // 关联媒资 ID
+  string bucket = 3;    // 对象存储桶
+  string object_key = 4; // 对象键
+  int64 timestamp = 5;  // 截图时间点（毫秒）
+  int64 ctime = 6;      // 创建时间（Unix 秒）
+}
+
+message AddScreenshotReq {
+  int64 asset_id = 1;   // 关联媒资 ID
+  string bucket = 2;     // 对象存储桶
+  string object_key = 3; // 对象键
+  int64 timestamp = 4;   // 截图时间点（毫秒）
+  string ip = 5;         // 调用方 IP
+}
+
+// Asset 媒资元数据与生命周期服务。
+// 依据 AGENTS.md §5，asset 拥有原文件、封面、字幕、截图元数据；
+// 不持有稿件发布状态，不把大文件放入 MySQL，不返回 OSS 长期公开 URL。
+service Asset {
+  // 上传完成后登记媒资；返回 asset_id
+  rpc RegisterAsset(RegisterAssetReq) returns (AssetReply);
+  // 查询单个媒资元数据
+  rpc GetAsset(AssetReq) returns (AssetReply);
+  // 分页查询媒资列表（可按 mid 或 state 过滤）
+  rpc ListAssets(ListReq) returns (AssetsReply);
+  // 更新媒资元数据（transcode 完成回调写入 duration/width/height/codec）
+  rpc UpdateAssetMeta(UpdateAssetReq) returns (AssetReply);
+  // 推进媒资状态机（UPLOADED→SCANNED→TRANSCODED）
+  rpc TransitionState(TransitionReq) returns (AssetReply);
+
+  // 添加封面
+  rpc AddCover(AddCoverReq) returns (CoverReply);
+  // 查询某媒资的封面列表
+  rpc ListCovers(AssetReq) returns (CoversReply);
+
+  // 添加字幕
+  rpc AddSubtitle(AddSubtitleReq) returns (SubtitleReply);
+  // 查询某媒资的字幕列表
+  rpc ListSubtitles(AssetReq) returns (SubtitlesReply);
+
+  // 添加截图
+  rpc AddScreenshot(AddScreenshotReq) returns (ScreenshotReply);
+}

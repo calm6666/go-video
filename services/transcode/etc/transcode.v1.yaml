@@ -1,0 +1,14 @@
+Name: transcode.v1.rpc
+ListenOn: 0.0.0.0:8100
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: transcode.v1.rpc
+
+# 业务缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会触发 conflict key redis）
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL 主库 DSN（仅本地示例，生产从配置中心/Secret 注入）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_transcode?charset=utf8mb4&parseTime=true&loc=Local

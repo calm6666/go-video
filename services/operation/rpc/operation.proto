@@ -1,0 +1,512 @@
+syntax = "proto3";
+
+package operation.v1;
+
+option go_package = "go-video/services/operation/rpc";
+
+// 说明：operation 是管理后台领域服务（AGENTS.md §3：管理后台的业务逻辑与数据
+// 所有权在 services/operation，gateway/admin 只做入口聚合、统一鉴权和限流）。
+// 本服务拥有 admin_user / role / permission / menu / ops_config / admin_task /
+// audit_index / admin_session 自有表（库名 go_video_operation）。
+//
+// 数据所有权边界（AGENTS.md §5）：本服务对稿件、目录、版权、审核的**业务写操作**
+// 一律通过 video / catalog / rights / moderation-orchestrator 的 RPC 完成，
+// 不直连它们的库表；本服务只负责编排、权限判定和审计留痕。
+//
+// 与 account 的边界：管理员账号是后台身份（op_admin_user），与终端用户账号
+// （account.mid / account 库表）完全隔离，不读写对方的表，token 语义互不通用。
+// 需要展示管理员关联的员工/用户信息时只调用 account 的公开 RPC。
+//
+// 商业化范围外（AGENTS.md §1）：本契约不提供订单、支付、投币、广告投放与广告位
+// 配置等能力；运营配置只覆盖内容展示、审核工作流和灰度开关。
+
+// 通用空响应
+message EmptyReply {}
+
+// OpContext 管理操作上下文：调用者身份与追踪信息。
+// 除 AdminLogin/VerifyAdminPermission 外，所有方法都必须携带，
+// 服务端据此写审计索引（op_audit_index）并做日志关联。
+message OpContext {
+  int64 operator_id = 1;      // 操作管理员 admin_id（0 表示未鉴权，写接口直接拒绝）
+  string operator_name = 2;   // 操作管理员用户名（冗余，便于列表展示）
+  string ip = 3;              // 来源 IP（服务端只存哈希，不落明文）
+  string user_agent = 4;      // 客户端 UA（截断后存索引）
+  string trace_id = 5;        // 链路追踪 ID
+  string request_id = 6;      // 幂等键（写接口必填）
+}
+
+// --- 1. 管理员登录与权限校验 ---
+
+// AdminLoginReq 管理员登录：账号 + 口令 + 可选二次校验码。
+message AdminLoginReq {
+  string username = 1;        // 管理员账号名
+  string password = 2;        // 口令（明文经 TLS 传输，服务端做 PBKDF2 校验；日志与响应禁止回显）
+  string second_factor = 3;   // 可选二次校验码（TOTP/短信），为空表示未启用二阶校验
+  string ip = 4;              // 来源 IP
+  string user_agent = 5;      // 客户端 UA
+  string trace_id = 6;        // 链路追踪 ID
+  string request_id = 7;      // 幂等键
+}
+
+// AdminLoginReply 登录成功，返回后台专用 token（与用户端 token 语义不同）。
+message AdminLoginReply {
+  string token = 1;           // 管理会话 token（adm_ 前缀，仅 gateway/admin 可用）
+  int64 admin_id = 2;         // 管理员 ID
+  string username = 3;        // 管理员用户名
+  int64 expires_at = 4;       // token 过期时间（Unix 秒）
+  repeated string roles = 5;  // 命中角色名列表
+  int32 ttl = 6;              // 建议客户端缓存秒数（后台登录态固定 0，不建议缓存）
+}
+
+// VerifyAdminPermissionReq 权限校验入口，由 gateway/admin 在每个受保护路由上调用。
+message VerifyAdminPermissionReq {
+  string token = 1;           // 管理会话 token（与 admin_id 二选一，token 优先）
+  int64 admin_id = 2;         // 已由网关解析出的管理员 ID
+  string resource = 3;        // 资源，如 video:submission、catalog:episode、rights:window
+  string action = 4;          // 动作，如 read、offline、approve
+  string trace_id = 5;        // 链路追踪 ID
+}
+
+// VerifyAdminPermissionReply 权限判定结果。
+message VerifyAdminPermissionReply {
+  bool allowed = 1;           // 是否放行
+  repeated string matched_roles = 2; // 命中的角色名（用于拒绝时提示缺哪个权限）
+  int64 admin_id = 3;       // 判定所用的管理员 ID（token 解析结果，便于网关写日志）
+  int32 ttl = 4;              // 网关可缓存该判定的秒数
+  string reason = 5;          // 拒绝原因（denied 时非空，脱敏）
+}
+
+// --- 2. 管理员账号生命周期 ---
+
+// AdminUserItem 管理员账号投影（永不返回口令散列）。
+message AdminUserItem {
+  int64 admin_id = 1;         // 管理员 ID
+  string username = 2;        // 账号名
+  int32 state = 3;            // 1 正常、2 禁用、3 锁定
+  string remark = 4;          // 备注
+  int64 operator_id = 5;      // 最后修改人
+  int64 last_login_at = 6;    // 最近登录时间（Unix 秒）
+  int64 ctime = 7;            // 创建时间
+  int64 mtime = 8;            // 修改时间
+  repeated int64 role_ids = 9;   // 已分配角色 ID
+  repeated string role_names = 10; // 已分配角色名
+  bool second_factor_enabled = 11; // 是否启用二次校验（只回布尔，不回手机号等目标值）
+}
+
+message CreateAdminUserReq {
+  OpContext ctx = 1;
+  string username = 2;        // 账号名（全局唯一）
+  string password = 3;        // 初始口令（只在创建/重置时传，响应不回显）
+  string remark = 4;          // 备注
+  repeated int64 role_ids = 5; // 初始角色（可为空，空表示无权限账号）
+  string second_factor_target = 6; // 二次校验目标（手机号；非空时登录需带 second_factor，验证码由 account 服务下发）
+}
+
+message CreateAdminUserReply {
+  AdminUserItem user = 1;
+}
+
+message UpdateAdminUserReq {
+  OpContext ctx = 1;
+  int64 admin_id = 2;         // 目标管理员
+  string remark = 3;          // 新备注（空表示不修改）
+  int32 state = 4;            // 目标状态：0 不修改、1 正常、2 禁用
+  string new_password = 5;    // 重置口令（空表示不改口令；非空时立即吊销该账号全部会话）
+  string second_factor_target = 6; // 覆盖二次校验目标（空表示不修改；传 "-" 表示关闭二次校验）
+}
+
+message UpdateAdminUserReply {
+  AdminUserItem user = 1;
+}
+
+message DisableAdminUserReq {
+  OpContext ctx = 1;
+  int64 admin_id = 2;         // 目标管理员（禁用同时吊销会话）
+  string reason = 3;          // 禁用原因（写审计索引）
+}
+
+message DisableAdminUserReply {
+  AdminUserItem user = 1;
+}
+
+message ListAdminUsersReq {
+  OpContext ctx = 1;
+  int32 state = 2;            // 0 全部、1/2/3 按状态过滤
+  string keyword = 3;         // 用户名模糊匹配
+  int32 pn = 4;               // 页码，从 1 开始
+  int32 ps = 5;               // 每页大小，最大 100
+}
+
+message ListAdminUsersReply {
+  repeated AdminUserItem items = 1;
+  int64 total = 2;
+}
+
+// --- 3. 角色与权限点 ---
+
+// RoleItem 角色投影。
+message RoleItem {
+  int64 role_id = 1;          // 角色 ID
+  string name = 2;            // 角色标识（唯一，如 super_admin、content_ops）
+  string title = 3;           // 角色展示名
+  int32 state = 4;            // 1 启用、2 停用
+  int64 member_count = 5;     // 成员数（删除角色时的保护依据）
+  repeated int64 permission_ids = 6; // 已绑定权限点 ID
+  int64 ctime = 7;
+  int64 mtime = 8;
+}
+
+message CreateRoleReq {
+  OpContext ctx = 1;
+  string name = 2;            // 角色标识（唯一）
+  string title = 3;           // 展示名
+  repeated int64 permission_ids = 4; // 初始权限点
+}
+
+message CreateRoleReply {
+  RoleItem role = 1;
+}
+
+message ListRolesReq {
+  OpContext ctx = 1;
+  int32 state = 2;            // 0 全部
+  string keyword = 3;
+  int32 pn = 4;
+  int32 ps = 5;
+}
+
+message ListRolesReply {
+  repeated RoleItem items = 1;
+  int64 total = 2;
+}
+
+message DeleteRoleReq {
+  OpContext ctx = 1;
+  int64 role_id = 2;          // 有成员时禁止删除（返回明确错误）
+}
+
+message AssignRolesReq {
+  OpContext ctx = 1;
+  int64 admin_id = 2;         // 目标管理员
+  repeated int64 role_ids = 3; // 全量覆盖：空数组表示清空角色
+}
+
+message AssignRolesReply {
+  repeated int64 role_ids = 1; // 覆盖后的角色集合
+}
+
+// PermissionItem 权限点投影。
+message PermissionItem {
+  int64 permission_id = 1;    // 权限点 ID
+  string resource = 2;        // 资源（如 video:submission、catalog:episode、rights:window、ops:config）
+  string action = 3;          // 动作（read/create/update/offline/approve/*）
+  string domain = 4;          // 所属域（video/catalog/rights/moderation/operation/system）
+  string description = 5;     // 说明
+  int64 ctime = 6;
+}
+
+message CreatePermissionReq {
+  OpContext ctx = 1;
+  string resource = 2;
+  string action = 3;
+  string domain = 4;
+  string description = 5;
+}
+
+message CreatePermissionReply {
+  PermissionItem permission = 1;
+}
+
+message ListPermissionsReq {
+  OpContext ctx = 1;
+  string domain = 2;          // 空表示全部域
+  int32 pn = 3;
+  int32 ps = 4;
+}
+
+message ListPermissionsReply {
+  repeated PermissionItem items = 1;
+  int64 total = 2;
+}
+
+// --- 4. 后台菜单（仅 Web 后台使用，项目不支持小程序） ---
+
+// MenuItem 菜单节点（扁平返回，父级用 parent_id 表达，由前端组树）。
+message MenuItem {
+  int64 menu_id = 1;
+  int64 parent_id = 2;        // 0 表示根节点
+  string name = 3;            // 菜单名
+  string path = 4;            // 前端路由
+  string icon = 5;            // 图标
+  int32 sort = 6;             // 同级排序，小者在前
+  string required_permission = 7; // 形如 "video:submission#offline"（resource#action），空表示登录即可见
+  int32 state = 8;            // 1 显示、2 隐藏
+  int64 ctime = 9;
+  int64 mtime = 10;
+}
+
+message GetMenuReq {
+  OpContext ctx = 1;
+  int64 admin_id = 2;         // 按该管理员的角色并集过滤；0 表示用 ctx.operator_id
+}
+
+message GetMenuReply {
+  repeated MenuItem items = 1;
+  int64 ttl = 2;              // 前端可缓存秒数
+}
+
+message SaveMenuReq {
+  OpContext ctx = 1;
+  int64 menu_id = 2;          // 0 表示新建
+  int64 parent_id = 3;
+  string name = 4;
+  string path = 5;
+  string icon = 6;
+  int32 sort = 7;
+  string required_permission = 8;
+  int32 state = 9;            // 0 视为 1
+}
+
+message SaveMenuReply {
+  MenuItem menu = 1;
+}
+
+// --- 5. 运营配置（分区/标签/审核阈值/灰度开关，不含商业化投放） ---
+
+// ConfigItem 运营配置投影。
+message ConfigItem {
+  int64 id = 1;
+  string cfg_key = 2;         // 配置键
+  string cfg_value = 3;       // 配置值（字符串承载，按 value_type 解析）
+  string value_type = 4;      // string/int/bool/json
+  string scope = 5;           // 生效范围：global/android/ios/harmony/desktop/<自定义>
+  int64 version = 6;          // 版本号，每次成功写入 +1（乐观锁）
+  int32 state = 7;            // 1 生效、2 下线
+  int64 operator_id = 8;      // 最后修改人
+  string remark = 9;          // 变更说明
+  int64 ctime = 10;
+  int64 mtime = 11;
+}
+
+message GetOpsConfigReq {
+  OpContext ctx = 1;
+  string cfg_key = 2;
+  string scope = 3;           // 空表示 global
+  bool refresh = 4;           // true 强制回源并刷新缓存
+}
+
+message GetOpsConfigReply {
+  ConfigItem config = 1;
+  bool from_cache = 2;        // 命中缓存标记（便于排障）
+  int32 ttl = 3;              // 建议下游缓存秒数
+}
+
+message SaveOpsConfigReq {
+  OpContext ctx = 1;
+  string cfg_key = 2;
+  string cfg_value = 3;
+  string value_type = 4;      // 空默认 string
+  string scope = 5;           // 空默认 global
+  int64 expect_version = 6;   // 乐观锁：0 表示新建；非 0 表示基于该版本更新
+  int32 state = 7;            // 0 视为 1
+  string remark = 8;          // 变更原因（进审计）
+}
+
+message SaveOpsConfigReply {
+  ConfigItem config = 1;
+}
+
+// --- 6. 管理任务编排（批量运营动作，真实执行只走下游 RPC） ---
+
+// TaskStepSpec 提交任务时的步骤声明。
+message TaskStepSpec {
+  string target_type = 1;     // submission/episode/rights_window/moderation_appeal
+  string target_id = 2;       // 目标聚合 ID（字符串，兼容不同类型主键）
+}
+
+// TaskInfo 任务投影。
+message TaskInfo {
+  int64 task_id = 1;
+  string task_type = 2;       // batch_offline_submission / batch_offline_episode / batch_expire_window / batch_process_appeal
+  string params = 3;          // 任务级参数（JSON 文本）
+  string state = 4;           // pending/running/succeeded/partial/failed/canceled
+  string request_id = 5;      // 幂等键
+  int32 total = 6;
+  int32 succeeded = 7;
+  int32 failed = 8;
+  int32 progress = 9;         // 已执行步数（succeeded + failed）
+  int64 operator_id = 10;
+  string trace_id = 11;
+  int64 ctime = 12;
+  int64 mtime = 13;
+  int64 started_at = 14;
+  int64 finished_at = 15;
+}
+
+// TaskStepInfo 任务步骤投影。
+message TaskStepInfo {
+  int64 id = 1;
+  int64 task_id = 2;
+  int32 step_no = 3;
+  string target_type = 4;
+  string target_id = 5;
+  string state = 6;           // pending/running/succeeded/failed/skipped/canceled
+  string result = 7;          // 下游返回摘要
+  string err_msg = 8;         // 失败原因（脱敏，不含堆栈与密钥）
+  int64 ctime = 9;
+  int64 mtime = 10;
+}
+
+message SubmitAdminTaskReq {
+  OpContext ctx = 1;
+  string task_type = 2;
+  string params = 3;          // JSON 文本，如 {"reason":"版权到期"}
+  repeated TaskStepSpec steps = 4; // 批量目标，最多 1000 步
+}
+
+message SubmitAdminTaskReply {
+  TaskInfo task = 1;
+  bool reused = 2;            // true 表示 request_id 命中已有任务（幂等返回）
+}
+
+message GetAdminTaskReq {
+  OpContext ctx = 1;
+  int64 task_id = 2;
+  string request_id = 3;      // 与 task_id 二选一
+}
+
+message GetAdminTaskReply {
+  TaskInfo task = 1;
+  repeated TaskStepInfo steps = 2;
+}
+
+message ListAdminTasksReq {
+  OpContext ctx = 1;
+  string state = 2;           // 空表示全部
+  string task_type = 3;       // 空表示全部
+  int64 operator_id = 4;      // 0 表示全部
+  int32 pn = 5;
+  int32 ps = 6;
+}
+
+message ListAdminTasksReply {
+  repeated TaskInfo items = 1;
+  int64 total = 2;
+}
+
+message CancelAdminTaskReq {
+  OpContext ctx = 1;
+  int64 task_id = 2;
+  string reason = 3;
+}
+
+message CancelAdminTaskReply {
+  TaskInfo task = 1;
+}
+
+// RunAdminTaskReq 由 services/cron 或人工触发的任务推进入口。
+// 本服务不内置分发 worker（定时进程归 services/cron，AGENTS.md §3），
+// 执行步骤时只调用 video/catalog/rights/moderation 的 RPC。
+message RunAdminTaskReq {
+  OpContext ctx = 1;
+  int64 task_id = 2;
+  int32 max_steps = 3;        // 单次推进的最大步数，<=0 时按服务端默认（100）
+}
+
+message RunAdminTaskReply {
+  TaskInfo task = 1;
+  repeated TaskStepInfo steps = 2;
+  int32 executed = 3;         // 本次实际执行步数
+}
+
+// --- 7. 管理操作审计索引 ---
+
+// AuditIndexItem 审计索引投影。
+// 边界：本服务只存“谁在何时对哪个聚合做了什么、结果如何”的索引与 trace_id；
+// 完整证据（请求正文、审核截图、前后快照）由被操作的领域服务和未来的
+// services/audit（append-only 存储）保留，见 README。
+message AuditIndexItem {
+  int64 id = 1;
+  int64 admin_id = 2;
+  string username = 3;        // 展示用冗余（从 op_admin_user 关联）
+  string action = 4;          // 动作，如 admin_user.create、ops_config.save
+  string resource_type = 5;   // 目标类型
+  string resource_id = 6;     // 目标 ID
+  string result = 7;          // ok/denied/error
+  string ip_hash = 8;         // 来源 IP 哈希（不落明文）
+  string user_agent = 9;      // UA（截断）
+  string trace_id = 10;
+  string request_id = 11;
+  int64 ctime = 12;
+}
+
+message ListAuditIndexReq {
+  OpContext ctx = 1;
+  int64 admin_id = 2;         // 0 表示全部
+  string action = 3;
+  string resource_type = 4;
+  string resource_id = 5;
+  int64 start_at = 6;         // Unix 秒，含
+  int64 end_at = 7;           // Unix 秒，不含
+  int32 pn = 8;
+  int32 ps = 9;
+}
+
+message ListAuditIndexReply {
+  repeated AuditIndexItem items = 1;
+  int64 total = 2;
+}
+
+// Operation 管理后台领域服务：RBAC、运营配置、管理任务编排与审计索引。
+service Operation {
+  // 管理员登录（口令校验 + 防爆破锁定），签发后台专用 token
+  rpc AdminLogin(AdminLoginReq) returns (AdminLoginReply);
+  // 权限校验（gateway/admin 每个受保护路由调用；结果带短缓存）
+  rpc VerifyAdminPermission(VerifyAdminPermissionReq) returns (VerifyAdminPermissionReply);
+
+  // 创建管理员账号（口令只在入参出现，响应永不返回散列）
+  rpc CreateAdminUser(CreateAdminUserReq) returns (CreateAdminUserReply);
+  // 更新管理员账号（备注/状态/重置口令，重置口令会吊销会话）
+  rpc UpdateAdminUser(UpdateAdminUserReq) returns (UpdateAdminUserReply);
+  // 禁用管理员账号（同时吊销全部会话）
+  rpc DisableAdminUser(DisableAdminUserReq) returns (DisableAdminUserReply);
+  // 分页查询管理员账号
+  rpc ListAdminUsers(ListAdminUsersReq) returns (ListAdminUsersReply);
+
+  // 全量覆盖管理员角色（并集生效）
+  rpc AssignRoles(AssignRolesReq) returns (AssignRolesReply);
+  // 创建角色并绑定权限点
+  rpc CreateRole(CreateRoleReq) returns (CreateRoleReply);
+  // 分页查询角色
+  rpc ListRoles(ListRolesReq) returns (ListRolesReply);
+  // 删除角色（仍有成员时拒绝）
+  rpc DeleteRole(DeleteRoleReq) returns (EmptyReply);
+  // 分页查询权限点
+  rpc ListPermissions(ListPermissionsReq) returns (ListPermissionsReply);
+  // 创建权限点（resource + action 唯一）
+  rpc CreatePermission(CreatePermissionReq) returns (CreatePermissionReply);
+
+  // 按管理员角色并集返回可见菜单（后台 Web 专用）
+  rpc GetMenu(GetMenuReq) returns (GetMenuReply);
+  // 新建/更新菜单节点
+  rpc SaveMenu(SaveMenuReq) returns (SaveMenuReply);
+
+  // 读取运营配置（默认走缓存，refresh=true 强制回源）
+  rpc GetOpsConfig(GetOpsConfigReq) returns (GetOpsConfigReply);
+  // 写入运营配置（expect_version 乐观锁 + 操作者留痕）
+  rpc SaveOpsConfig(SaveOpsConfigReq) returns (SaveOpsConfigReply);
+
+  // 提交批量运营任务（request_id 幂等，状态 pending）
+  rpc SubmitAdminTask(SubmitAdminTaskReq) returns (SubmitAdminTaskReply);
+  // 查询任务与步骤明细
+  rpc GetAdminTask(GetAdminTaskReq) returns (GetAdminTaskReply);
+  // 分页查询任务
+  rpc ListAdminTasks(ListAdminTasksReq) returns (ListAdminTasksReply);
+  // 取消任务（仅 pending/running 可取消）
+  rpc CancelAdminTask(CancelAdminTaskReq) returns (CancelAdminTaskReply);
+  // 推进任务：逐步骤调用下游 RPC（由 cron 或人工触发，本服务不内置 worker）
+  rpc RunAdminTask(RunAdminTaskReq) returns (RunAdminTaskReply);
+
+  // 查询管理操作审计索引（正文证据在下游服务/audit）
+  rpc ListAuditIndex(ListAuditIndexReq) returns (ListAuditIndexReply);
+}

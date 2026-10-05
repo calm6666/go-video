@@ -51,6 +51,334 @@ type CardsResponse struct {
 	TTL     int64     `json:"ttl"`
 }
 
+type CatalogEpisode struct {
+	Epid     int64  `json:"epid"`
+	SeasonId int64  `json:"season_id"`
+	EpNo     int32  `json:"ep_no"`
+	Title    string `json:"title"`
+	AssetId  int64  `json:"asset_id"`
+	Duration int64  `json:"duration"`
+	State    int32  `json:"state"`
+}
+
+type CatalogEpisodeData struct {
+	Episode CatalogEpisode `json:"episode"`
+}
+
+type CatalogEpisodeResponse struct {
+	Code    int                `json:"code"`
+	Message string             `json:"message"`
+	Data    CatalogEpisodeData `json:"data"`
+	TTL     int64              `json:"ttl"`
+}
+
+type CatalogEpisodesData struct {
+	Episodes []CatalogEpisode `json:"episodes"`
+}
+
+type CatalogEpisodesResponse struct {
+	Code    int                 `json:"code"`
+	Message string              `json:"message"`
+	Data    CatalogEpisodesData `json:"data"`
+	TTL     int64               `json:"ttl"`
+}
+
+type CatalogSeason struct {
+	SeasonId int64  `json:"season_id"`
+	SeasonNo int32  `json:"season_no"`
+	Title    string `json:"title"`
+	Cover    string `json:"cover"`
+	State    int32  `json:"state"`
+}
+
+type CatalogWork struct {
+	SeasonId int64  `json:"season_id"`
+	Title    string `json:"title"`
+	Cover    string `json:"cover"`
+	Typeid   int32  `json:"typeid"`
+	Intro    string `json:"intro"`
+	State    int32  `json:"state"`
+}
+
+type CatalogWorkData struct {
+	Work CatalogWork `json:"work"`
+}
+
+type CatalogWorkResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    CatalogWorkData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type CatalogWorksData struct {
+	Total int32         `json:"total"`
+	Works []CatalogWork `json:"works"`
+}
+
+type CatalogWorksResponse struct {
+	Code    int              `json:"code"`
+	Message string           `json:"message"`
+	Data    CatalogWorksData `json:"data"`
+	TTL     int64            `json:"ttl"`
+}
+
+type CatalogZone struct {
+	Zoneid int32  `json:"zoneid"`
+	Name   string `json:"name"`
+	Parent int32  `json:"parent"`
+}
+
+type CatalogZonesData struct {
+	Zones []CatalogZone `json:"zones"`
+}
+
+type CatalogZonesResponse struct {
+	Code    int              `json:"code"`
+	Message string           `json:"message"`
+	Data    CatalogZonesData `json:"data"`
+	TTL     int64            `json:"ttl"`
+}
+
+type CoinAccount struct {
+	Mid                 int64 `json:"mid"`
+	Balance             int64 `json:"balance"`
+	TotalTossed         int64 `json:"total_tossed"` // 历史口径：取消投币不回退
+	TodayTossed         int64 `json:"today_tossed"`
+	TodayLimit          int64 `json:"today_limit"`
+	PerTargetLimit      int64 `json:"per_target_limit"`
+	CancelWindowSeconds int64 `json:"cancel_window_seconds"`
+}
+
+type CoinAccountData struct {
+	Found   bool        `json:"found"` // false = 从未有过硬币账户，balance 为 0
+	Account CoinAccount `json:"account"`
+}
+
+type CoinAccountResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    CoinAccountData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type CoinTargetSummary struct {
+	Aid           int64 `json:"aid"`
+	CoinCount     int64 `json:"coin_count"`
+	CoinUserCount int64 `json:"coin_user_count"`
+}
+
+type CoinTargetSummaryResponse struct {
+	Code    int               `json:"code"`
+	Message string            `json:"message"`
+	Data    CoinTargetSummary `json:"data"`
+	TTL     int64             `json:"ttl"`
+}
+
+type CoinTargetsSummaryData struct {
+	Summaries []CoinTargetSummary `json:"summaries"`
+}
+
+type CoinTargetsSummaryResponse struct {
+	Code    int                    `json:"code"`
+	Message string                 `json:"message"`
+	Data    CoinTargetsSummaryData `json:"data"`
+	TTL     int64                  `json:"ttl"`
+}
+
+type CoinTossConfigData struct {
+	DailyLimit          int64 `json:"daily_limit"`
+	PerTargetLimit      int64 `json:"per_target_limit"`
+	CancelWindowSeconds int64 `json:"cancel_window_seconds"`
+	MinBalanceToToss    int64 `json:"min_balance_to_toss"`
+	InitialBalance      int64 `json:"initial_balance"`
+}
+
+type CoinTossConfigResponse struct {
+	Code    int                `json:"code"`
+	Message string             `json:"message"`
+	Data    CoinTossConfigData `json:"data"`
+	TTL     int64              `json:"ttl"`
+}
+
+type CoinTossData struct {
+	Accepted   bool         `json:"accepted"`
+	Reason     int32        `json:"reason"`      // coin.TossRejectReason
+	ReasonText string       `json:"reason_text"` // 服务侧可读结论（「今日还可投 2 枚」）
+	Duplicated bool         `json:"duplicated"`  // true = 命中幂等重放，未重复扣币
+	Account    CoinAccount  `json:"account"`
+	Toss       CoinTossInfo `json:"toss"`
+	FlowId     int64        `json:"flow_id"`
+}
+
+type CoinTossInfo struct {
+	TossId        int64 `json:"toss_id"`
+	TargetAid     int64 `json:"target_aid"`
+	Count         int32 `json:"count"`
+	State         int32 `json:"state"` // 1 生效、2 已取消
+	FirstTossedAt int64 `json:"first_tossed_at"`
+	LastTossedAt  int64 `json:"last_tossed_at"`
+	CancelledAt   int64 `json:"cancelled_at"`
+}
+
+type CoinTossMineData struct {
+	Tosses   []CoinTossInfo `json:"tosses"`
+	Total    int64          `json:"total"`
+	Page     int64          `json:"page"`
+	PageSize int64          `json:"page_size"`
+}
+
+type CoinTossMineResponse struct {
+	Code    int              `json:"code"`
+	Message string           `json:"message"`
+	Data    CoinTossMineData `json:"data"`
+	TTL     int64            `json:"ttl"`
+}
+
+type CoinTossResponse struct {
+	Code    int          `json:"code"`
+	Message string       `json:"message"`
+	Data    CoinTossData `json:"data"`
+	TTL     int64        `json:"ttl"`
+}
+
+type CommentItem struct {
+	Rpid       int64  `json:"rpid"`
+	Oid        int64  `json:"oid"`
+	Tp         int32  `json:"tp"`
+	Root       int64  `json:"root"`
+	Parent     int64  `json:"parent"`
+	Mid        int64  `json:"mid"`
+	Content    string `json:"content"`
+	State      int32  `json:"state"`
+	Ctime      int64  `json:"ctime"`
+	Mtime      int64  `json:"mtime"`
+	LikeCount  int32  `json:"like_count"`
+	ReplyCount int32  `json:"reply_count"`
+}
+
+type CommentListData struct {
+	List  []CommentItem `json:"list"`
+	Total int32         `json:"total"`
+}
+
+type CommentListResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    CommentListData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type CommentPostData struct {
+	Rpid  int64 `json:"rpid"`
+	Ctime int64 `json:"ctime"`
+}
+
+type CommentPostResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    CommentPostData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type CommentStatsData struct {
+	Total     int64 `json:"total"`
+	RootTotal int64 `json:"root_total"`
+}
+
+type CommentStatsResponse struct {
+	Code    int              `json:"code"`
+	Message string           `json:"message"`
+	Data    CommentStatsData `json:"data"`
+	TTL     int64            `json:"ttl"`
+}
+
+type DanmakuInfo struct {
+	Dmid       int64  `json:"dmid"`
+	Oid        int64  `json:"oid"`
+	Aid        int64  `json:"aid"`
+	Mid        int64  `json:"mid"`
+	ProgressMs int64  `json:"progress_ms"`
+	Mode       int32  `json:"mode"`
+	Fontsize   int32  `json:"fontsize"`
+	Color      int32  `json:"color"`
+	Content    string `json:"content"`
+	State      int32  `json:"state"`
+	Pool       int32  `json:"pool"`
+	SegNo      int32  `json:"seg_no"`
+	Ctime      int64  `json:"ctime"`
+}
+
+type DanmakuListData struct {
+	Danmaku        []DanmakuInfo         `json:"danmaku"`
+	SegmentCounts  []DanmakuSegmentCount `json:"segment_counts"`
+	SegmentSeconds int32                 `json:"segment_seconds"`
+	NextSeg        int32                 `json:"next_seg"`
+}
+
+type DanmakuListResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    DanmakuListData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type DanmakuPostData struct {
+	Dmid             int64 `json:"dmid"`
+	State            int32 `json:"state"`
+	Pool             int32 `json:"pool"`
+	SegNo            int32 `json:"seg_no"`
+	Ctime            int64 `json:"ctime"`
+	Replayed         bool  `json:"replayed"`
+	ModerationTaskId int64 `json:"moderation_task_id"`
+}
+
+type DanmakuPostResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    DanmakuPostData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type DanmakuReportData struct {
+	ReportId   int64 `json:"report_id"`
+	Duplicated bool  `json:"duplicated"`
+}
+
+type DanmakuReportResponse struct {
+	Code    int               `json:"code"`
+	Message string            `json:"message"`
+	Data    DanmakuReportData `json:"data"`
+	TTL     int64             `json:"ttl"`
+}
+
+type DanmakuSegmentCount struct {
+	SegNo int32 `json:"seg_no"`
+	Count int32 `json:"count"`
+}
+
+type DanmakuUserBlockInfo struct {
+	Id         int64  `json:"id"`
+	Mid        int64  `json:"mid"`
+	Type       int32  `json:"type"`
+	BlockedMid int64  `json:"blocked_mid"`
+	Keyword    string `json:"keyword"`
+	State      int32  `json:"state"`
+	Ctime      int64  `json:"ctime"`
+}
+
+type DanmakuUserBlocksData struct {
+	Blocks []DanmakuUserBlockInfo `json:"blocks"`
+	Total  int32                  `json:"total"`
+}
+
+type DanmakuUserBlocksResponse struct {
+	Code    int                   `json:"code"`
+	Message string                `json:"message"`
+	Data    DanmakuUserBlocksData `json:"data"`
+	TTL     int64                 `json:"ttl"`
+}
+
 type EmptyData struct {
 }
 
@@ -59,6 +387,131 @@ type EmptyResponse struct {
 	Message string    `json:"message"`
 	Data    EmptyData `json:"data"`
 	TTL     int64     `json:"ttl"`
+}
+
+type EngagementFavStateData struct {
+	Faved bool `json:"faved"`
+}
+
+type EngagementFavStateResponse struct {
+	Code    int                    `json:"code"`
+	Message string                 `json:"message"`
+	Data    EngagementFavStateData `json:"data"`
+	TTL     int64                  `json:"ttl"`
+}
+
+type EngagementFavStatesData struct {
+	Faveds map[int64]bool `json:"faveds"`
+}
+
+type EngagementFavStatesResponse struct {
+	Code    int                     `json:"code"`
+	Message string                  `json:"message"`
+	Data    EngagementFavStatesData `json:"data"`
+	TTL     int64                   `json:"ttl"`
+}
+
+type EngagementFolder struct {
+	Fid         int64  `json:"fid"`
+	Mid         int64  `json:"mid"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Cover       string `json:"cover"`
+	Public      int32  `json:"public"`
+	State       int32  `json:"state"`
+	Ctime       int64  `json:"ctime"`
+	Mtime       int64  `json:"mtime"`
+	Count       int32  `json:"count"`
+}
+
+type EngagementFolderOpData struct {
+	Fid    int64 `json:"fid"`
+	Shares int64 `json:"shares"`
+}
+
+type EngagementFolderOpResponse struct {
+	Code    int                    `json:"code"`
+	Message string                 `json:"message"`
+	Data    EngagementFolderOpData `json:"data"`
+	TTL     int64                  `json:"ttl"`
+}
+
+type EngagementFoldersData struct {
+	Folders []EngagementFolder `json:"folders"`
+}
+
+type EngagementFoldersResponse struct {
+	Code    int                   `json:"code"`
+	Message string                `json:"message"`
+	Data    EngagementFoldersData `json:"data"`
+	TTL     int64                 `json:"ttl"`
+}
+
+type EngagementHasLikeData struct {
+	States map[int64]EngagementLikeStateData `json:"states"`
+}
+
+type EngagementHasLikeResponse struct {
+	Code    int                   `json:"code"`
+	Message string                `json:"message"`
+	Data    EngagementHasLikeData `json:"data"`
+	TTL     int64                 `json:"ttl"`
+}
+
+type EngagementLikeData struct {
+	OriginId      int64 `json:"origin_id"`
+	MessageId     int64 `json:"message_id"`
+	LikeNumber    int64 `json:"like_number"`
+	DislikeNumber int64 `json:"dislike_number"`
+}
+
+type EngagementLikeItem struct {
+	MessageId int64 `json:"message_id"`
+	Time      int64 `json:"time"`
+}
+
+type EngagementLikeResponse struct {
+	Code    int                `json:"code"`
+	Message string             `json:"message"`
+	Data    EngagementLikeData `json:"data"`
+	TTL     int64              `json:"ttl"`
+}
+
+type EngagementLikeStateData struct {
+	Mid   int64 `json:"mid"`
+	Time  int64 `json:"time"`
+	State int32 `json:"state"`
+}
+
+type EngagementStatState struct {
+	OriginId      int64 `json:"origin_id"`
+	MessageId     int64 `json:"message_id"`
+	LikeNumber    int64 `json:"like_number"`
+	DislikeNumber int64 `json:"dislike_number"`
+	LikeState     int32 `json:"like_state"`
+}
+
+type EngagementStatsData struct {
+	Stats map[int64]EngagementStatState `json:"stats"`
+}
+
+type EngagementStatsResponse struct {
+	Code    int                 `json:"code"`
+	Message string              `json:"message"`
+	Data    EngagementStatsData `json:"data"`
+	TTL     int64               `json:"ttl"`
+}
+
+type EngagementUserLikesData struct {
+	Total int32                `json:"total"`
+	Items []EngagementLikeItem `json:"items"`
+}
+
+type EngagementUserLikesResponse struct {
+	Code    int                     `json:"code"`
+	Message string                  `json:"message"`
+	Data    EngagementUserLikesData `json:"data"`
+	TTL     int64                   `json:"ttl"`
 }
 
 type ExpRewardData struct {
@@ -79,6 +532,43 @@ type ExpStat struct {
 	Share bool  `json:"share_av"`
 }
 
+type FeedData struct {
+	Items      []FeedItem `json:"items"`
+	NextCursor int64      `json:"next_cursor"`
+	HasMore    bool       `json:"has_more"`
+}
+
+type FeedItem struct {
+	Id        int64  `json:"id"`
+	Mid       int64  `json:"mid"`
+	Oid       int64  `json:"oid"`
+	OType     int32  `json:"otype"`
+	Action    int32  `json:"action"`
+	Ctime     int64  `json:"ctime"`
+	Title     string `json:"title"`
+	Cover     string `json:"cover"`
+	Uri       string `json:"uri"`
+	ForwardId int64  `json:"forward_id"`
+}
+
+type FeedResponse struct {
+	Code    int      `json:"code"`
+	Message string   `json:"message"`
+	Data    FeedData `json:"data"`
+	TTL     int64    `json:"ttl"`
+}
+
+type FeedUnreadData struct {
+	Unread int64 `json:"unread"`
+}
+
+type FeedUnreadResponse struct {
+	Code    int            `json:"code"`
+	Message string         `json:"message"`
+	Data    FeedUnreadData `json:"data"`
+	TTL     int64          `json:"ttl"`
+}
+
 type HealthData struct {
 	Status string `json:"status"`
 }
@@ -88,6 +578,84 @@ type HealthResponse struct {
 	Message string     `json:"message"`
 	Data    HealthData `json:"data"`
 	TTL     int64      `json:"ttl"`
+}
+
+type HotKeyword struct {
+	Keyword    string  `json:"keyword"`
+	Score      float64 `json:"score"`
+	SnapshotAt int64   `json:"snapshot_at"`
+	Scope      string  `json:"scope"`
+}
+
+type HotKeywordsData struct {
+	Keywords   []HotKeyword `json:"keywords"`
+	SnapshotAt int64        `json:"snapshot_at"`
+	FromCache  bool         `json:"from_cache"`
+}
+
+type HotKeywordsResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    HotKeywordsData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type InboxCategoryUnread struct {
+	Category int32 `json:"category"`
+	Count    int64 `json:"count"`
+}
+
+type InboxMessage struct {
+	MsgId     int64  `json:"msg_id"`
+	Category  int32  `json:"category"`
+	MsgType   int32  `json:"msg_type"`
+	Title     string `json:"title"`
+	Content   string `json:"content"`
+	SenderMid int64  `json:"sender_mid"`
+	BizType   string `json:"biz_type"`
+	BizId     string `json:"biz_id"`
+	Extra     string `json:"extra"`
+	Ctime     int64  `json:"ctime"`
+	ReadState int32  `json:"read_state"`
+}
+
+type InboxMessagesData struct {
+	List        []InboxMessage `json:"list"`
+	NextCursor  string         `json:"next_cursor"`
+	HasMore     bool           `json:"has_more"`
+	UnreadTotal int64          `json:"unread_total"`
+}
+
+type InboxMessagesResponse struct {
+	Code    int               `json:"code"`
+	Message string            `json:"message"`
+	Data    InboxMessagesData `json:"data"`
+	TTL     int64             `json:"ttl"`
+}
+
+type InboxOpData struct {
+	Changed     int32 `json:"changed"`
+	UnreadTotal int64 `json:"unread_total"`
+}
+
+type InboxOpResponse struct {
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    InboxOpData `json:"data"`
+	TTL     int64       `json:"ttl"`
+}
+
+type InboxUnreadData struct {
+	Total      int64                 `json:"total"`
+	ByCategory []InboxCategoryUnread `json:"by_category"`
+	Mtime      int64                 `json:"mtime"`
+}
+
+type InboxUnreadResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    InboxUnreadData `json:"data"`
+	TTL     int64           `json:"ttl"`
 }
 
 type Info struct {
@@ -151,6 +719,268 @@ type LevelResponse struct {
 	TTL     int64     `json:"ttl"`
 }
 
+type LiveAnchor struct {
+	RoomId int64 `json:"room_id"`
+	Mid    int64 `json:"mid"`
+	Role   int32 `json:"role"`
+	State  int32 `json:"state"` // 1 生效、0 已解绑
+	Ctime  int64 `json:"ctime"`
+	Mtime  int64 `json:"mtime"`
+}
+
+type LiveAnchorMutateData struct {
+	RoomId     int64 `json:"room_id"`
+	TargetMid  int64 `json:"target_mid"`
+	State      int32 `json:"state"`       // 1 生效、0 已解绑
+	BoundCount int32 `json:"bound_count"` // 该主播当前生效房主房间数（上限校验结果）
+	Replayed   bool  `json:"replayed"`
+}
+
+type LiveAnchorMutateResponse struct {
+	Code    int                  `json:"code"`
+	Message string               `json:"message"`
+	Data    LiveAnchorMutateData `json:"data"`
+	TTL     int64                `json:"ttl"`
+}
+
+type LiveAnchorsData struct {
+	Anchors []LiveAnchor `json:"anchors"`
+	Total   int32        `json:"total"`
+}
+
+type LiveAnchorsResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    LiveAnchorsData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type LiveArea struct {
+	AreaId       int64  `json:"area_id"`
+	AreaName     string `json:"area_name"`
+	ParentAreaId int64  `json:"parent_area_id"`
+	Sort         int32  `json:"sort"`
+	State        int32  `json:"state"`
+}
+
+type LiveAreasData struct {
+	Areas []LiveArea `json:"areas"`
+	Total int32      `json:"total"`
+}
+
+type LiveAreasResponse struct {
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    LiveAreasData `json:"data"`
+	TTL     int64         `json:"ttl"`
+}
+
+type LiveCloseData struct {
+	State               int32 `json:"state"`
+	TerminatedSessionId int64 `json:"terminated_session_id"` // 被强制终止的进行中场次，0 表示无
+	Replayed            bool  `json:"replayed"`
+}
+
+type LiveCloseResponse struct {
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    LiveCloseData `json:"data"`
+	TTL     int64         `json:"ttl"`
+}
+
+type LiveEndData struct {
+	SessionId       int64 `json:"session_id"`
+	SessionState    int32 `json:"session_state"`
+	RoomState       int32 `json:"room_state"`
+	DurationSeconds int64 `json:"duration_seconds"`
+	Replayed        bool  `json:"replayed"`
+}
+
+type LiveEndResponse struct {
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    LiveEndData `json:"data"`
+	TTL     int64       `json:"ttl"`
+}
+
+type LivePrepareCheckItem struct {
+	Code     string `json:"code"` // anchor_qualification / risk_control / room_verified / not_banned / setting_ok
+	Passed   bool   `json:"passed"`
+	Detail   string `json:"detail"`
+	Degraded bool   `json:"degraded"`
+}
+
+type LivePrepareData struct {
+	RoomId            int64                  `json:"room_id"`
+	State             int32                  `json:"state"`
+	Checks            []LivePrepareCheckItem `json:"checks"`
+	Ready             bool                   `json:"ready"`
+	DenyCode          string                 `json:"deny_code"`
+	RetryAfterSeconds int64                  `json:"retry_after_seconds"`
+	Replayed          bool                   `json:"replayed"`
+}
+
+type LivePrepareResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    LivePrepareData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type LiveRoomCreateData struct {
+	RoomId           int64 `json:"room_id"`
+	State            int32 `json:"state"`
+	VerifyState      int32 `json:"verify_state"`
+	Replayed         bool  `json:"replayed"` // true 表示命中 request_id，未产生新写入
+	ModerationTaskId int64 `json:"moderation_task_id"`
+}
+
+type LiveRoomCreateResponse struct {
+	Code    int                `json:"code"`
+	Message string             `json:"message"`
+	Data    LiveRoomCreateData `json:"data"`
+	TTL     int64              `json:"ttl"`
+}
+
+type LiveRoomData struct {
+	Room             LiveRoomInfo    `json:"room"`
+	Setting          LiveRoomSetting `json:"setting"`
+	HasSetting       bool            `json:"has_setting"` // false 表示未请求或服务侧无配置行
+	ActiveSession    LiveSessionInfo `json:"active_session"`
+	HasActiveSession bool            `json:"has_active_session"`
+}
+
+type LiveRoomInfo struct {
+	RoomId          int64  `json:"room_id"`
+	OwnerMid        int64  `json:"owner_mid"`
+	Title           string `json:"title"`
+	Cover           string `json:"cover"` // 封面引用，不含签名地址
+	AreaId          int64  `json:"area_id"`
+	State           int32  `json:"state"`
+	VerifyState     int32  `json:"verify_state"`
+	ActiveSessionId int64  `json:"active_session_id"`
+	ActiveStreamId  string `json:"active_stream_id"` // 推流标识引用，非推流地址
+	StateVersion    int32  `json:"state_version"`
+	RejectReason    string `json:"reject_reason"`
+	BanUntil        int64  `json:"ban_until"` // 0 表示无禁播或永久
+	Ctime           int64  `json:"ctime"`
+	Mtime           int64  `json:"mtime"`
+}
+
+type LiveRoomInfoUpdateData struct {
+	Room             LiveRoomInfo `json:"room"`
+	Replayed         bool         `json:"replayed"`
+	ModerationTaskId int64        `json:"moderation_task_id"` // 触发重新送审时的任务 ID
+}
+
+type LiveRoomInfoUpdateResponse struct {
+	Code    int                    `json:"code"`
+	Message string                 `json:"message"`
+	Data    LiveRoomInfoUpdateData `json:"data"`
+	TTL     int64                  `json:"ttl"`
+}
+
+type LiveRoomResponse struct {
+	Code    int          `json:"code"`
+	Message string       `json:"message"`
+	Data    LiveRoomData `json:"data"`
+	TTL     int64        `json:"ttl"`
+}
+
+type LiveRoomSetting struct {
+	RoomId               int64 `json:"room_id"`
+	DanmakuEnabled       bool  `json:"danmaku_enabled"`
+	ReplyEnabled         bool  `json:"reply_enabled"`
+	RecordEnabled        bool  `json:"record_enabled"`
+	LinkmicEnabled       bool  `json:"linkmic_enabled"`
+	LiveType             int32 `json:"live_type"` // 1 视频、2 语音、3 屏幕分享
+	MinClientVersionCode int32 `json:"min_client_version_code"`
+	Mtime                int64 `json:"mtime"`
+}
+
+type LiveRoomSettingUpdateData struct {
+	Setting  LiveRoomSetting `json:"setting"`
+	Replayed bool            `json:"replayed"`
+}
+
+type LiveRoomSettingUpdateResponse struct {
+	Code    int                       `json:"code"`
+	Message string                    `json:"message"`
+	Data    LiveRoomSettingUpdateData `json:"data"`
+	TTL     int64                     `json:"ttl"`
+}
+
+type LiveRoomsData struct {
+	Rooms    []LiveRoomInfo `json:"rooms"`
+	Total    int32          `json:"total"`
+	Page     int32          `json:"page"`
+	PageSize int32          `json:"page_size"`
+}
+
+type LiveRoomsResponse struct {
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    LiveRoomsData `json:"data"`
+	TTL     int64         `json:"ttl"`
+}
+
+type LiveSessionData struct {
+	Session LiveSessionInfo `json:"session"`
+}
+
+type LiveSessionInfo struct {
+	SessionId       int64  `json:"session_id"`
+	RoomId          int64  `json:"room_id"`
+	Mid             int64  `json:"mid"`
+	State           int32  `json:"state"` // 1 待推流、2 直播中、3 正常结束、4 异常终止
+	TitleSnapshot   string `json:"title_snapshot"`
+	AreaIdSnapshot  int64  `json:"area_id_snapshot"`
+	StreamId        string `json:"stream_id"`
+	StartedAt       int64  `json:"started_at"`
+	EndedAt         int64  `json:"ended_at"`
+	DurationSeconds int64  `json:"duration_seconds"`
+	EndReason       int32  `json:"end_reason"`
+	ReplayState     int32  `json:"replay_state"` // 1 无、2 转码中、3 可回放、4 已下架
+	RecordAssetId   int64  `json:"record_asset_id"`
+	RecordAid       int64  `json:"record_aid"`
+	Ctime           int64  `json:"ctime"`
+	Mtime           int64  `json:"mtime"`
+}
+
+type LiveSessionResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    LiveSessionData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type LiveSessionsData struct {
+	Sessions   []LiveSessionInfo `json:"sessions"`    // session_id 倒序
+	NextCursor string            `json:"next_cursor"` // 空表示到底
+}
+
+type LiveSessionsResponse struct {
+	Code    int              `json:"code"`
+	Message string           `json:"message"`
+	Data    LiveSessionsData `json:"data"`
+	TTL     int64            `json:"ttl"`
+}
+
+type LiveStartData struct {
+	SessionId    int64 `json:"session_id"`
+	State        int32 `json:"state"`
+	StartedAt    int64 `json:"started_at"`
+	StateVersion int32 `json:"state_version"`
+	Replayed     bool  `json:"replayed"`
+}
+
+type LiveStartResponse struct {
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    LiveStartData `json:"data"`
+	TTL     int64         `json:"ttl"`
+}
+
 type LoginData struct {
 	Mid          int64  `json:"mid"`
 	Token        string `json:"token"`
@@ -164,6 +994,131 @@ type LoginResponse struct {
 	Message string    `json:"message"`
 	Data    LoginData `json:"data"`
 	TTL     int64     `json:"ttl"`
+}
+
+type MbAutoRenewData struct {
+	Duplicated bool         `json:"duplicated"`
+	Membership MbMembership `json:"membership"`
+}
+
+type MbAutoRenewResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    MbAutoRenewData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type MbEntitlementBrief struct {
+	Code       string `json:"code"`
+	Name       string `json:"name"`
+	MinVipType int32  `json:"min_vip_type"`
+}
+
+type MbEntitlementDecision struct {
+	Code    string `json:"code"`
+	Granted bool   `json:"granted"`
+	Reason  int32  `json:"reason"`
+}
+
+type MbEntitlementsData struct {
+	Decisions []MbEntitlementDecision `json:"decisions"`
+	ExpireAt  int64                   `json:"expire_at"`
+	VipType   int32                   `json:"vip_type"`
+}
+
+type MbEntitlementsResponse struct {
+	Code    int                `json:"code"`
+	Message string             `json:"message"`
+	Data    MbEntitlementsData `json:"data"`
+	TTL     int64              `json:"ttl"`
+}
+
+type MbGrant struct {
+	GrantId        int64  `json:"grant_id"`
+	VipType        int32  `json:"vip_type"`
+	Action         string `json:"action"`
+	DeltaDays      int32  `json:"delta_days"`
+	PlanId         int64  `json:"plan_id"`
+	Source         int32  `json:"source"`
+	BizOrderNo     string `json:"biz_order_no"`
+	BeforeExpireAt int64  `json:"before_expire_at"`
+	AfterExpireAt  int64  `json:"after_expire_at"`
+	Reason         string `json:"reason"`
+	Ctime          int64  `json:"ctime"`
+}
+
+type MbGrantsData struct {
+	Grants   []MbGrant `json:"grants"`
+	Total    int64     `json:"total"`
+	Page     int64     `json:"page"`
+	PageSize int64     `json:"page_size"`
+}
+
+type MbGrantsResponse struct {
+	Code    int          `json:"code"`
+	Message string       `json:"message"`
+	Data    MbGrantsData `json:"data"`
+	TTL     int64        `json:"ttl"`
+}
+
+type MbMembership struct {
+	Mid               int64  `json:"mid"`
+	VipType           int32  `json:"vip_type"`
+	StartAt           int64  `json:"start_at"`
+	ExpireAt          int64  `json:"expire_at"`
+	AutoRenew         bool   `json:"auto_renew"`
+	AutoRenewChannel  string `json:"auto_renew_channel"`
+	AutoRenewSignedAt int64  `json:"auto_renew_signed_at"`
+	Source            int32  `json:"source"`
+	PaidMonthCount    int32  `json:"paid_month_count"`
+}
+
+type MbMyData struct {
+	Found        bool                 `json:"found"` // false = 从未开通（不是错误）
+	Membership   MbMembership         `json:"membership"`
+	ServerNow    int64                `json:"server_now"`
+	Entitlements []MbEntitlementBrief `json:"entitlements"`
+}
+
+type MbMyResponse struct {
+	Code    int      `json:"code"`
+	Message string   `json:"message"`
+	Data    MbMyData `json:"data"`
+	TTL     int64    `json:"ttl"`
+}
+
+type MbPlan struct {
+	PlanId             int64   `json:"plan_id"`
+	PlanCode           string  `json:"plan_code"`
+	Name               string  `json:"name"`
+	Description        string  `json:"description"`
+	VipType            int32   `json:"vip_type"`
+	DurationDays       int32   `json:"duration_days"`
+	UnitCount          int32   `json:"unit_count"`
+	PriceMinor         int64   `json:"price_minor"`      // 原价（分）
+	PromPriceMinor     int64   `json:"prom_price_minor"` // 0 表示无促销
+	Currency           string  `json:"currency"`
+	Platforms          []int32 `json:"platforms"`
+	AutoRenewSupported bool    `json:"auto_renew_supported"`
+	State              int32   `json:"state"` // 1 草稿、2 在售、3 已下架
+}
+
+type MbPlanResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    MbPlan `json:"data"`
+	TTL     int64  `json:"ttl"`
+}
+
+type MbPlansData struct {
+	Plans []MbPlan `json:"plans"`
+}
+
+type MbPlansResponse struct {
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    MbPlansData `json:"data"`
+	TTL     int64       `json:"ttl"`
 }
 
 type MemberBaseData struct {
@@ -202,6 +1157,29 @@ type MemberFullResponse struct {
 	Message string         `json:"message"`
 	Data    MemberFullData `json:"data"`
 	TTL     int64          `json:"ttl"`
+}
+
+type ModerationAppealData struct {
+	Appeal ModerationAppealInfo `json:"appeal"`
+}
+
+type ModerationAppealInfo struct {
+	AppealId     int64  `json:"appeal_id"`
+	TaskId       int64  `json:"task_id"`
+	Mid          int64  `json:"mid"`
+	Content      string `json:"content"`
+	FinalVerdict int32  `json:"final_verdict"`
+	FinalReason  string `json:"final_reason"`
+	Handler      int64  `json:"handler"`
+	Ctime        int64  `json:"ctime"`
+	Mtime        int64  `json:"mtime"`
+}
+
+type ModerationAppealResponse struct {
+	Code    int                  `json:"code"`
+	Message string               `json:"message"`
+	Data    ModerationAppealData `json:"data"`
+	TTL     int64                `json:"ttl"`
 }
 
 type MoralData struct {
@@ -243,6 +1221,29 @@ type NameplateInfo struct {
 	Condition  string `json:"condition"`
 }
 
+type NotifyDndData struct {
+	Preference NotifyDndPreference `json:"preference"`
+	Found      bool                `json:"found"`
+}
+
+type NotifyDndPreference struct {
+	Mid           int64   `json:"mid"`
+	MutedChannels []int32 `json:"muted_channels"`
+	QuietStart    string  `json:"quiet_start"`
+	QuietEnd      string  `json:"quiet_end"`
+	Timezone      string  `json:"timezone"`
+	Enabled       bool    `json:"enabled"`
+	Ctime         int64   `json:"ctime"`
+	Mtime         int64   `json:"mtime"`
+}
+
+type NotifyDndResponse struct {
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    NotifyDndData `json:"data"`
+	TTL     int64         `json:"ttl"`
+}
+
 type OfficialInfo struct {
 	Role  int32  `json:"role"`
 	Title string `json:"title"`
@@ -258,6 +1259,154 @@ type OfficialInfoResponse struct {
 	Message string           `json:"message"`
 	Data    OfficialInfoData `json:"data"`
 	TTL     int64            `json:"ttl"`
+}
+
+type OrderCancelData struct {
+	Duplicated bool      `json:"duplicated"`
+	Order      OrderInfo `json:"order"`
+}
+
+type OrderCancelResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    OrderCancelData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type OrderCreateData struct {
+	Duplicated   bool      `json:"duplicated"`
+	Accepted     bool      `json:"accepted"`      // false = 受理未成功（余额不足等），order 仍有单据可查
+	RejectReason string    `json:"reject_reason"` // 服务侧结论原文，网关不改写
+	Order        OrderInfo `json:"order"`
+}
+
+type OrderCreateResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    OrderCreateData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type OrderDetailResponse struct {
+	Code    int       `json:"code"`
+	Message string    `json:"message"`
+	Data    OrderInfo `json:"data"`
+	TTL     int64     `json:"ttl"`
+}
+
+type OrderEvent struct {
+	EventId   int64  `json:"event_id"`
+	FromState int32  `json:"from_state"`
+	ToState   int32  `json:"to_state"`
+	Reason    string `json:"reason"`
+	Ctime     int64  `json:"ctime"`
+}
+
+type OrderEventsData struct {
+	Events   []OrderEvent `json:"events"`
+	Total    int64        `json:"total"`
+	Page     int64        `json:"page"`
+	PageSize int64        `json:"page_size"`
+}
+
+type OrderEventsResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    OrderEventsData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type OrderInfo struct {
+	OrderNo        string `json:"order_no"`
+	BizType        int32  `json:"biz_type"` // 1 会员、2 硬币包
+	PlanId         int64  `json:"plan_id"`
+	PlanCode       string `json:"plan_code"`
+	Title          string `json:"title"`
+	Quantity       int32  `json:"quantity"`
+	DurationDays   int32  `json:"duration_days"`
+	CoinAmount     int32  `json:"coin_amount"`
+	UnitPriceMinor int64  `json:"unit_price_minor"`
+	AmountMinor    int64  `json:"amount_minor"`
+	RefundedMinor  int64  `json:"refunded_minor"`
+	Currency       string `json:"currency"`
+	PayMethod      int32  `json:"pay_method"`
+	State          int32  `json:"state"` // 见 tradeorder.OrderState
+	FulfillState   int32  `json:"fulfill_state"`
+	FulfillDetail  string `json:"fulfill_detail"`
+	PaymentNo      string `json:"payment_no"`
+	ExpireAt       int64  `json:"expire_at"`
+	Platform       int32  `json:"platform"`
+	CreatedAt      int64  `json:"created_at"`
+	PaidAt         int64  `json:"paid_at"`
+	FulfilledAt    int64  `json:"fulfilled_at"`
+	ClosedAt       int64  `json:"closed_at"`
+}
+
+type OrderListData struct {
+	Orders   []OrderInfo `json:"orders"`
+	Total    int64       `json:"total"`
+	Page     int64       `json:"page"`
+	PageSize int64       `json:"page_size"`
+}
+
+type OrderListResponse struct {
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    OrderListData `json:"data"`
+	TTL     int64         `json:"ttl"`
+}
+
+type OrderRefundData struct {
+	Duplicated bool      `json:"duplicated"`
+	Order      OrderInfo `json:"order"`
+}
+
+type OrderRefundResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    OrderRefundData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type ParamAbortUpload struct {
+	UploadId string `form:"upload_id"`
+	IP       string `form:"ip"`
+}
+
+type ParamAddBlack struct {
+	Mid      int64  `form:"mid"`
+	BlackMid int64  `form:"black_mid"`
+	IP       string `form:"ip"`
+}
+
+type ParamAddFav struct {
+	Tp    int32 `form:"tp"`
+	Mid   int64 `form:"mid"`
+	Fid   int64 `form:"fid"`
+	Oid   int64 `form:"oid"`
+	Otype int32 `form:"otype"`
+}
+
+type ParamAddFolder struct {
+	Tp          int32  `form:"tp"`
+	Mid         int64  `form:"mid"`
+	Name        string `form:"name"`
+	Description string `form:"description,optional"`
+	Cover       string `form:"cover,optional"`
+	Public      int32  `form:"public,optional"`
+}
+
+type ParamAddShare struct {
+	Oid  int64  `form:"oid"`
+	Mid  int64  `form:"mid"`
+	Type int32  `form:"type"`
+	IP   string `form:"ip"`
+}
+
+type ParamAddSpecial struct {
+	Mid        int64  `form:"mid"`
+	SpecialMid int64  `form:"special_mid"`
+	IP         string `form:"ip"`
 }
 
 type ParamBaseAll struct {
@@ -290,8 +1439,187 @@ type ParamCaptureVerify struct {
 	CaptureCode string `form:"capture_code"`
 }
 
+type ParamCatalogEpid struct {
+	Epid int64 `path:"epid"`
+}
+
+type ParamCatalogSeasonId struct {
+	SeasonId int64 `path:"season_id"`
+}
+
+type ParamCatalogWorkId struct {
+	WorkId int64 `path:"work_id"`
+}
+
+type ParamCheckHistoryPassword struct {
+	Mid      int64  `form:"mid"`
+	Password string `form:"password"` // 可逗号分隔多个
+}
+
+type ParamClearSearchHistory struct {
+	Mid       int64  `form:"mid"`
+	Confirm   bool   `form:"confirm"`
+	RequestId string `form:"request_id,optional"`
+}
+
+type ParamCoinAccount struct {
+	Mid int64 `form:"mid"`
+}
+
+type ParamCoinTarget struct {
+	Aid int64 `form:"aid"`
+}
+
+type ParamCoinTargets struct {
+	Aids []int64 `form:"aids,split"`
+}
+
+type ParamCoinToss struct {
+	Mid       int64  `form:"mid"`
+	TargetAid int64  `form:"target_aid"`
+	Count     int32  `form:"count,optional"` // <=0 由服务按 1 处理
+	Platform  int32  `form:"platform,optional"`
+	RequestId string `form:"request_id"` // 幂等键：同一 key 重放不重复扣币
+	TraceId   string `form:"trace_id,optional"`
+}
+
+type ParamCoinTossCancel struct {
+	Mid       int64  `form:"mid"`
+	TargetAid int64  `form:"target_aid"`
+	RequestId string `form:"request_id"`
+	TraceId   string `form:"trace_id,optional"`
+}
+
+type ParamCoinTossMine struct {
+	Mid      int64 `form:"mid"`
+	State    int32 `form:"state,optional"`
+	Page     int32 `form:"page,default=1"`
+	PageSize int32 `form:"page_size,optional"`
+}
+
+type ParamCommentStats struct {
+	Oid int64 `form:"oid"`
+	Tp  int32 `form:"tp"`
+}
+
+type ParamCompleteUpload struct {
+	UploadId string            `json:"upload_id"`
+	Parts    []UploadChunkPart `json:"parts"`
+	Md5      string            `json:"md5"`
+	IP       string            `json:"ip"`
+}
+
 type ParamCookie struct {
 	Cookie string `form:"cookie"`
+}
+
+type ParamCreateSubmission struct {
+	Mid    int64  `form:"mid"`
+	Title  string `form:"title"`
+	Desc   string `form:"desc"`
+	Cover  string `form:"cover"`
+	Typeid int32  `form:"typeid"`
+	Tag    string `form:"tag"`
+	IP     string `form:"ip"`
+}
+
+type ParamDanmakuDelete struct {
+	Dmid   int64  `form:"dmid"`
+	Mid    int64  `form:"mid"`
+	Reason string `form:"reason,optional"`
+}
+
+type ParamDanmakuList struct {
+	Oid             int64 `form:"oid"`
+	ViewerMid       int64 `form:"viewer_mid,optional"`
+	StartSeg        int32 `form:"start_seg,optional"`
+	EndSeg          int32 `form:"end_seg,optional"`
+	StartProgressMs int64 `form:"start_progress_ms,optional"`
+	EndProgressMs   int64 `form:"end_progress_ms,optional"`
+	Limit           int32 `form:"limit,optional"`
+	WithSelfPending bool  `form:"with_self_pending,optional"`
+}
+
+type ParamDanmakuPost struct {
+	Oid            int64  `form:"oid"`
+	Aid            int64  `form:"aid,optional"`
+	Mid            int64  `form:"mid"`
+	ProgressMs     int64  `form:"progress_ms"`
+	Mode           int32  `form:"mode,optional"` // 缺省按滚动
+	Fontsize       int32  `form:"fontsize,optional"`
+	Color          int32  `form:"color,optional"`
+	Content        string `form:"content"`
+	IdempotencyKey string `form:"idempotency_key,optional"`
+	ClientMsgId    string `form:"client_msg_id,optional"`
+}
+
+type ParamDanmakuReport struct {
+	Dmid        int64  `form:"dmid"`
+	ReporterMid int64  `form:"reporter_mid"`
+	Reason      int32  `form:"reason,optional"`
+	Content     string `form:"content,optional"`
+}
+
+type ParamDanmakuUserBlock struct {
+	Mid        int64  `form:"mid"`
+	Type       int32  `form:"type"` // 1 屏蔽用户、2 屏蔽关键词
+	BlockedMid int64  `form:"blocked_mid,optional"`
+	Keyword    string `form:"keyword,optional"`
+	Unblock    bool   `form:"unblock,optional"`
+}
+
+type ParamDanmakuUserBlocks struct {
+	Mid  int64 `form:"mid"`
+	Type int32 `form:"type,optional"`
+	Pn   int32 `form:"pn,default=1"`
+	Ps   int32 `form:"ps,default=50"`
+}
+
+type ParamDelFav struct {
+	Tp    int32 `form:"tp"`
+	Mid   int64 `form:"mid"`
+	Fid   int64 `form:"fid"`
+	Oid   int64 `form:"oid"`
+	Otype int32 `form:"otype"`
+}
+
+type ParamDelFolder struct {
+	Tp  int32 `form:"tp"`
+	Mid int64 `form:"mid"`
+	Fid int64 `form:"fid"`
+}
+
+type ParamDeleteComment struct {
+	Rpid int64 `form:"rpid"`
+	Mid  int64 `form:"mid"`
+}
+
+type ParamDeleteFeed struct {
+	Mid      int64  `form:"mid"`
+	FeedId   int64  `form:"feed_id"`
+	Operator string `form:"operator"`
+	IP       string `form:"ip"`
+}
+
+type ParamDeleteSearchHistory struct {
+	Mid       int64  `form:"mid"`
+	Keyword   string `form:"keyword"`
+	Confirm   bool   `form:"confirm"`
+	RequestId string `form:"request_id,optional"`
+}
+
+type ParamDeleteSubmission struct {
+	Aid int64  `path:"aid"`
+	Mid int64  `form:"mid"`
+	IP  string `form:"ip"`
+}
+
+type ParamEngagementStats struct {
+	Business   string  `form:"business"`
+	OriginId   int64   `form:"origin_id"`
+	MessageIds []int64 `form:"message_ids,split"`
+	Mid        int64   `form:"mid"`
+	IP         string  `form:"ip"`
 }
 
 type ParamExp struct {
@@ -307,6 +1635,264 @@ type ParamFace struct {
 	Face string `form:"face"`
 }
 
+type ParamFeedMid struct {
+	Mid int64  `form:"mid"`
+	IP  string `form:"ip"`
+}
+
+type ParamFollow struct {
+	Mid         int64  `form:"mid"`
+	FollowerMid int64  `form:"follower_mid"`
+	IP          string `form:"ip"`
+}
+
+type ParamGetDnd struct {
+	Mid int64 `form:"mid"`
+}
+
+type ParamGetUploadUrl struct {
+	UploadId  string `form:"upload_id"`
+	ChunkNo   int32  `form:"chunk_no"`
+	ChunkSize int64  `form:"chunk_size"`
+	IP        string `form:"ip"`
+}
+
+type ParamHasLike struct {
+	Business   string  `form:"business"`
+	MessageIds []int64 `form:"message_ids,split"`
+	Mid        int64   `form:"mid"`
+	IP         string  `form:"ip"`
+}
+
+type ParamHotKeywords struct {
+	Scope     string `form:"scope,optional"` // global 或 zone:<id>
+	Limit     int32  `form:"limit,optional"`
+	ViewerMid int64  `form:"viewer_mid,optional"`
+	Platform  string `form:"platform,optional"`
+}
+
+type ParamInboxDelete struct {
+	Mid    int64   `form:"mid"`
+	MsgIds []int64 `form:"msg_ids,split"`
+}
+
+type ParamInboxMarkRead struct {
+	Mid      int64   `form:"mid"`
+	MsgIds   []int64 `form:"msg_ids,split"`
+	Category int32   `form:"category,optional"`
+}
+
+type ParamInboxMessages struct {
+	Mid        int64  `form:"mid"`
+	Category   int32  `form:"category,optional"` // 0 全部分类
+	Cursor     string `form:"cursor,optional"`
+	Ps         int32  `form:"ps,default=20"`
+	UnreadOnly bool   `form:"unread_only,optional"`
+}
+
+type ParamInboxUnread struct {
+	Mid            int64 `form:"mid"`
+	ForceRecompute bool  `form:"force_recompute,optional"`
+}
+
+type ParamInitUpload struct {
+	Mid         int64  `form:"mid"`
+	Filename    string `form:"filename"`
+	Size        int64  `form:"size"`
+	Typeid      int32  `form:"typeid"`
+	Md5         string `form:"md5"`
+	ChunkSize   int64  `form:"chunk_size"`
+	TotalChunks int32  `form:"total_chunks"`
+	IP          string `form:"ip"`
+}
+
+type ParamIsFavored struct {
+	Tp  int32 `form:"tp"`
+	Mid int64 `form:"mid"`
+	Oid int64 `form:"oid"`
+}
+
+type ParamIsFavoreds struct {
+	Tp   int32   `form:"tp"`
+	Mid  int64   `form:"mid"`
+	Oids []int64 `form:"oids,split"`
+}
+
+type ParamLike struct {
+	Business  string `form:"business"`
+	Mid       int64  `form:"mid"`
+	UpMid     int64  `form:"up_mid"`
+	OriginId  int64  `form:"origin_id"`
+	MessageId int64  `form:"message_id"`
+	Action    int32  `form:"action"`
+	IP        string `form:"ip"`
+}
+
+type ParamListBlacks struct {
+	Mid int64  `form:"mid"`
+	Pn  int32  `form:"pn,default=1"`
+	Ps  int32  `form:"ps,default=20"`
+	IP  string `form:"ip"`
+}
+
+type ParamListCommentReplies struct {
+	Root int64 `form:"root"`
+	Mid  int64 `form:"mid,optional"`
+	Pn   int32 `form:"pn,default=1"`
+	Ps   int32 `form:"ps,default=20"`
+}
+
+type ParamListComments struct {
+	Oid  int64 `form:"oid"`
+	Tp   int32 `form:"tp"`
+	Mid  int64 `form:"mid,optional"`  // 查看者，用于服务侧过滤黑名单
+	Sort int32 `form:"sort,optional"` // 0/1 热度、2 时间倒序
+	Pn   int32 `form:"pn,default=1"`
+	Ps   int32 `form:"ps,default=20"`
+}
+
+type ParamListSubmissions struct {
+	Mid    int64  `form:"mid"`
+	Typeid int32  `form:"typeid"`
+	Pn     int32  `form:"pn,default=1"`
+	Ps     int32  `form:"ps,default=20"`
+	IP     string `form:"ip"`
+}
+
+type ParamListWorks struct {
+	Typeid int32 `form:"typeid"`
+	State  int32 `form:"state,default=-1"`
+	Pn     int32 `form:"pn,default=1"`
+	Ps     int32 `form:"ps,default=20"`
+}
+
+type ParamLiveAnchorMutate struct {
+	RoomId      int64  `form:"room_id"`
+	OperatorMid int64  `form:"operator_mid"`
+	TargetMid   int64  `form:"target_mid"`
+	Action      int32  `form:"action"` // 1 绑定或重新启用、2 解绑
+	Role        int32  `form:"role,optional"`
+	RequestId   string `form:"request_id"`
+}
+
+type ParamLiveAnchors struct {
+	RoomId      int64 `form:"room_id"`
+	Role        int32 `form:"role,optional"` // 1 房主、2 联合主播、3 房管
+	OnlyEnabled bool  `form:"only_enabled,optional"`
+	Page        int32 `form:"page,default=1"`
+	PageSize    int32 `form:"page_size,optional"`
+}
+
+type ParamLiveAreas struct {
+	ParentAreaId int64 `form:"parent_area_id,default=-1"` // -1 不过滤、0 只取一级分区
+	State        int32 `form:"state,default=-1"`          // -1 不过滤、1 启用、0 停用
+	Page         int32 `form:"page,default=1"`
+	PageSize     int32 `form:"page_size,optional"`
+}
+
+type ParamLiveClose struct {
+	RoomId      int64  `form:"room_id"`
+	OperatorMid int64  `form:"operator_mid"`
+	Reason      string `form:"reason,optional"`
+	RequestId   string `form:"request_id"`
+}
+
+type ParamLiveEnd struct {
+	RoomId    int64  `form:"room_id"`
+	SessionId int64  `form:"session_id,optional"` // 0 表示该房间当前进行中场次
+	Mid       int64  `form:"mid"`
+	EndReason int32  `form:"end_reason,optional"`
+	RequestId string `form:"request_id"`
+}
+
+type ParamLivePrepare struct {
+	RoomId     int64  `form:"room_id"`
+	Mid        int64  `form:"mid"`
+	Platform   int32  `form:"platform,optional"`
+	DeviceHash string `form:"device_hash,optional"`
+	IpHash     string `form:"ip_hash,optional"`
+	RequestId  string `form:"request_id"`
+}
+
+type ParamLiveRoom struct {
+	RoomId            int64 `form:"room_id"`
+	WithSetting       bool  `form:"with_setting,optional"`
+	WithActiveSession bool  `form:"with_active_session,optional"`
+}
+
+type ParamLiveRoomByUp struct {
+	OwnerMid          int64 `form:"owner_mid"`
+	WithSetting       bool  `form:"with_setting,optional"`
+	WithActiveSession bool  `form:"with_active_session,optional"`
+}
+
+type ParamLiveRoomCreate struct {
+	Mid                  int64  `form:"mid"`
+	Title                string `form:"title"`
+	Cover                string `form:"cover,optional"`
+	AreaId               int64  `form:"area_id"`
+	Platform             int32  `form:"platform,optional"` // 1 android、2 ios、3 harmony、4 desktop
+	AppVersion           string `form:"app_version,optional"`
+	DanmakuEnabled       bool   `form:"danmaku_enabled,optional"`
+	ReplyEnabled         bool   `form:"reply_enabled,optional"`
+	RecordEnabled        bool   `form:"record_enabled,optional"`
+	LinkmicEnabled       bool   `form:"linkmic_enabled,optional"`
+	LiveType             int32  `form:"live_type,optional"`
+	MinClientVersionCode int32  `form:"min_client_version_code,optional"`
+	RequestId            string `form:"request_id"`
+}
+
+type ParamLiveRoomInfoUpdate struct {
+	RoomId      int64  `form:"room_id"`
+	OperatorMid int64  `form:"operator_mid"`
+	Title       string `form:"title,optional"` // 空串表示不修改
+	Cover       string `form:"cover,optional"`
+	AreaId      int64  `form:"area_id,optional"`
+	RequestId   string `form:"request_id"`
+}
+
+type ParamLiveRoomSettingUpdate struct {
+	RoomId               int64  `form:"room_id"`
+	OperatorMid          int64  `form:"operator_mid"`
+	DanmakuEnabled       bool   `form:"danmaku_enabled"`
+	ReplyEnabled         bool   `form:"reply_enabled"`
+	RecordEnabled        bool   `form:"record_enabled"`
+	LinkmicEnabled       bool   `form:"linkmic_enabled"`
+	LiveType             int32  `form:"live_type"`
+	MinClientVersionCode int32  `form:"min_client_version_code"`
+	RequestId            string `form:"request_id"`
+}
+
+type ParamLiveRooms struct {
+	OwnerMid int64 `form:"owner_mid,optional"`
+	AreaId   int64 `form:"area_id,optional"`
+	State    int32 `form:"state,optional"`
+	Order    int32 `form:"order,optional"` // 1 直播中优先、2 创建时间倒序
+	Page     int32 `form:"page,default=1"`
+	PageSize int32 `form:"page_size,optional"` // 0 由服务取默认并截断到上限
+}
+
+type ParamLiveSession struct {
+	SessionId int64 `form:"session_id,optional"`
+	RoomId    int64 `form:"room_id,optional"` // session_id=0 时按房间取最近一场
+	Offset    int32 `form:"offset,optional"`  // 从最近一场往前数
+}
+
+type ParamLiveSessions struct {
+	RoomId   int64  `form:"room_id"`
+	Mid      int64  `form:"mid,optional"`
+	State    int32  `form:"state,optional"`
+	Cursor   string `form:"cursor,optional"`
+	PageSize int32  `form:"page_size,optional"`
+}
+
+type ParamLiveStart struct {
+	RoomId    int64  `form:"room_id"`
+	Mid       int64  `form:"mid"`
+	StreamId  string `form:"stream_id,optional"`
+	RequestId string `form:"request_id"`
+}
+
 type ParamLogin struct {
 	Account     string `form:"account"`
 	Password    string `form:"password"`
@@ -315,6 +1901,51 @@ type ParamLogin struct {
 	IP          string `form:"ip"`
 	Device      string `form:"device"`
 	Buvid       string `form:"buvid"`
+}
+
+type ParamLoginLogs struct {
+	Mid   int64 `form:"mid"`
+	Limit int32 `form:"limit,default=20"`
+}
+
+type ParamMbAutoRenew struct {
+	Mid       int64  `form:"mid"`
+	VipType   int32  `form:"vip_type"`
+	On        bool   `form:"on"`
+	Channel   string `form:"channel,optional"` // on=true 必填；本项目只接受 SANDBOX
+	RequestId string `form:"request_id"`       // 幂等键，原样透传给下游
+	TraceId   string `form:"trace_id,optional"`
+}
+
+type ParamMbEntitlements struct {
+	Mid     int64    `form:"mid"`
+	Codes   []string `form:"codes,split"`
+	TraceId string   `form:"trace_id,optional"`
+}
+
+type ParamMbGrants struct {
+	Mid      int64 `form:"mid"`
+	VipType  int32 `form:"vip_type,optional"`
+	FromTs   int64 `form:"from_ts,optional"`
+	ToTs     int64 `form:"to_ts,optional"`
+	Page     int32 `form:"page,default=1"`
+	PageSize int32 `form:"page_size,optional"` // 0 由服务取默认并截断到上限
+}
+
+type ParamMbMy struct {
+	Mid     int64 `form:"mid"`
+	VipType int32 `form:"vip_type,optional"` // 0 表示返回当前生效的最高档
+}
+
+type ParamMbPlan struct {
+	PlanId   int64  `form:"plan_id,optional"`
+	PlanCode string `form:"plan_code,optional"`
+}
+
+type ParamMbPlans struct {
+	Platform int32 `form:"platform,optional"` // 1 android、2 ios、3 harmony、4 desktop、5 web；0 不按平台过滤
+	VipType  int32 `form:"vip_type,optional"` // 0 全部档位
+	All      bool  `form:"all,optional"`      // true 时包含已下架套餐（续费页要能显示旧档）
 }
 
 type ParamMid struct {
@@ -327,6 +1958,197 @@ type ParamMids struct {
 
 type ParamNames struct {
 	Names []string `form:"names,split"`
+}
+
+type ParamOrderCancel struct {
+	Mid       int64  `form:"mid"`
+	OrderNo   string `form:"order_no"`
+	RequestId string `form:"request_id"`
+	Reason    string `form:"reason"`
+}
+
+type ParamOrderCreate struct {
+	Mid         int64  `form:"mid"`
+	BizType     int32  `form:"biz_type"`
+	PlanId      int64  `form:"plan_id,optional"`
+	PlanCode    string `form:"plan_code,optional"`
+	Quantity    int32  `form:"quantity,optional"`
+	PayMethod   int32  `form:"pay_method"`            // 1 余额、2 沙箱渠道
+	AmountMinor int64  `form:"amount_minor,optional"` // 客户端上报值，仅用于服务端一致性校验
+	Platform    int32  `form:"platform,optional"`
+	RequestId   string `form:"request_id"` // 必填幂等键
+	TraceId     string `form:"trace_id,optional"`
+}
+
+type ParamOrderDetail struct {
+	Mid     int64  `form:"mid"` // 必填：网关强制按归属读取，服务侧会二次校验
+	OrderNo string `form:"order_no"`
+}
+
+type ParamOrderEvents struct {
+	Mid      int64  `form:"mid"`
+	OrderNo  string `form:"order_no"`
+	Page     int32  `form:"page,default=1"`
+	PageSize int32  `form:"page_size,optional"`
+}
+
+type ParamOrderList struct {
+	Mid      int64 `form:"mid"`
+	State    int32 `form:"state,optional"`
+	BizType  int32 `form:"biz_type,optional"`
+	Page     int32 `form:"page,default=1"`
+	PageSize int32 `form:"page_size,optional"`
+}
+
+type ParamOrderRefundRequest struct {
+	Mid         int64  `form:"mid"`
+	OrderNo     string `form:"order_no"`
+	AmountMinor int64  `form:"amount_minor,optional"` // 0 = 全额
+	Reason      string `form:"reason"`                // 必填
+	RequestId   string `form:"request_id"`
+}
+
+type ParamPinComment struct {
+	Rpid     int64 `form:"rpid"`
+	Oid      int64 `form:"oid"`
+	Pin      bool  `form:"pin"`
+	AdminMid int64 `form:"admin_mid"` // 稿件 UP 主或管理员，由 comment 服务校验归属
+}
+
+type ParamPinFeed struct {
+	Mid      int64  `form:"mid"`
+	FeedId   int64  `form:"feed_id"`
+	Operator string `form:"operator"`
+	IP       string `form:"ip"`
+}
+
+type ParamPlaybackHeartbeat struct {
+	SessionId   string `form:"session_id"`
+	PositionMs  int64  `form:"position_ms"`
+	DurationMs  int64  `form:"duration_ms,optional"`
+	BufferCount int32  `form:"buffer_count,optional"`
+	AvgBitrate  int64  `form:"avg_bitrate,optional"`
+	LastError   int32  `form:"last_error,optional"`
+	TraceId     string `form:"trace_id,optional"`
+}
+
+type ParamPlaybackSession struct {
+	SessionId string `form:"session_id"`
+	Mid       int64  `form:"mid,optional"` // 必须与会话归属一致，网关做越权保护
+}
+
+type ParamPlaybackToken struct {
+	ContentType int32  `form:"content_type,optional"` // 1=UGC(aid)、2=PGC(epid)，缺省按 UGC
+	Aid         int64  `form:"aid,optional"`
+	Epid        int64  `form:"epid,optional"`
+	Vid         string `form:"vid,optional"`         // UGC bvid，仅排障与日志关联
+	TemplateId  int64  `form:"template_id,optional"` // 0 表示由网关选可用最高清晰度
+	Mid         int64  `form:"mid,optional"`         // 0 游客
+	Platform    int32  `form:"platform,optional"`    // 1 android/2 ios/3 harmony/4 desktop
+	AppVersion  string `form:"app_version,optional"`
+	Region      string `form:"region,optional"`     // PGC 必填，用于版权窗口校验
+	RequestId   string `form:"request_id,optional"` // 幂等键，重试必须复用
+}
+
+type ParamPmConversationGet struct {
+	Mid     int64  `form:"mid"`
+	PeerMid int64  `form:"peer_mid"`
+	TraceId string `form:"trace_id,optional"`
+}
+
+type ParamPmConversations struct {
+	Mid           int64  `form:"mid"`
+	Cursor        string `form:"cursor,optional"`
+	Ps            int32  `form:"ps,optional"` // 0 表示由服务按 PrivateMessage.PageSize 决定
+	OnlyUnread    bool   `form:"only_unread,optional"`
+	IncludeHidden bool   `form:"include_hidden,optional"`
+	TraceId       string `form:"trace_id,optional"`
+}
+
+type ParamPmHideConversation struct {
+	Mid            int64  `form:"mid"`
+	ConversationId int64  `form:"conversation_id"`
+	Hide           bool   `form:"hide"` // true 隐藏、false 恢复；只影响本人列表
+	TraceId        string `form:"trace_id,optional"`
+}
+
+type ParamPmMarkRead struct {
+	ConversationId int64  `form:"conversation_id"`
+	Mid            int64  `form:"mid"`
+	ReadSeq        int64  `form:"read_seq"`
+	TraceId        string `form:"trace_id,optional"`
+}
+
+type ParamPmMessages struct {
+	ConversationId int64  `form:"conversation_id"`
+	Mid            int64  `form:"mid"`                 // 查看者：解密授权与可见性过滤口径
+	CursorSeq      int64  `form:"cursor_seq,optional"` // 0 表示从最新开始
+	Ps             int32  `form:"ps,optional"`
+	TraceId        string `form:"trace_id,optional"`
+}
+
+type ParamPmReport struct {
+	MsgId       int64  `form:"msg_id"`
+	ReporterMid int64  `form:"reporter_mid"`
+	Reason      int32  `form:"reason"` // 稳定原因码，由端与网关约定
+	Description string `form:"description,optional"`
+	TraceId     string `form:"trace_id,optional"`
+}
+
+type ParamPmSend struct {
+	Mid            int64  `form:"mid"`
+	ConversationId int64  `form:"conversation_id,optional"`
+	PeerMid        int64  `form:"peer_mid,optional"`
+	MsgType        int32  `form:"msg_type"` // 1 文本、2 图、3 语音、4 短视频、5 分享卡片
+	Content        string `form:"content,optional"`
+	MediaRef       string `form:"media_ref,optional"` // 非文本载体必填，服务侧校验
+	ClientMsgId    string `form:"client_msg_id"`
+	TraceId        string `form:"trace_id,optional"`
+}
+
+type ParamPmSetting struct {
+	Mid     int64  `form:"mid"`
+	TraceId string `form:"trace_id,optional"`
+}
+
+type ParamPmSettingUpdate struct {
+	Mid              int64  `form:"mid"`
+	AllowFrom        int32  `form:"allow_from,optional"`
+	RejectStranger   int32  `form:"reject_stranger,optional"`
+	KeywordFilter    int32  `form:"keyword_filter,optional"`
+	MuteConversation int32  `form:"mute_conversation,optional"`
+	TraceId          string `form:"trace_id,optional"`
+}
+
+type ParamPmUnread struct {
+	Mid     int64  `form:"mid"`
+	Force   bool   `form:"force,optional"` // true 忽略缓存回源重算
+	TraceId string `form:"trace_id,optional"`
+}
+
+type ParamPmWithdraw struct {
+	MsgId       int64  `form:"msg_id"`
+	OperatorMid int64  `form:"operator_mid"`
+	Source      int32  `form:"source"`
+	Reason      string `form:"reason,optional"` // 仅入审计，不回流给对端
+	TraceId     string `form:"trace_id,optional"`
+}
+
+type ParamPostComment struct {
+	Oid     int64  `form:"oid"`
+	Tp      int32  `form:"tp"`
+	Root    int64  `form:"root,optional"`
+	Parent  int64  `form:"parent,optional"`
+	Mid     int64  `form:"mid"`
+	Content string `form:"content"`
+	TraceId string `form:"trace_id,optional"`
+}
+
+type ParamPullFeed struct {
+	Mid    int64  `form:"mid"`
+	Cursor int64  `form:"cursor"`
+	Ps     int32  `form:"ps,default=20"`
+	IP     string `form:"ip"`
 }
 
 type ParamRealnameApply struct {
@@ -354,8 +2176,133 @@ type ParamRegister struct {
 	IP          string `form:"ip"`
 }
 
+type ParamRelation struct {
+	Mid   int64  `form:"mid"`
+	Owner int64  `form:"owner"`
+	IP    string `form:"ip"`
+}
+
 type ParamRenew struct {
 	RefreshToken string `form:"refresh_token"`
+}
+
+type ParamReportComment struct {
+	Rpid        int64  `form:"rpid"`
+	ReporterMid int64  `form:"reporter_mid"`
+	Reason      int32  `form:"reason"`
+	Content     string `form:"content,optional"`
+	TraceId     string `form:"trace_id,optional"`
+}
+
+type ParamReportQuery struct {
+	QueryId      string `form:"query_id"`
+	Keyword      string `form:"keyword,optional"`
+	SearchType   int32  `form:"search_type,optional"`
+	Mid          int64  `form:"mid,optional"`
+	HitCount     int64  `form:"hit_count,optional"`
+	ResultState  int32  `form:"result_state,optional"`
+	LatencyMs    int64  `form:"latency_ms,optional"`
+	Platform     string `form:"platform,optional"`
+	AppVersion   string `form:"app_version,optional"`
+	DeviceIdHash string `form:"device_id_hash,optional"`
+}
+
+type ParamResetPassword struct {
+	Account     string `form:"account"`
+	CaptureCode string `form:"capture_code"`
+	NewPassword string `form:"new_password"`
+	IP          string `form:"ip"`
+}
+
+type ParamRevEnroll struct {
+	Mid               int64  `form:"mid"`
+	AgreedRuleVersion int64  `form:"agreed_rule_version"` // 必填：未确认规则版本不得参加
+	RequestId         string `form:"request_id"`
+}
+
+type ParamRevEnrollment struct {
+	Mid int64 `form:"mid"`
+}
+
+type ParamRevLeave struct {
+	Mid       int64  `form:"mid"`
+	RequestId string `form:"request_id"`
+}
+
+type ParamRevMetrics struct {
+	Mid        int64  `form:"mid"`
+	Period     string `form:"period,optional"`
+	Aid        int64  `form:"aid,optional"`
+	SourceType int32  `form:"source_type,optional"`
+	Page       int32  `form:"page,default=1"`
+	PageSize   int32  `form:"page_size,optional"`
+}
+
+type ParamRevRules struct {
+	SourceType int32 `form:"source_type,optional"`
+	Page       int32 `form:"page,default=1"`
+	PageSize   int32 `form:"page_size,optional"`
+}
+
+type ParamRevSettlement struct {
+	Mid          int64  `form:"mid"`
+	SettlementNo string `form:"settlement_no"`
+}
+
+type ParamRevSettlements struct {
+	Mid      int64  `form:"mid"`
+	Period   string `form:"period,optional"`
+	State    int32  `form:"state,optional"`
+	Page     int32  `form:"page,default=1"`
+	PageSize int32  `form:"page_size,optional"`
+}
+
+type ParamRevSummary struct {
+	Mid int64 `form:"mid"`
+}
+
+type ParamSearch struct {
+	Keyword         string `form:"keyword"`
+	SearchType      int32  `form:"search_type,optional"` // 1 全部/2 视频/3 用户/4 PGC
+	ZoneId          int32  `form:"zone_id,optional"`
+	Duration        int32  `form:"duration,optional"`
+	Sort            int32  `form:"sort,optional"`
+	Pn              int32  `form:"pn,default=1"`
+	Ps              int32  `form:"ps,default=30"`
+	Cursor          string `form:"cursor,optional"`
+	ViewerMid       int64  `form:"viewer_mid,optional"`
+	Platform        string `form:"platform,optional"`
+	AppVersion      string `form:"app_version,optional"`
+	RequestId       string `form:"request_id,optional"`
+	PublishedAfter  int64  `form:"published_after,optional"`
+	PublishedBefore int64  `form:"published_before,optional"`
+}
+
+type ParamSearchConfig struct {
+	Platform   string `form:"platform,optional"`
+	AppVersion string `form:"app_version,optional"`
+	SearchType int32  `form:"search_type,optional"`
+	ZoneId     int32  `form:"zone_id,optional"`
+}
+
+type ParamSearchHistory struct {
+	Mid      int64  `form:"mid"`
+	Cursor   string `form:"cursor,optional"`
+	Limit    int32  `form:"limit,optional"`
+	Platform string `form:"platform,optional"`
+}
+
+type ParamSetPassword struct {
+	Mid         int64  `form:"mid"`
+	OldPassword string `form:"old_password,optional"` // 首次设置可为空
+	NewPassword string `form:"new_password"`
+	IP          string `form:"ip"`
+}
+
+type ParamSetUpSwitch struct {
+	Mid   int64 `form:"mid"`
+	From  int32 `form:"from"`
+	State int32 `form:"state"` // 0 关闭、1 打开
 }
 
 type ParamSex struct {
@@ -363,8 +2310,44 @@ type ParamSex struct {
 	Sex int64 `form:"sex"`
 }
 
+type ParamSocialList struct {
+	Mid int64  `form:"mid"`
+	Pn  int32  `form:"pn,default=1"`
+	Ps  int32  `form:"ps,default=20"`
+	IP  string `form:"ip"`
+}
+
+type ParamSocialStat struct {
+	Mid int64  `form:"mid"`
+	IP  string `form:"ip"`
+}
+
+type ParamSubmitAppeal struct {
+	TaskId  int64  `form:"task_id"`
+	Mid     int64  `form:"mid"`
+	Content string `form:"content"`
+	IP      string `form:"ip"`
+}
+
+type ParamSuggest struct {
+	Keyword    string `form:"keyword"`
+	Limit      int32  `form:"limit,optional"`
+	ViewerMid  int64  `form:"viewer_mid,optional"`
+	Platform   string `form:"platform,optional"`
+	AppVersion string `form:"app_version,optional"`
+	SearchType int32  `form:"search_type,optional"`
+}
+
 type ParamToken struct {
 	Token string `form:"token"`
+}
+
+type ParamTransition struct {
+	Aid      int64  `path:"aid"`
+	Target   int32  `form:"target"`
+	Operator string `form:"operator"`
+	Reason   string `form:"reason"`
+	IP       string `form:"ip"`
 }
 
 type ParamUname struct {
@@ -372,9 +2355,155 @@ type ParamUname struct {
 	Name string `form:"name"`
 }
 
+type ParamUpAttr struct {
+	Mid  int64 `form:"mid"`
+	From int32 `form:"from,optional"` // 0 稿件作者、1 移动投稿、2 直播、3 直播白名单
+}
+
+type ParamUpMid struct {
+	Mid int64 `form:"mid"`
+}
+
+type ParamUpMids struct {
+	Mids []int64 `form:"mids,split"`
+}
+
+type ParamUpSwitch struct {
+	Mid  int64 `form:"mid"`
+	From int32 `form:"from"` // 0 播放器关注弹窗、1 荣誉周报退订
+}
+
+type ParamUpdateDnd struct {
+	Mid           int64   `form:"mid"`
+	MutedChannels []int32 `form:"muted_channels,optional"` // 全量覆盖语义：留空表示全部允许
+	QuietStart    string  `form:"quiet_start,optional"`    // HH:MM，空串表示不设时段
+	QuietEnd      string  `form:"quiet_end,optional"`
+	Timezone      string  `form:"timezone,optional"` // IANA 时区名
+	Enabled       bool    `form:"enabled"`
+}
+
+type ParamUpdateSubmission struct {
+	Aid    int64  `path:"aid"`
+	Mid    int64  `form:"mid"`
+	Title  string `form:"title,optional"`
+	Desc   string `form:"desc,optional"`
+	Cover  string `form:"cover,optional"`
+	Typeid int32  `form:"typeid,optional"`
+	Tag    string `form:"tag,optional"`
+	IP     string `form:"ip"`
+}
+
+type ParamUploadStatus struct {
+	UploadId string `form:"upload_id"`
+	IP       string `form:"ip"`
+}
+
+type ParamUserFeed struct {
+	Vmid   int64  `path:"mid"`
+	Mid    int64  `form:"mid"`
+	Cursor int64  `form:"cursor"`
+	Ps     int32  `form:"ps,default=20"`
+	IP     string `form:"ip"`
+}
+
+type ParamUserFolders struct {
+	Tp       int32 `form:"tp"`
+	Mid      int64 `form:"mid"`
+	Vmid     int64 `form:"vmid"`
+	Oid      int64 `form:"oid"`
+	AllCount bool  `form:"all_count"`
+	Otype    int32 `form:"otype"`
+}
+
+type ParamUserLikes struct {
+	Business string `form:"business"`
+	Mid      int64  `form:"mid"`
+	Pn       int32  `form:"pn,default=1"`
+	Ps       int32  `form:"ps,default=20"`
+	IP       string `form:"ip"`
+}
+
 type ParamUserSign struct {
 	Mid      int64  `form:"mid"`
 	UserSign string `form:"user_sign"`
+}
+
+type ParamVideoAid struct {
+	Aid int64  `path:"aid"`
+	Mid int64  `form:"mid"`
+	IP  string `form:"ip"`
+}
+
+type ParamWalletBalance struct {
+	Mid      int64  `form:"mid"`
+	Currency string `form:"currency,optional"`
+}
+
+type ParamWalletFlows struct {
+	Mid      int64  `form:"mid"`
+	BizType  int32  `form:"biz_type,optional"`
+	BizNo    string `form:"biz_no,optional"`
+	FromTs   int64  `form:"from_ts,optional"`
+	ToTs     int64  `form:"to_ts,optional"`
+	Page     int32  `form:"page,default=1"`
+	PageSize int32  `form:"page_size,optional"`
+}
+
+type ParamWalletRechargeNo struct {
+	RechargeNo string `form:"recharge_no"`
+	RequestId  string `form:"request_id"`
+	Reason     string `form:"reason,optional"`
+	TraceId    string `form:"trace_id,optional"`
+}
+
+type ParamWalletRechargeOpen struct {
+	Mid         int64  `form:"mid"`
+	AmountMinor int64  `form:"amount_minor"`
+	Currency    string `form:"currency,optional"`
+	Channel     int32  `form:"channel,optional"` // 0/1 均按 SANDBOX；其他值由服务拒绝
+	RequestId   string `form:"request_id"`       // 幂等键
+	TraceId     string `form:"trace_id,optional"`
+}
+
+type ParamWalletRecharges struct {
+	Mid      int64 `form:"mid"`
+	State    int32 `form:"state,optional"`
+	FromTs   int64 `form:"from_ts,optional"`
+	ToTs     int64 `form:"to_ts,optional"`
+	Page     int32 `form:"page,default=1"`
+	PageSize int32 `form:"page_size,optional"`
+}
+
+type PassportCheckHistoryData struct {
+	Result string `json:"result"`
+}
+
+type PassportCheckHistoryResponse struct {
+	Code    int                      `json:"code"`
+	Message string                   `json:"message"`
+	Data    PassportCheckHistoryData `json:"data"`
+	TTL     int64                    `json:"ttl"`
+}
+
+type PassportLoginLog struct {
+	Mid       int64  `json:"mid"`
+	IP        string `json:"ip"`
+	Ts        int64  `json:"ts"`
+	LoginType int32  `json:"login_type"`
+	Status    int32  `json:"status"`
+	Reason    string `json:"reason"`
+	Device    string `json:"device"`
+}
+
+type PassportLoginLogsData struct {
+	Logs []PassportLoginLog `json:"logs"`
+}
+
+type PassportLoginLogsResponse struct {
+	Code    int                   `json:"code"`
+	Message string                `json:"message"`
+	Data    PassportLoginLogsData `json:"data"`
+	TTL     int64                 `json:"ttl"`
 }
 
 type PendantInfo struct {
@@ -382,6 +2511,247 @@ type PendantInfo struct {
 	Name   string `json:"name"`
 	Image  string `json:"image"`
 	Expire int64  `json:"expire"`
+}
+
+type PlaybackHeartbeatData struct {
+	EventId       string `json:"event_id"`
+	AcceptedAt    int64  `json:"accepted_at"`
+	MaxPositionMs int64  `json:"max_position_ms"`
+}
+
+type PlaybackHeartbeatResponse struct {
+	Code    int                   `json:"code"`
+	Message string                `json:"message"`
+	Data    PlaybackHeartbeatData `json:"data"`
+	TTL     int64                 `json:"ttl"`
+}
+
+type PlaybackProgress struct {
+	SessionId   string `json:"session_id"`
+	ContentType int32  `json:"content_type"`
+	ContentId   int64  `json:"content_id"`
+	Vid         string `json:"vid"`
+	Mid         int64  `json:"mid"`
+	PositionMs  int64  `json:"position_ms"`
+	DurationMs  int64  `json:"duration_ms"`
+	BufferCount int32  `json:"buffer_count"`
+	AvgBitrate  int64  `json:"avg_bitrate"`
+	LastError   int32  `json:"last_error"`
+	Mtime       int64  `json:"mtime"`
+}
+
+type PlaybackSession struct {
+	SessionId   string `json:"session_id"`
+	ContentType int32  `json:"content_type"`
+	ContentId   int64  `json:"content_id"`
+	Vid         string `json:"vid"`
+	Mid         int64  `json:"mid"`
+	Platform    int32  `json:"platform"`
+	AppVersion  string `json:"app_version"`
+	Region      string `json:"region"`
+	ObjectKey   string `json:"object_key"`
+	Uri         string `json:"uri"`
+	RequestId   string `json:"request_id"`
+	ExpireAt    int64  `json:"expire_at"`
+	State       int32  `json:"state"`
+	Ctime       int64  `json:"ctime"`
+	Mtime       int64  `json:"mtime"`
+}
+
+type PlaybackSessionData struct {
+	Session        PlaybackSession  `json:"session"`
+	Progress       PlaybackProgress `json:"progress"`
+	LatestProgress PlaybackProgress `json:"latest_progress"`
+	Found          bool             `json:"found"`
+}
+
+type PlaybackSessionResponse struct {
+	Code    int                 `json:"code"`
+	Message string              `json:"message"`
+	Data    PlaybackSessionData `json:"data"`
+	TTL     int64               `json:"ttl"`
+}
+
+type PlaybackTokenData struct {
+	SessionId  string `json:"session_id"`
+	PlayUrl    string `json:"play_url"`
+	AuthKey    string `json:"auth_key"`
+	ExpireAt   int64  `json:"expire_at"`
+	TTL        int64  `json:"ttl"`
+	KeyId      string `json:"key_id"`
+	TemplateId int64  `json:"template_id"`
+	Quality    string `json:"quality"`
+	ObjectKey  string `json:"object_key"`
+}
+
+type PlaybackTokenResponse struct {
+	Code    int               `json:"code"`
+	Message string            `json:"message"`
+	Data    PlaybackTokenData `json:"data"`
+	TTL     int64             `json:"ttl"`
+}
+
+type PmConversation struct {
+	ConversationId int64  `json:"conversation_id"`
+	PeerMid        int64  `json:"peer_mid"`
+	State          int32  `json:"state"` // 1 正常、2 风控冻结
+	LastMsgId      int64  `json:"last_msg_id"`
+	LastSeq        int64  `json:"last_seq"`
+	LastMsgType    int32  `json:"last_msg_type"`
+	LastPreview    string `json:"last_preview"` // 脱敏摘要，恒不等于正文原文
+	LastMsgTime    int64  `json:"last_msg_time"`
+	ReadSeq        int64  `json:"read_seq"`
+	UnreadCount    int64  `json:"unread_count"`
+	Hidden         bool   `json:"hidden"`
+	Ctime          int64  `json:"ctime"`
+}
+
+type PmConversationCreateData struct {
+	ConversationId int64 `json:"conversation_id"`
+	Created        bool  `json:"created"` // true 表示本次新建（pair_key 唯一索引保证幂等）
+	State          int32 `json:"state"`
+	Ctime          int64 `json:"ctime"`
+}
+
+type PmConversationCreateResponse struct {
+	Code    int                      `json:"code"`
+	Message string                   `json:"message"`
+	Data    PmConversationCreateData `json:"data"`
+	TTL     int64                    `json:"ttl"`
+}
+
+type PmConversationsData struct {
+	List        []PmConversation `json:"list"`
+	NextCursor  string           `json:"next_cursor"` // 空表示到底
+	HasMore     bool             `json:"has_more"`
+	UnreadTotal int64            `json:"unread_total"`
+}
+
+type PmConversationsResponse struct {
+	Code    int                 `json:"code"`
+	Message string              `json:"message"`
+	Data    PmConversationsData `json:"data"`
+	TTL     int64               `json:"ttl"`
+}
+
+type PmMarkReadData struct {
+	ReadSeq     int64 `json:"read_seq"` // 生效后的游标（只前进不回退）
+	Changed     bool  `json:"changed"`  // false 表示重复或回退请求
+	UnreadCount int64 `json:"unread_count"`
+}
+
+type PmMarkReadResponse struct {
+	Code    int            `json:"code"`
+	Message string         `json:"message"`
+	Data    PmMarkReadData `json:"data"`
+	TTL     int64          `json:"ttl"`
+}
+
+type PmMessage struct {
+	MsgId          int64  `json:"msg_id"`
+	ConversationId int64  `json:"conversation_id"`
+	Seq            int64  `json:"seq"`
+	SenderMid      int64  `json:"sender_mid"`
+	MsgType        int32  `json:"msg_type"`
+	Content        string `json:"content"`
+	MediaRef       string `json:"media_ref"` // asset 主键引用，不含对象存储地址
+	State          int32  `json:"state"`     // 1 正常、2 待审核、3 已撤回、4 驳回、5 已删除
+	AuditTaskId    int64  `json:"audit_task_id"`
+	ClientMsgId    string `json:"client_msg_id"` // 幂等回放时回显
+	Ctime          int64  `json:"ctime"`
+	WithdrawTime   int64  `json:"withdraw_time"` // 0 表示未撤回
+}
+
+type PmMessagesData struct {
+	List          []PmMessage `json:"list"`            // 按 seq 倒序
+	NextCursorSeq int64       `json:"next_cursor_seq"` // 0 表示到底
+	HasMore       bool        `json:"has_more"`
+	ReadSeq       int64       `json:"read_seq"` // 查看者当前已读游标
+}
+
+type PmMessagesResponse struct {
+	Code    int            `json:"code"`
+	Message string         `json:"message"`
+	Data    PmMessagesData `json:"data"`
+	TTL     int64          `json:"ttl"`
+}
+
+type PmReportData struct {
+	ReportId    int64 `json:"report_id"`
+	Duplicated  bool  `json:"duplicated"` // true 表示同一举报人对同一消息已举报过
+	AuditTaskId int64 `json:"audit_task_id"`
+}
+
+type PmReportResponse struct {
+	Code    int          `json:"code"`
+	Message string       `json:"message"`
+	Data    PmReportData `json:"data"`
+	TTL     int64        `json:"ttl"`
+}
+
+type PmSendData struct {
+	MsgId          int64  `json:"msg_id"` // 幂等回放返回原值
+	ConversationId int64  `json:"conversation_id"`
+	Seq            int64  `json:"seq"`
+	State          int32  `json:"state"`
+	Ctime          int64  `json:"ctime"`
+	Replayed       bool   `json:"replayed"` // true 表示命中 client_msg_id，未产生新消息
+	AuditTaskId    int64  `json:"audit_task_id"`
+	Preview        string `json:"preview"` // 写会话列表用的脱敏摘要，非原文
+}
+
+type PmSendResponse struct {
+	Code    int        `json:"code"`
+	Message string     `json:"message"`
+	Data    PmSendData `json:"data"`
+	TTL     int64      `json:"ttl"`
+}
+
+type PmUnreadData struct {
+	UnreadTotal         int64 `json:"unread_total"`
+	UnreadConversations int64 `json:"unread_conversations"`
+	ComputedAt          int64 `json:"computed_at"`
+}
+
+type PmUnreadResponse struct {
+	Code    int          `json:"code"`
+	Message string       `json:"message"`
+	Data    PmUnreadData `json:"data"`
+	TTL     int64        `json:"ttl"`
+}
+
+type PmUserSetting struct {
+	Mid              int64 `json:"mid"`
+	AllowFrom        int32 `json:"allow_from"`
+	RejectStranger   bool  `json:"reject_stranger"`
+	KeywordFilter    bool  `json:"keyword_filter"`
+	MuteConversation bool  `json:"mute_conversation"`
+	Mtime            int64 `json:"mtime"`
+}
+
+type PmUserSettingData struct {
+	Setting PmUserSetting `json:"setting"`
+}
+
+type PmUserSettingResponse struct {
+	Code    int               `json:"code"`
+	Message string            `json:"message"`
+	Data    PmUserSettingData `json:"data"`
+	TTL     int64             `json:"ttl"`
+}
+
+type PmWithdrawData struct {
+	MsgId        int64 `json:"msg_id"`
+	State        int32 `json:"state"`
+	Withdrawn    bool  `json:"withdrawn"` // false 表示已撤回过或不在窗口内
+	WithdrawTime int64 `json:"withdraw_time"`
+}
+
+type PmWithdrawResponse struct {
+	Code    int            `json:"code"`
+	Message string         `json:"message"`
+	Data    PmWithdrawData `json:"data"`
+	TTL     int64          `json:"ttl"`
 }
 
 type Privacy struct {
@@ -548,6 +2918,260 @@ type RenewResponse struct {
 	TTL     int64     `json:"ttl"`
 }
 
+type ReportQueryData struct {
+	Accepted     bool   `json:"accepted"`
+	Deduplicated bool   `json:"deduplicated"`
+	EventId      string `json:"event_id"`
+}
+
+type ReportQueryResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    ReportQueryData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type RevEnrollData struct {
+	Duplicated bool          `json:"duplicated"`
+	Enrollment RevEnrollment `json:"enrollment"`
+}
+
+type RevEnrollResponse struct {
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    RevEnrollData `json:"data"`
+	TTL     int64         `json:"ttl"`
+}
+
+type RevEnrollment struct {
+	Mid               int64 `json:"mid"`
+	State             int32 `json:"state"` // 1 参加、2 退出、3 暂停
+	AgreedRuleVersion int64 `json:"agreed_rule_version"`
+	EnrolledAt        int64 `json:"enrolled_at"`
+	LeftAt            int64 `json:"left_at"`
+	UpdatedAt         int64 `json:"updated_at"`
+}
+
+type RevEnrollmentResponse struct {
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Found   bool          `json:"found"`
+	Data    RevEnrollment `json:"data"`
+	TTL     int64         `json:"ttl"`
+}
+
+type RevMetric struct {
+	Period            string `json:"period"`
+	Aid               int64  `json:"aid"`
+	SourceType        int32  `json:"source_type"`
+	RuleCode          string `json:"rule_code"`
+	Quantity          int64  `json:"quantity"`
+	Unit              string `json:"unit"`
+	AmountMinor       int64  `json:"amount_minor"`
+	CappedAmountMinor int64  `json:"capped_amount_minor"`
+	SourceDetail      string `json:"source_detail"`
+	Ctime             int64  `json:"ctime"`
+}
+
+type RevMetricsData struct {
+	Metrics  []RevMetric `json:"metrics"`
+	Total    int64       `json:"total"`
+	Page     int64       `json:"page"`
+	PageSize int64       `json:"page_size"`
+}
+
+type RevMetricsResponse struct {
+	Code    int            `json:"code"`
+	Message string         `json:"message"`
+	Data    RevMetricsData `json:"data"`
+	TTL     int64          `json:"ttl"`
+}
+
+type RevRule struct {
+	RuleCode              string `json:"rule_code"`
+	SourceType            int32  `json:"source_type"`
+	Name                  string `json:"name"`
+	Description           string `json:"description"`
+	UnitPricePer1000Minor int64  `json:"unit_price_per_1000_minor"`
+	Currency              string `json:"currency"`
+	Unit                  string `json:"unit"`
+	MinQuantity           int64  `json:"min_quantity"`
+	MonthlyCapMinor       int64  `json:"monthly_cap_minor"` // 0 = 不限
+	State                 int32  `json:"state"`
+	EffectiveFrom         int64  `json:"effective_from"`
+	Version               int64  `json:"version"`
+}
+
+type RevRulesData struct {
+	Rules    []RevRule `json:"rules"` // 终端面固定只含 ACTIVE
+	Total    int64     `json:"total"`
+	Page     int64     `json:"page"`
+	PageSize int64     `json:"page_size"`
+}
+
+type RevRulesResponse struct {
+	Code    int          `json:"code"`
+	Message string       `json:"message"`
+	Data    RevRulesData `json:"data"`
+	TTL     int64        `json:"ttl"`
+}
+
+type RevSettlement struct {
+	SettlementNo    string `json:"settlement_no"`
+	Period          string `json:"period"`
+	AmountMinor     int64  `json:"amount_minor"`
+	CapAppliedMinor int64  `json:"cap_applied_minor"`
+	Currency        string `json:"currency"`
+	MetricCount     int64  `json:"metric_count"`
+	State           int32  `json:"state"`        // 1 草稿、2 已确认、3 已作废
+	PayoutState     int32  `json:"payout_state"` // 恒 1 NOT_PAYABLE
+	ConfirmedAt     int64  `json:"confirmed_at"`
+	Ctime           int64  `json:"ctime"`
+}
+
+type RevSettlementDetailData struct {
+	Found      bool                `json:"found"`
+	Settlement RevSettlement       `json:"settlement"`
+	Items      []RevSettlementItem `json:"items"`
+}
+
+type RevSettlementDetailResponse struct {
+	Code    int                     `json:"code"`
+	Message string                  `json:"message"`
+	Data    RevSettlementDetailData `json:"data"`
+	TTL     int64                   `json:"ttl"`
+}
+
+type RevSettlementItem struct {
+	SourceType  int32  `json:"source_type"`
+	RuleCode    string `json:"rule_code"`
+	Quantity    int64  `json:"quantity"`
+	AmountMinor int64  `json:"amount_minor"`
+}
+
+type RevSettlementsData struct {
+	Settlements []RevSettlement `json:"settlements"`
+	Total       int64           `json:"total"`
+	Page        int64           `json:"page"`
+	PageSize    int64           `json:"page_size"`
+}
+
+type RevSettlementsResponse struct {
+	Code    int                `json:"code"`
+	Message string             `json:"message"`
+	Data    RevSettlementsData `json:"data"`
+	TTL     int64              `json:"ttl"`
+}
+
+type RevSummaryData struct {
+	Enrolled             bool   `json:"enrolled"`
+	EnrollmentState      int32  `json:"enrollment_state"`
+	CurrentPeriod        string `json:"current_period"`
+	CurrentEstimateMinor int64  `json:"current_estimate_minor"` // 未结算，会随更正变动
+	TotalConfirmedMinor  int64  `json:"total_confirmed_minor"`  // 已确认应计，非已支付
+	LastSettledPeriod    int64  `json:"last_settled_period"`
+	PayoutAvailable      bool   `json:"payout_available"` // 恒 false
+	PayoutNote           string `json:"payout_note"`
+}
+
+type RevSummaryResponse struct {
+	Code    int            `json:"code"`
+	Message string         `json:"message"`
+	Data    RevSummaryData `json:"data"`
+	TTL     int64          `json:"ttl"`
+}
+
+type SearchConfigData struct {
+	DefaultSort        int32   `json:"default_sort"`
+	SupportedSorts     []int32 `json:"supported_sorts"`
+	SupportedTypes     []int32 `json:"supported_types"`
+	SupportedDurations []int32 `json:"supported_durations"`
+	PsDefault          int32   `json:"ps_default"`
+	PsLimit            int32   `json:"ps_limit"`
+	MaxOffset          int32   `json:"max_offset"`
+	KeywordMaxLen      int32   `json:"keyword_max_len"`
+	CacheTtlSeconds    int32   `json:"cache_ttl_seconds"`
+	EngineAvailable    bool    `json:"engine_available"`
+}
+
+type SearchConfigResponse struct {
+	Code    int              `json:"code"`
+	Message string           `json:"message"`
+	Data    SearchConfigData `json:"data"`
+	TTL     int64            `json:"ttl"`
+}
+
+type SearchData struct {
+	Hits         []SearchHit `json:"hits"`
+	Total        int64       `json:"total"`
+	Pn           int32       `json:"pn"`
+	Ps           int32       `json:"ps"`
+	NextCursor   string      `json:"next_cursor"`
+	HasMore      bool        `json:"has_more"`
+	SafeFiltered bool        `json:"safe_filtered"`
+	CacheHit     bool        `json:"cache_hit"`
+}
+
+type SearchHistoryData struct {
+	Items      []SearchHistoryItem `json:"items"`
+	NextCursor string              `json:"next_cursor"`
+	HasMore    bool                `json:"has_more"`
+}
+
+type SearchHistoryDeleteData struct {
+	Deleted     int64 `json:"deleted"`
+	HardDeleted bool  `json:"hard_deleted"`
+}
+
+type SearchHistoryDeleteResponse struct {
+	Code    int                     `json:"code"`
+	Message string                  `json:"message"`
+	Data    SearchHistoryDeleteData `json:"data"`
+	TTL     int64                   `json:"ttl"`
+}
+
+type SearchHistoryItem struct {
+	Keyword  string `json:"keyword"`
+	Ctime    int64  `json:"ctime"`
+	Mtime    int64  `json:"mtime"`
+	State    int32  `json:"state"`
+	Platform string `json:"platform"`
+}
+
+type SearchHistoryResponse struct {
+	Code    int               `json:"code"`
+	Message string            `json:"message"`
+	Data    SearchHistoryData `json:"data"`
+	TTL     int64             `json:"ttl"`
+}
+
+type SearchHit struct {
+	DocType        string            `json:"doc_type"`
+	DocId          int64             `json:"doc_id"`
+	Title          string            `json:"title"`
+	ContentSnippet string            `json:"content_snippet"`
+	AuthorMid      int64             `json:"author_mid"`
+	AuthorName     string            `json:"author_name"`
+	ZoneId         int32             `json:"zone_id"`
+	CoverUrl       string            `json:"cover_url"`
+	ViewCount      int64             `json:"view_count"`
+	LikeCount      int64             `json:"like_count"`
+	DanmakuCount   int64             `json:"danmaku_count"`
+	FansCount      int64             `json:"fans_count"`
+	DurationSec    int32             `json:"duration_sec"`
+	PubTime        int64             `json:"pub_time"`
+	Score          float64           `json:"score"`
+	Highlights     map[string]string `json:"highlights"`
+	State          string            `json:"state"`
+}
+
+type SearchResponse struct {
+	Code    int        `json:"code"`
+	Message string     `json:"message"`
+	Data    SearchData `json:"data"`
+	TTL     int64      `json:"ttl"`
+}
+
 type SessionData struct {
 	IsLogin bool   `json:"is_login"`
 	Mid     int64  `json:"mid"`
@@ -560,6 +3184,222 @@ type SessionResponse struct {
 	Message string      `json:"message"`
 	Data    SessionData `json:"data"`
 	TTL     int64       `json:"ttl"`
+}
+
+type SocialBlacksData struct {
+	Total int32                `json:"total"`
+	Items []SocialRelationItem `json:"items"`
+}
+
+type SocialBlacksResponse struct {
+	Code    int              `json:"code"`
+	Message string           `json:"message"`
+	Data    SocialBlacksData `json:"data"`
+	TTL     int64            `json:"ttl"`
+}
+
+type SocialFollowerData struct {
+	Total int32                `json:"total"`
+	Items []SocialRelationItem `json:"items"`
+}
+
+type SocialFollowerResponse struct {
+	Code    int                `json:"code"`
+	Message string             `json:"message"`
+	Data    SocialFollowerData `json:"data"`
+	TTL     int64              `json:"ttl"`
+}
+
+type SocialFollowingData struct {
+	Total int32                `json:"total"`
+	Items []SocialRelationItem `json:"items"`
+}
+
+type SocialFollowingResponse struct {
+	Code    int                 `json:"code"`
+	Message string              `json:"message"`
+	Data    SocialFollowingData `json:"data"`
+	TTL     int64               `json:"ttl"`
+}
+
+type SocialIsFollowingData struct {
+	Following bool `json:"following"`
+}
+
+type SocialIsFollowingResponse struct {
+	Code    int                   `json:"code"`
+	Message string                `json:"message"`
+	Data    SocialIsFollowingData `json:"data"`
+	TTL     int64                 `json:"ttl"`
+}
+
+type SocialRelationItem struct {
+	Mid   int64 `json:"mid"`
+	Ctime int64 `json:"ctime"`
+	Attr  int32 `json:"attr"`
+}
+
+type SocialStat struct {
+	Following int64 `json:"following"`
+	Follower  int64 `json:"follower"`
+	Whisper   int32 `json:"whisper"`
+}
+
+type SocialStatData struct {
+	Stat SocialStat `json:"stat"`
+}
+
+type SocialStatResponse struct {
+	Code    int            `json:"code"`
+	Message string         `json:"message"`
+	Data    SocialStatData `json:"data"`
+	TTL     int64          `json:"ttl"`
+}
+
+type SuggestData struct {
+	Items []SuggestItem `json:"items"`
+}
+
+type SuggestItem struct {
+	Keyword     string  `json:"keyword"`
+	Weight      float64 `json:"weight"`
+	Source      string  `json:"source"`
+	FromHistory bool    `json:"from_history"`
+}
+
+type SuggestResponse struct {
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    SuggestData `json:"data"`
+	TTL     int64       `json:"ttl"`
+}
+
+type UpAttrData struct {
+	IsAuthor int32 `json:"is_author"`
+}
+
+type UpAttrResponse struct {
+	Code    int        `json:"code"`
+	Message string     `json:"message"`
+	Data    UpAttrData `json:"data"`
+	TTL     int64      `json:"ttl"`
+}
+
+type UpSpecialData struct {
+	UpSpecial UpSpecialInfo `json:"up_special"`
+}
+
+type UpSpecialInfo struct {
+	GroupIds []int64 `json:"group_ids"`
+}
+
+type UpSpecialResponse struct {
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    UpSpecialData `json:"data"`
+	TTL     int64         `json:"ttl"`
+}
+
+type UpSwitchData struct {
+	State int32 `json:"state"`
+}
+
+type UpSwitchResponse struct {
+	Code    int          `json:"code"`
+	Message string       `json:"message"`
+	Data    UpSwitchData `json:"data"`
+	TTL     int64        `json:"ttl"`
+}
+
+type UploadChunk struct {
+	ChunkNo int32  `json:"chunk_no"`
+	Size    int64  `json:"size"`
+	Etag    string `json:"etag"`
+	State   int32  `json:"state"`
+	Ctime   int64  `json:"ctime"`
+}
+
+type UploadChunkPart struct {
+	ChunkNo int32  `json:"chunk_no"`
+	Etag    string `json:"etag"`
+}
+
+type UploadCompleteData struct {
+	UploadId  string `json:"upload_id"`
+	AssetId   string `json:"asset_id"`
+	ObjectKey string `json:"object_key"`
+	Size      int64  `json:"size"`
+	Md5       string `json:"md5"`
+	State     int32  `json:"state"`
+}
+
+type UploadCompleteResponse struct {
+	Code    int                `json:"code"`
+	Message string             `json:"message"`
+	Data    UploadCompleteData `json:"data"`
+	TTL     int64              `json:"ttl"`
+}
+
+type UploadInitData struct {
+	UploadId       string `json:"upload_id"`
+	Bucket         string `json:"bucket"`
+	ObjectKey      string `json:"object_key"`
+	UploadProtocol string `json:"upload_protocol"`
+	ChunkSize      int64  `json:"chunk_size"`
+	TotalChunks    int32  `json:"total_chunks"`
+	Instant        bool   `json:"instant"`
+}
+
+type UploadInitResponse struct {
+	Code    int            `json:"code"`
+	Message string         `json:"message"`
+	Data    UploadInitData `json:"data"`
+	TTL     int64          `json:"ttl"`
+}
+
+type UploadStatusData struct {
+	UploadId        string        `json:"upload_id"`
+	State           int32         `json:"state"`
+	Size            int64         `json:"size"`
+	UploadedSize    int64         `json:"uploaded_size"`
+	TotalChunks     int32         `json:"total_chunks"`
+	CompletedChunks int32         `json:"completed_chunks"`
+	Chunks          []UploadChunk `json:"chunks"`
+	AssetId         string        `json:"asset_id"`
+}
+
+type UploadStatusResponse struct {
+	Code    int              `json:"code"`
+	Message string           `json:"message"`
+	Data    UploadStatusData `json:"data"`
+	TTL     int64            `json:"ttl"`
+}
+
+type UploadUrlData struct {
+	UploadId   string            `json:"upload_id"`
+	ChunkNo    int32             `json:"chunk_no"`
+	Url        string            `json:"url"`
+	Method     string            `json:"method"`
+	Expiration int64             `json:"expiration"`
+	Headers    map[string]string `json:"headers"`
+}
+
+type UploadUrlResponse struct {
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    UploadUrlData `json:"data"`
+	TTL     int64         `json:"ttl"`
+}
+
+type UpsSpecialData struct {
+	UpSpecials map[int64]UpSpecialInfo `json:"up_specials"`
+}
+
+type UpsSpecialResponse struct {
+	Code    int            `json:"code"`
+	Message string         `json:"message"`
+	Data    UpsSpecialData `json:"data"`
+	TTL     int64          `json:"ttl"`
 }
 
 type UserLog struct {
@@ -702,6 +3542,42 @@ type V2MyInfoResponse struct {
 	TTL     int64    `json:"ttl"`
 }
 
+type VideoSubmission struct {
+	Aid    int64  `json:"aid"`
+	Mid    int64  `json:"mid"`
+	Title  string `json:"title"`
+	Desc   string `json:"desc"`
+	Cover  string `json:"cover"`
+	Typeid int32  `json:"typeid"`
+	Tag    string `json:"tag"`
+	State  int32  `json:"state"`
+	Ctime  int64  `json:"ctime"`
+	Mtime  int64  `json:"mtime"`
+}
+
+type VideoSubmissionData struct {
+	Submission VideoSubmission `json:"submission"`
+}
+
+type VideoSubmissionResponse struct {
+	Code    int                 `json:"code"`
+	Message string              `json:"message"`
+	Data    VideoSubmissionData `json:"data"`
+	TTL     int64               `json:"ttl"`
+}
+
+type VideoSubmissionsData struct {
+	Total       int32             `json:"total"`
+	Submissions []VideoSubmission `json:"submissions"`
+}
+
+type VideoSubmissionsResponse struct {
+	Code    int                  `json:"code"`
+	Message string               `json:"message"`
+	Data    VideoSubmissionsData `json:"data"`
+	TTL     int64                `json:"ttl"`
+}
+
 type VipData struct {
 	Vip VipInfo `json:"vip"`
 }
@@ -729,4 +3605,105 @@ type VipsResponse struct {
 	Message string   `json:"message"`
 	Data    VipsData `json:"data"`
 	TTL     int64    `json:"ttl"`
+}
+
+type WalletBalance struct {
+	Mid          int64  `json:"mid"`
+	BalanceMinor int64  `json:"balance_minor"`
+	FrozenMinor  int64  `json:"frozen_minor"` // 本项目无预授权流程，恒为 0，别当可用余额
+	Currency     string `json:"currency"`
+}
+
+type WalletBalanceData struct {
+	Wallet WalletBalance `json:"wallet"`
+}
+
+type WalletBalanceResponse struct {
+	Code    int               `json:"code"`
+	Message string            `json:"message"`
+	Data    WalletBalanceData `json:"data"`
+	TTL     int64             `json:"ttl"`
+}
+
+type WalletChannelState struct {
+	Channel   int32  `json:"channel"`
+	Enabled   bool   `json:"enabled"`
+	RealMoney bool   `json:"real_money"` // 恒 false
+	Note      string `json:"note"`
+}
+
+type WalletChannelsData struct {
+	SandboxOnly     bool                 `json:"sandbox_only"`
+	Channels        []WalletChannelState `json:"channels"`
+	CurrencyDefault string               `json:"currency_default"`
+}
+
+type WalletChannelsResponse struct {
+	Code    int                `json:"code"`
+	Message string             `json:"message"`
+	Data    WalletChannelsData `json:"data"`
+	TTL     int64              `json:"ttl"`
+}
+
+type WalletFlow struct {
+	FlowId            int64  `json:"flow_id"`
+	BizType           int32  `json:"biz_type"` // 1 充值、2 消费、3 退款、4 运营调整
+	BizNo             string `json:"biz_no"`
+	DeltaMinor        int64  `json:"delta_minor"`
+	BalanceAfterMinor int64  `json:"balance_after_minor"`
+	Currency          string `json:"currency"`
+	Remark            string `json:"remark"`
+	Ctime             int64  `json:"ctime"`
+}
+
+type WalletFlowsData struct {
+	Flows    []WalletFlow `json:"flows"`
+	Total    int64        `json:"total"`
+	Page     int64        `json:"page"`
+	PageSize int64        `json:"page_size"`
+}
+
+type WalletFlowsResponse struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    WalletFlowsData `json:"data"`
+	TTL     int64           `json:"ttl"`
+}
+
+type WalletRecharge struct {
+	RechargeNo  string `json:"recharge_no"`
+	AmountMinor int64  `json:"amount_minor"`
+	Currency    string `json:"currency"`
+	Channel     int32  `json:"channel"`
+	State       int32  `json:"state"` // 1 待结算、2 已入账、3 已取消、4 失败
+	Reason      string `json:"reason"`
+	SettledAt   int64  `json:"settled_at"`
+	Ctime       int64  `json:"ctime"`
+}
+
+type WalletRechargeData struct {
+	Duplicated bool           `json:"duplicated"`
+	Recharge   WalletRecharge `json:"recharge"`
+	Wallet     WalletBalance  `json:"wallet"`
+}
+
+type WalletRechargeResponse struct {
+	Code    int                `json:"code"`
+	Message string             `json:"message"`
+	Data    WalletRechargeData `json:"data"`
+	TTL     int64              `json:"ttl"`
+}
+
+type WalletRechargesData struct {
+	Recharges []WalletRecharge `json:"recharges"`
+	Total     int64            `json:"total"`
+	Page      int64            `json:"page"`
+	PageSize  int64            `json:"page_size"`
+}
+
+type WalletRechargesResponse struct {
+	Code    int                 `json:"code"`
+	Message string              `json:"message"`
+	Data    WalletRechargesData `json:"data"`
+	TTL     int64               `json:"ttl"`
 }

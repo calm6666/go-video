@@ -30,6 +30,9 @@ func (l *ExpUpdateLogic) ExpUpdate(req *types.ParamExp) (resp *types.EmptyRespon
 	if l.svcCtx.UserProfile == nil {
 		return nil, errors.New("user-profile service not configured")
 	}
+	if err := adminSessionGate(l.ctx, "expUpdate"); err != nil {
+		return nil, err
+	}
 	if _, err = l.svcCtx.UserProfile.UpdateExp(l.ctx, &userprofilerc.AddExpReq{
 		Mid:     req.Mid,
 		Count:   req.Count,

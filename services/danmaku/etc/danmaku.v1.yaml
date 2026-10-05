@@ -1,0 +1,44 @@
+Name: danmaku.v1.rpc
+ListenOn: 0.0.0.0:8103
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: danmaku.v1.rpc
+
+# 段缓存、段计数、屏蔽词库缓存、防刷屏分钟窗口
+# 键名固定为 CacheRedis：zrpc.RpcServerConf 内嵌了同名 Redis 字段（限流用），
+# 业务缓存必须用 CacheRedis，否则配置加载报 "conflict key redis"。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL 主库 DSN（仅本地示例，生产从配置中心/Secret 注入）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_danmaku?charset=utf8mb4&parseTime=true&loc=Local
+
+# moderation-orchestrator RPC client：机审门禁依赖。
+# MachineReviewEnabled 为 true 时必须放开本段，否则 PostDanmaku 返回
+# `danmaku: moderation rpc not configured`（不把未送审弹幕标为可见）。
+# ModerationRPC:
+#   Etcd:
+#     Hosts:
+#       - 127.0.0.1:2379
+#     Key: moderation.v1.rpc
+#   NonBlock: true
+
+# 弹幕领域参数
+Danmaku:
+  SegmentSeconds: 6              # 时间分段宽度（秒），决定 seg_no 与段缓存粒度
+  MaxContentLength: 100          # 弹幕正文字符上限（按 rune 计）
+  MaxPerUserPerMinute: 20        # 单用户每分钟上限，0 不限
+  MaxPerOidPerMinute: 6000       # 单内容每分钟上限，0 不限
+  PostQps: 800                   # 进程级发送令牌桶速率（保护 MySQL/审核下游）
+  PostBurst: 200                 # 令牌桶突发容量，小于 PostQps 时按 PostQps 取
+  SensitiveWordCheckEnabled: true # 发送侧屏蔽词过滤
+  MachineReviewEnabled: true      # 机审门禁：新弹幕落待审核，仅结论回写后可见
+  SegmentCacheTTLSeconds: 15      # 段列表缓存，0 关闭
+  SegmentCountTTLSeconds: 60      # 段计数缓存，0 关闭
+  BlockWordCacheTTLSeconds: 300   # 屏蔽词库缓存，0 关闭
+  UserBlockCacheTTLSeconds: 120   # 用户屏蔽列表缓存，0 关闭
+  BlockWordCacheMaxWords: 2000    # 词库超过该条数时不写缓存（避免大 value）
+  MaxSegWindow: 60                # 单次拉取最大分段数
+  MaxListLimit: 3000              # 单次拉取最大条数

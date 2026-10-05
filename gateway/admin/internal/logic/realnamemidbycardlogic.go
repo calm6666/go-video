@@ -30,6 +30,9 @@ func (l *RealnameMidByCardLogic) RealnameMidByCard(req *types.ParamMidByCard) (r
 	if l.svcCtx.UserProfile == nil {
 		return nil, errors.New("user-profile service not configured")
 	}
+	if err := adminSessionGate(l.ctx, "realnameMidByCard"); err != nil {
+		return nil, err
+	}
 	reply, err := l.svcCtx.UserProfile.MidByRealnameCard(l.ctx, &userprofilerc.MidByRealnameCardsReq{
 		CardCode: req.CardCode,
 		Country:  req.Country,

@@ -30,6 +30,9 @@ func (l *MoralUndoLogic) MoralUndo(req *types.ParamUndo) (resp *types.EmptyRespo
 	if l.svcCtx.UserProfile == nil {
 		return nil, errors.New("user-profile service not configured")
 	}
+	if err := adminActorGate(l.ctx, "moralUndo", "operator", req.Operator); err != nil {
+		return nil, err
+	}
 	if _, err = l.svcCtx.UserProfile.UndoMoral(l.ctx, &userprofilerc.UndoMoralReq{
 		LogId:    req.LogID,
 		Remark:   req.Remark,

@@ -6,7 +6,7 @@ package repository
 // 替代参考仓库 databus 的 MemberService-AccountNotify 主题投递。
 // 注意：account 的 UserProfileClient 是反向依赖（account 聚合查询 user-profile），
 // 两条 RPC 职责单一、方向不同，属正常服务间契约；后续接入消息总线后
-// user.profile_updated 可改为事件驱动消费，本客户端可平滑下线。
+// user.profile.updated 可改为事件驱动消费，本客户端可平滑下线。
 
 import (
 	"context"

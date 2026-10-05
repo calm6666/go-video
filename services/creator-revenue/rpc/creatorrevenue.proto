@@ -1,0 +1,403 @@
+syntax = "proto3";
+
+package creatorrevenue.v1;
+
+option go_package = "go-video/services/creator-revenue/rpc";
+
+// 创作者分成域契约。
+//
+// 数据所有权（§5）：本服务持有分成规则、参与关系、收益计量台账与结算单。
+// 计量原始事实（播放时长、完播、投币）归 spm / coin，本服务只保存**按规则折算后的台账**，
+// 不复制内容主资料，也不反向修改它们的计数。
+//
+// 出金不在范围内（重要）：本服务只做到「算出该给多少并落成可审计的结算单」。
+// 提现、打款、银行卡、发票、税务、对账文件一概不开接口——结算单的
+// payout_state 恒为 NOT_PAYABLE，任何调用方都不能从这里得到「钱已出账」的结论。
+// 台账金额是**应计金额**（分），不是已支付金额。
+//
+// 数据来源边界（§7）：计量输入只来自行为分析与投币事实，不接受任何广告参数。
+
+// 空响应
+message EmptyReply {}
+
+// 收益来源类型
+enum RevenueSourceType {
+  REVENUE_SOURCE_TYPE_UNSPECIFIED = 0;
+  REVENUE_SOURCE_VIP_WATCH = 1;   // 会员有效观看时长折算
+  REVENUE_SOURCE_COIN = 2;        // 收到的投币折算
+  REVENUE_SOURCE_INTERACTION = 3; // 有效互动（点赞/收藏/分享）折算
+  REVENUE_SOURCE_ACTIVITY = 4;    // 运营活动激励（手工回填，必须有 reason）
+}
+
+enum RuleState {
+  RULE_STATE_UNSPECIFIED = 0;
+  RULE_STATE_DRAFT = 1;
+  RULE_STATE_ACTIVE = 2;
+  RULE_STATE_ARCHIVED = 3;
+}
+
+enum EnrollmentState {
+  ENROLLMENT_STATE_UNSPECIFIED = 0;
+  ENROLLMENT_STATE_ENROLLED = 1;
+  ENROLLMENT_STATE_LEFT = 2;
+  ENROLLMENT_STATE_SUSPENDED = 3; // 违规暂停（由运营置位，收益不结算）
+}
+
+enum SettlementState {
+  SETTLEMENT_STATE_UNSPECIFIED = 0;
+  SETTLEMENT_STATE_DRAFT = 1;     // 已算出，未确认
+  SETTLEMENT_STATE_CONFIRMED = 2; // 运营确认，金额冻结不可重算
+  SETTLEMENT_STATE_VOIDED = 3;    // 作废（重算前的旧单）
+}
+
+// 出金状态：本项目只有 NOT_PAYABLE 一个真实取值。
+// 保留这个字段是为了让「没打款」在数据里可见，而不是靠 README 提醒。
+enum PayoutState {
+  PAYOUT_STATE_UNSPECIFIED = 0;
+  PAYOUT_STATE_NOT_PAYABLE = 1; // 未接出金通道（当前恒为此值）
+}
+
+// 分成规则：一类收益怎么折算成金额。
+message RevenueRuleInfo {
+  int64 rule_id = 1;
+  string rule_code = 2;            // 稳定编码，计量台账按它定位规则
+  RevenueSourceType source_type = 3;
+  string name = 4;
+  string description = 5;
+  // 单价以「每 1000 单位」计，避免时长/互动这类小颗粒度收益被整除成 0。
+  int64 unit_price_per_1000_minor = 6;
+  string currency = 7;
+  string unit = 8;                 // 计量单位：minute / coin / interaction
+  int64 min_quantity = 9;          // 低于此量不结算（防刷门槛）
+  int64 monthly_cap_minor = 10;    // 单用户单来源月度封顶，0 表示不限
+  RuleState state = 11;
+  int64 effective_from = 12;       // 生效起点（Unix 秒）：晚于它的周期才用本规则
+  int64 version = 13;
+  int64 ctime = 14;
+  int64 mtime = 15;
+  string created_by = 16;
+  string updated_by = 17;
+}
+
+// 参与关系（一人一行）。
+message EnrollmentInfo {
+  int64 mid = 1;
+  EnrollmentState state = 2;
+  int64 agreed_rule_version = 3; // 参与者确认时看到的规则版本，必须可回溯
+  int64 enrolled_at = 4;
+  int64 left_at = 5;
+  int64 updated_at = 6;
+  string operator = 7;           // 自助为 "user"
+  string remark = 8;
+}
+
+// 计量台账：一条 = 某周期、某内容、某来源的折算结果。
+message RevenueMetricInfo {
+  int64 metric_id = 1;
+  string period = 2;             // YYYYMM
+  int64 mid = 3;
+  int64 aid = 4;
+  RevenueSourceType source_type = 5;
+  string rule_code = 6;
+  int64 rule_version = 7;        // 计算时锁定的规则版本（重算口径可追溯）
+  int64 quantity = 8;
+  string unit = 9;
+  int64 amount_minor = 10;       // 应计金额（分），未做封顶前
+  int64 capped_amount_minor = 11; // 封顶/门槛后的实际应计
+  string source_detail = 12;     // 计算依据摘要（例如「有效播放 12,345 次」），不含 PII
+  int64 ctime = 13;
+  int64 mtime = 14;
+}
+
+// 结算单（一周期一人一单）。
+message SettlementInfo {
+  string settlement_no = 1;
+  string period = 2;
+  int64 mid = 3;
+  int64 amount_minor = 4;        // 应计合计
+  int64 cap_applied_minor = 5;   // 因封顶被扣减的额度（透明化，不让运营猜）
+  string currency = 6;
+  int64 metric_count = 7;
+  SettlementState state = 8;
+  PayoutState payout_state = 9;  // 恒为 NOT_PAYABLE
+  int64 confirmed_at = 10;
+  string confirmed_by = 11;
+  string void_reason = 12;
+  int64 ctime = 13;
+  int64 mtime = 14;
+}
+
+message SettlementItem {
+  RevenueSourceType source_type = 1;
+  string rule_code = 2;
+  int64 quantity = 3;
+  int64 amount_minor = 4;
+}
+
+// --- 规则（运营写、创作者只读 ACTIVE）---
+
+message UpsertRevenueRuleReq {
+  int64 rule_id = 1;
+  string rule_code = 2;
+  RevenueSourceType source_type = 3;
+  string name = 4;
+  string description = 5;
+  int64 unit_price_per_1000_minor = 6; // 负数拒绝
+  string currency = 7;
+  string unit = 8;
+  int64 min_quantity = 9;
+  int64 monthly_cap_minor = 10;
+  int64 effective_from = 11;
+  int64 expected_version = 12;
+  string operator = 13;   // 网关按会话渲染
+  string request_id = 14;
+  string reason = 15;     // 必填：改单价是有后果的动作
+}
+
+message SetRevenueRuleStateReq {
+  int64 rule_id = 1;
+  RuleState target_state = 2; // 只允许 DRAFT→ACTIVE、ACTIVE→ARCHIVED、DRAFT→ARCHIVED
+  int64 expected_version = 3;
+  string operator = 4;
+  string request_id = 5;
+  string reason = 6; // 必填
+}
+
+message ListRevenueRulesReq {
+  RuleState state = 1;      // UNSPECIFIED 不过滤
+  RevenueSourceType source_type = 2;
+  int64 page = 3;
+  int64 size = 4;
+}
+
+message ListRevenueRulesReply {
+  repeated RevenueRuleInfo rules = 1;
+  int64 total = 2;
+  int64 page = 3;
+  int64 size = 4;
+}
+
+message GetRevenueRuleReq {
+  int64 rule_id = 1;
+  string rule_code = 2;
+  int64 version = 3; // >0 时按历史版本读取（结算争议复核）
+}
+
+message GetRevenueRuleReply {
+  bool found = 1;
+  RevenueRuleInfo rule = 2;
+}
+
+// --- 参与关系 ---
+
+message EnrollCreatorReq {
+  int64 mid = 1;
+  int64 agreed_rule_version = 2; // 必填：未确认规则版本不得参加
+  string operator = 3;           // 自助为 "user"
+  string request_id = 4;
+}
+
+message EnrollCreatorReply {
+  bool duplicated = 1;
+  EnrollmentInfo enrollment = 2;
+}
+
+message LeavePlanReq {
+  int64 mid = 1;
+  string operator = 2;
+  string request_id = 3;
+  string reason = 4; // 运营代操作必填
+}
+
+message LeavePlanReply {
+  bool duplicated = 1;
+  EnrollmentInfo enrollment = 2;
+}
+
+// 运营侧状态变更：暂停/恢复（违规处置）。不参与自助。
+message SetEnrollmentStateReq {
+  int64 mid = 1;
+  EnrollmentState target_state = 2; // 只允许 ENROLLED↔SUSPENDED
+  string operator = 3;
+  string request_id = 4;
+  string reason = 5; // 必填
+}
+
+message SetEnrollmentStateReply {
+  bool duplicated = 1;
+  EnrollmentInfo enrollment = 2;
+}
+
+message GetEnrollmentReq {
+  int64 mid = 1;
+}
+
+message GetEnrollmentReply {
+  bool found = 1;
+  EnrollmentInfo enrollment = 2;
+}
+
+message ListEnrollmentsReq {
+  EnrollmentState state = 1;
+  int64 page = 2;
+  int64 size = 3;
+}
+
+message ListEnrollmentsReply {
+  repeated EnrollmentInfo enrollments = 1;
+  int64 total = 2;
+  int64 page = 3;
+  int64 size = 4;
+}
+
+// --- 计量台账 ---
+
+// 幂等：唯一键为 (period, mid, aid, source_type)。重复上报视为「以本次为准的更正」，
+// 旧值写进变更日志而不是静默覆盖；已确认周期（结算单 CONFIRMED）拒绝更正。
+message RecordRevenueMetricReq {
+  string period = 1;
+  int64 mid = 2;
+  int64 aid = 3;
+  RevenueSourceType source_type = 4;
+  string rule_code = 5;
+  int64 quantity = 6; // 负数拒绝
+  string operator = 7;    // "cron" / "spm" / 运营工号
+  string request_id = 8;
+  string source_detail = 9;
+  string reason = 10;     // 手工更正必填
+}
+
+message RecordRevenueMetricReply {
+  bool created = 1;
+  bool corrected = 2; // true 表示覆盖了旧值（同唯一键的更正上报）
+  RevenueMetricInfo metric = 3;
+}
+
+message ListRevenueMetricsReq {
+  string period = 1;
+  int64 mid = 2;
+  int64 aid = 3;
+  RevenueSourceType source_type = 4;
+  int64 page = 5;
+  int64 size = 6;
+}
+
+message ListRevenueMetricsReply {
+  repeated RevenueMetricInfo metrics = 1;
+  int64 total = 2;
+  int64 page = 3;
+  int64 size = 4;
+}
+
+// --- 结算 ---
+
+// 生成/重算某周期结算单。幂等：同 (period, mid) 重复调用不会重复出单。
+// DRAFT 单可被重算覆盖；已 CONFIRMED 的单拒绝重算（要改必须先作废并显式留痕）。
+// 只对 ENROLLED 且非 SUSPENDED 的作者出单。
+message GenerateSettlementReq {
+  string period = 1; // YYYYMM
+  int64 mid = 2;     // 0 表示该周期全量（运营/cron）
+  bool force_void_confirmed = 3; // 危险位：true 时才允许把已确认单置 VOIDED 重算
+  string operator = 4;
+  string request_id = 5;
+  string reason = 6; // force_void_confirmed=true 时必填
+}
+
+message GenerateSettlementReply {
+  bool duplicated = 1;   // 该周期该用户已有未作废单且本次未强制重算
+  int64 generated = 2;   // 本次出单数（全量时 >1）
+  repeated SettlementInfo settlements = 3; // 全量时只回前若干条，完整结果查台账
+  bool truncated = 4;
+}
+
+message ConfirmSettlementReq {
+  repeated string settlement_nos = 1; // 批量确认；空列表拒绝
+  string operator = 2;
+  string request_id = 3;
+  string reason = 4; // 必填
+}
+
+message ConfirmSettlementReply {
+  int64 confirmed = 1;
+  repeated string failed_nos = 2; // 不满足确认条件的单号（状态不符/已作废）
+}
+
+message ListSettlementsReq {
+  string period = 1;
+  int64 mid = 2;
+  SettlementState state = 3;
+  int64 page = 4;
+  int64 size = 5;
+}
+
+message ListSettlementsReply {
+  repeated SettlementInfo settlements = 1;
+  int64 total = 2;
+  int64 page = 3;
+  int64 size = 4;
+}
+
+message GetSettlementReq {
+  string settlement_no = 1;
+  int64 mid = 2; // 非 0 时校验归属
+}
+
+message GetSettlementReply {
+  bool found = 1;
+  SettlementInfo settlement = 2;
+  repeated SettlementItem items = 3;
+}
+
+// 创作者端首页：本月预估 + 累计 + 参与状态，一次读全。
+message GetRevenueSummaryReq {
+  int64 mid = 1;
+}
+
+message GetRevenueSummaryReply {
+  EnrollmentInfo enrollment = 1; // 未参加时 found=false 语义由 enrollment.state 表达
+  string current_period = 2;
+  int64 current_estimate_minor = 3;  // 本月已计量的应计（未结算，会随更正变动）
+  int64 total_confirmed_minor = 4;   // 历史已确认应计合计
+  int64 last_settled_period = 5;     // 最近出单周期（YYYYMM 数值化），0 表示无
+  bool payout_available = 6;         // 恒 false：本项目无出金通道，前端据此显示「暂不可提现」
+  string payout_note = 7;
+}
+
+// CreatorRevenue 创作者分成服务。
+service CreatorRevenue {
+  // 运营面：新增/修改规则草稿
+  rpc UpsertRevenueRule(UpsertRevenueRuleReq) returns (RevenueRuleInfo);
+  // 运营面：规则状态切换（DRAFT→ACTIVE→ARCHIVED）
+  rpc SetRevenueRuleState(SetRevenueRuleStateReq) returns (RevenueRuleInfo);
+  // 规则列表（运营面可见全部，创作者端只查 ACTIVE）
+  rpc ListRevenueRules(ListRevenueRulesReq) returns (ListRevenueRulesReply);
+  // 规则读取（支持按历史版本复核）
+  rpc GetRevenueRule(GetRevenueRuleReq) returns (GetRevenueRuleReply);
+
+  // 参加计划（必须带已确认的规则版本）
+  rpc EnrollCreator(EnrollCreatorReq) returns (EnrollCreatorReply);
+  // 退出计划
+  rpc LeavePlan(LeavePlanReq) returns (LeavePlanReply);
+  // 运营面：暂停/恢复参与
+  rpc SetEnrollmentState(SetEnrollmentStateReq) returns (SetEnrollmentStateReply);
+  // 查询参与状态
+  rpc GetEnrollment(GetEnrollmentReq) returns (GetEnrollmentReply);
+  // 运营面：参与名单分页
+  rpc ListEnrollments(ListEnrollmentsReq) returns (ListEnrollmentsReply);
+
+  // 写入/更正计量台账（cron、spm 回填或运营手工激励）
+  rpc RecordRevenueMetric(RecordRevenueMetricReq) returns (RecordRevenueMetricReply);
+  // 计量台账分页
+  rpc ListRevenueMetrics(ListRevenueMetricsReq) returns (ListRevenueMetricsReply);
+
+  // 生成/重算周期结算单
+  rpc GenerateSettlement(GenerateSettlementReq) returns (GenerateSettlementReply);
+  // 运营确认结算单（金额冻结）
+  rpc ConfirmSettlement(ConfirmSettlementReq) returns (ConfirmSettlementReply);
+  // 结算单分页
+  rpc ListSettlements(ListSettlementsReq) returns (ListSettlementsReply);
+  // 结算单详情（含分项）
+  rpc GetSettlement(GetSettlementReq) returns (GetSettlementReply);
+  // 创作者端收益概览
+  rpc GetRevenueSummary(GetRevenueSummaryReq) returns (GetRevenueSummaryReply);
+}

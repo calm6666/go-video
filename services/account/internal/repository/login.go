@@ -206,14 +206,14 @@ func (r *Repository) issueSession(ctx context.Context, mid int64, ip, device, bu
 
 // setSessionCache 写入 token/refresh 的 Redis 缓存（前缀沿用参考 ak_/rk_）。
 func (r *Repository) setSessionCache(ctx context.Context, s *model.AccountSession) {
-	r.cache.setJSON(ctx, "ak_"+s.Token, s, tokenCacheTTL)
-	r.cache.setJSON(ctx, "rk_"+s.RefreshToken, s, tokenCacheTTL)
+	r.cache.SetJSON(ctx, "ak_"+s.Token, s, tokenCacheTTL)
+	r.cache.SetJSON(ctx, "rk_"+s.RefreshToken, s, tokenCacheTTL)
 }
 
 // delSessionCache 删除 token/refresh 缓存（精确吊销立即生效）。
 func (r *Repository) delSessionCache(ctx context.Context, s *model.AccountSession) {
-	_ = r.cache.del(ctx, "ak_"+s.Token)
-	_ = r.cache.del(ctx, "rk_"+s.RefreshToken)
+	_ = r.cache.Del(ctx, "ak_"+s.Token)
+	_ = r.cache.Del(ctx, "rk_"+s.RefreshToken)
 }
 
 // sessionByToken 按 token 取会话（缓存 → DB，校验有效期与状态）。
@@ -222,7 +222,7 @@ func (r *Repository) sessionByToken(ctx context.Context, token string) (*model.A
 		return nil, ErrSessionRevoked
 	}
 	var cached model.AccountSession
-	if err := r.cache.getJSON(ctx, "ak_"+token, &cached); err == nil && cached.Token == token {
+	if err := r.cache.GetJSON(ctx, "ak_"+token, &cached); err == nil && cached.Token == token {
 		if cached.Status == model.SessionStatusActive && time.Now().Unix() < cached.Expires {
 			return &cached, nil
 		}
@@ -437,7 +437,7 @@ func (r *Repository) RenewToken(ctx context.Context, refreshToken string) (*acco
 	if err := r.sessionModel.UpdateToken(ctx, s.ID, newToken, newCsrf, newExpires); err != nil {
 		return nil, err
 	}
-	_ = r.cache.del(ctx, "ak_"+s.Token)
+	_ = r.cache.Del(ctx, "ak_"+s.Token)
 	s.Token = newToken
 	s.Csrf = newCsrf
 	s.Expires = newExpires
@@ -454,7 +454,7 @@ func (r *Repository) SendCapture(ctx context.Context, biz int32, target, ip stri
 		return ErrLoginAccountNotExist
 	}
 	times := 0
-	if v, ok := r.cache.getInt(ctx, captureTimesKey(biz, target)); ok {
+	if v, ok := r.cache.GetInt(ctx, captureTimesKey(biz, target)); ok {
 		times = int(v)
 	}
 	if times > captureMaxSend {
@@ -462,11 +462,11 @@ func (r *Repository) SendCapture(ctx context.Context, biz int32, target, ip stri
 		return ErrCaptureSendTooMany
 	}
 	code := int(time.Now().UnixNano()%900000) + 100000
-	if err := r.cache.setInt(ctx, captureKey(biz, target), int64(code), captureCodeTTL); err != nil {
+	if err := r.cache.SetInt(ctx, captureKey(biz, target), int64(code), captureCodeTTL); err != nil {
 		return err
 	}
-	r.cache.incrCaptureTimes(ctx, captureTimesKey(biz, target))
-	_ = r.cache.del(ctx, captureErrKey(biz, target))
+	r.incrCaptureTimes(ctx, captureTimesKey(biz, target))
+	_ = r.cache.Del(ctx, captureErrKey(biz, target))
 	// 短信下发：notification 未接入，记录日志供开发联调
 	logx.Infof("account/login: send capture biz=%d target=%s code=%06d (sms not integrated)", biz, target, code)
 	r.addCaptureLog(ctx, biz, target, ip, 0, "")
@@ -476,19 +476,19 @@ func (r *Repository) SendCapture(ctx context.Context, biz int32, target, ip stri
 // checkCapture 校验验证码（错误次数限制）。
 func (r *Repository) checkCapture(ctx context.Context, biz int32, target, code string) error {
 	errTimes := 0
-	if v, ok := r.cache.getInt(ctx, captureErrKey(biz, target)); ok {
+	if v, ok := r.cache.GetInt(ctx, captureErrKey(biz, target)); ok {
 		errTimes = int(v)
 	}
 	if errTimes > captureMaxErr {
-		_ = r.cache.del(ctx, captureKey(biz, target))
+		_ = r.cache.Del(ctx, captureKey(biz, target))
 		return ErrCaptureErrTooMany
 	}
-	serverCode, ok := r.cache.getInt(ctx, captureKey(biz, target))
+	serverCode, ok := r.cache.GetInt(ctx, captureKey(biz, target))
 	if !ok {
 		return ErrCaptureInvalid
 	}
 	if strconv.FormatInt(serverCode, 10) != strings.TrimSpace(code) {
-		r.cache.incrCaptureErrTimes(ctx, captureErrKey(biz, target))
+		r.incrCaptureErrTimes(ctx, captureErrKey(biz, target))
 		return ErrCaptureWrong
 	}
 	return nil
@@ -548,7 +548,9 @@ func (r *Repository) SetPassword(ctx context.Context, mid int64, oldPwd, newPwd,
 		return err
 	}
 	// 改密后吊销全部会话（批量吊销经 tokenCacheTTL 内生效，见注释）
-	_ = r.sessionModel.RevokeAll(ctx, mid)
+	if mid > 0 {
+		_ = r.sessionModel.RevokeAll(ctx, mid)
+	}
 	return nil
 }
 
@@ -584,7 +586,7 @@ func (r *Repository) ResetPassword(ctx context.Context, account, captureCode, ne
 		return err
 	}
 	_ = r.sessionModel.RevokeAll(ctx, mid)
-	_ = r.cache.del(ctx, captureKey(int32(model.CaptureBizRecovery), account))
+	_ = r.cache.Del(ctx, captureKey(int32(model.CaptureBizRecovery), account))
 	return nil
 }
 

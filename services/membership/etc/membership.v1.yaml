@@ -1,0 +1,33 @@
+Name: membership.v1.rpc
+ListenOn: 0.0.0.0:8160
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  # 注册键不带连字符：下游（trade-order / playback / gateway）按 membership.v1.rpc 寻址，
+  # 写成 membership.v1.rpc 之外的值会让服务发现了永远为空，调用超时而不是启动失败。
+  Key: membership.v1.rpc
+
+Log:
+  ServiceName: membership.v1.rpc
+  Mode: console
+  Level: info
+
+# 会员身份与权益码目录的读缓存（只加速「已落库的结论」，miss/故障一律回源 DB）。
+# 键名固定为 CacheRedis：zrpc.RpcServerConf 内嵌了同名 Redis 字段（限流用），
+# 业务缓存必须用 CacheRedis，否则配置加载报 "conflict key redis"。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL 主库 DSN（仅本地示例值，生产从配置中心/Secret 注入，禁止提交真实凭据）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_membership?charset=utf8mb4&parseTime=true&loc=Local
+
+# 会员领域参数（数值必须与 internal/config/config.go 的 default tag 一致，
+# internal/config/config_load_test.go 会双向锁死这两处）
+Membership:
+  MaxGrantDeltaDays: 3660        # 单次授予/收回时长上限（天），越界返回 InvalidArgument
+  ExpireScanMaxLimit: 500        # ListExpiringMemberships 单批上限，超限裁剪
+  MaxPageSize: 100               # admin 面分页 size 上限，超限裁剪并回显实际值
+  DefaultPageSize: 20            # page/size 缺省时的每页条数
+  DefaultCurrency: CNY           # 套餐未显式给币种时的币种代码（价格单位：分）
+  MembershipCacheTTLSeconds: 10  # 读缓存秒数，0 关闭缓存（关闭后每次判定都读 DB）

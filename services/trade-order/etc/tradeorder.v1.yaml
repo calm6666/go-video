@@ -1,0 +1,58 @@
+Name: tradeorder.v1.rpc
+# 8162：trade-order 的 gRPC 监听端口（8100-8119 为阶段 1-3 服务，8160+ 留给商业化批次，
+# 见 docs/roadmap.md 与 docs/service-catalog.md 的端口登记）。
+ListenOn: 0.0.0.0:8162
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  # 注册键不带连字符：与 Name 一致，供 gateway 侧 Etcd.Key 直连查表。
+  Key: tradeorder.v1.rpc
+
+# 订单读侧缓存预留位。本轮不写任何订单缓存：金额与状态必须回源 MySQL。
+# 键名固定为 CacheRedis：zrpc.RpcServerConf 内嵌了同名 Redis 字段（限流用），
+# 业务缓存必须用 CacheRedis，否则配置加载报 "conflict key redis"。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL 主库 DSN（仅本地示例，生产从配置中心/Secret 注入；本服务只写 go_video_trade_order 库）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_trade_order?charset=utf8mb4&parseTime=true&loc=Local
+
+# --- 下游领域服务 RPC（AGENTS.md §5：只走 RPC，绝不直连它们的库表/Redis key）---
+# 三段都是 optional：整段留空时 svc 不构造客户端，对应能力在运行时显式失败
+# （`trade-order: membership rpc not configured` 等），不返回假成功。
+
+# 会员域：CreateOrder 取套餐价（唯一可信价格来源）、履约发放会员、退款回收权益。
+MembershipRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: membership.v1.rpc
+  NonBlock: true
+
+# 资金域：受理支付（余额/沙箱渠道）、退款到余额、关单。本服务不持有资金台账。
+PaymentRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: payment.v1.rpc
+  NonBlock: true
+
+# 硬币域：硬币包履约发放、退款回收。硬币是社区虚拟币，不是钱。
+CoinRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: coin.v1.rpc
+  NonBlock: true
+
+# 订单领域参数
+TradeOrder:
+  MaxQuantityPerOrder: 10             # 单笔份数上限（超出按上限裁剪，再与上报金额对撞）
+  OrderExpireSeconds: 1800            # 未支付关单时间（秒），同步透传给 payment
+  StuckScanMaxLimit: 200              # ListStuckOrders 单次上限（cron 巡检）
+  MaxListWindowSeconds: 7776000       # 运营面跨用户查询最大时间窗（90 天）
+  MaxPageSize: 100                    # 分页 size 上限，超出拒绝而不是裁剪
+  FulfillMaxAttempts: 5               # 履约累计尝试上限，超出必须人工介入
+  MinSecondsBetweenFulfillRetry: 30   # 两次履约尝试最小间隔，防止 cron 打爆下游
+  DefaultCurrency: CNY                # 套餐未声明币种时的兜底币种

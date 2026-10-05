@@ -1,0 +1,83 @@
+Name: searchindexer.v1.rpc
+ListenOn: 0.0.0.0:8106
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: searchindexer.v1.rpc
+
+# 日志与探针：本地开发保持控制台输出，生产由配置中心覆盖
+Log:
+  ServiceName: searchindexer.v1.rpc
+  Mode: console
+  Level: info
+
+# 写入索引解析缓存 + 别名切换互斥锁（键名不能写 Redis：
+# zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会触发 conflict key redis）
+# 留空 Host 时退化为单实例语义，幂等仍由 MySQL 唯一索引保证。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# 本服务自有库 DSN（只允许访问 search_* 四张表，禁止跨服务读上游库表）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_search_indexer?charset=utf8mb4&parseTime=true&loc=Local
+
+# 事件消费与后台重试参数（对齐 deploy/docker-compose 的 redpanda：PLAINTEXT 9092）
+# 队列侧只有一条路径：consumer.Handler（推送）+ consumer.Supervisor，Kafka 客户端只在
+# internal/consumer/kafkaruntime_kafka.go 里编译（-tags searchindexer_kafka）。
+# 默认构建不链接 kq：Enabled=true 时 NewKqFactory 返回 ErrKafkaRuntimeNotBuilt，进程启动即失败，
+# 不会「安静地不消费」。接线不需要 go.mod/go.sum 变更（go-queue 已是直接 require），
+# 但本仓库从未与真实 broker 联调，证据边界见 README「已知缺口」1。
+Kafka:
+  Enabled: false            # 打开前先用 -tags searchindexer_kafka 构建，并在 broker 上验证消费语义
+  Brokers:
+  - 127.0.0.1:9092
+  Group: search-indexer.v1
+  Topics:
+  - content.published.v1
+  - engagement.action.v1
+  Offset: last              # 消费组无位点时的起点，只接受 first|last
+  Conns: 1                  # 每个 topic 的 reader 连接数
+  Consumers: 2              # 每条连接的拉取协程数
+  Processors: 4             # 每条连接的并发处理协程数
+  ForceCommit: false        # false=处理失败不提交位点，让 Kafka 重投（event_id 唯一索引保证不重复写）
+  Username: ""              # SASL 用户名，只由环境变量/Secret 注入
+  Password: ""              # SASL 口令，与 Username 成对出现；证书走 CaFile 路径，内容不进仓库
+  CaFile: ""
+  MaxRetries: 5            # 累计尝试上限，达到即转 search_dead_letter
+  InProcessAttempts: 2     # 进程内即时重试次数
+  RetryBackoffSec: 5       # 退避基数
+  MaxRetryBackoffSec: 1800 # 退避上限（30 分钟）
+  RetrySweepIntervalSec: 10
+  RetryBatchLimit: 50
+  RetrySweeperEnabled: true    # 到期重试清扫（依赖 MySQL，不依赖 MQ 重投）
+  RebuildRunnerEnabled: true   # 在本进程执行 search_index_task 重建
+  RebuildPollIntervalSec: 15
+
+# OpenSearch 投影配置。
+# 本地起集群：docker compose -f deploy/docker-compose/docker-compose.yml up -d opensearch
+# 再用 scripts/es-init.ps1 校验分词器与样例文档（插件是否可用由脚本调 _cat/plugins 实测，
+# 不要凭镜像标签假设：deploy/opensearch/README.md 给出 ik/smartcn 的插件安装方式）。
+# Password 只由 Secret/环境变量注入，示例保持空串：
+#   空 Password 且 AllowAnonymousWrites=false 时，所有写操作返回
+#   esclient.ErrWriteGuarded 明确错误，不会静默成功。
+OpenSearch:
+  Endpoints:
+  - http://127.0.0.1:9200
+  IndexPrefix: go_video_content   # 默认查询别名，search-query 读同一个别名
+  SchemaVersion: v1
+  Username: ""
+  Password: ""
+  TimeoutMs: 5000
+  MaxRetries: 2                   # 仅幂等请求（带显式 _id 的写/读、bulk）重试
+  BulkActions: 500
+  AllowAnonymousWrites: false     # 本地匿名集群自测时显式改 true
+  ReindexSliceSpan: 100000        # 重建按 content_id 区间切片
+  ReindexSliceSize: 2000
+  StopAfterEmptySlices: 3         # 连续 3 个空切片判定重建结束
+  RetryOnConflict: 3              # 热度部分更新的服务端冲突重试
+  # 分词策略：改这里等于改索引结构，必须同时递增 SchemaVersion 并重建 + 切别名。
+  # 词典文件在 deploy/opensearch/analysis，由 compose 挂载到集群 config 目录。
+  Analyzer:
+    Kind: cjk                     # cjk（无需插件）| ik | smartcn | standard
+    StopwordsPath: /usr/share/opensearch/config/analysis/go_video_stopwords.txt
+    SynonymsPath: /usr/share/opensearch/config/analysis/go_video_synonyms.txt

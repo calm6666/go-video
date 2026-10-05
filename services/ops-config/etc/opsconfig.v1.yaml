@@ -1,0 +1,90 @@
+Name: opsconfig.v1.rpc
+# 8111：紧接同批落地的 audit(8110)。8080 是 goctl 默认值，
+# 与 event-collector / feature-store / spm 的示例配置重叠，本地同时起多个服务会撞端口。
+ListenOn: 0.0.0.0:8111
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: opsconfig.v1.rpc
+Mode: dev
+
+# 日志与探针：本地开发保持控制台输出，生产由配置中心覆盖。
+Log:
+  ServiceName: opsconfig.v1.rpc
+  Mode: console
+  Level: info
+
+# 运行时读缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 auth.RedisConf，
+# 会让 conf.Load 报 conflict key redis，服务启动即失败）。
+# 承载：ResolveConfig / BatchResolveConfig 结果、专题视图、坑位视图、按端的开关全集。
+# 这些全是**可整域重建的只读投影**，事实源在 ops_* 表里；
+# Redis 不可用时服务退化直连 MySQL，判定结果不变（AGENTS.md §5）。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# 本服务自有库 DSN（库名 go_video_ops_config，表清单见 deploy/migrations/ops-config）。
+# 严禁指向其它服务的库：分区/标签在 go_video_catalog，管理员与 RBAC 在 go_video_operation，
+# 稿件与媒资在 go_video_video（AGENTS.md §5）。
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_ops_config?charset=utf8mb4&parseTime=true&loc=Local
+
+# audit 服务客户端：本服务写自身配置动作的存证（见 rpc/opsconfig.proto 文件头）。
+# 留空（本地无 etcd）时写接口照常推进配置状态机，但 audit_entry_id 留 0 并打 Error 日志，
+# 由补偿任务重投 —— 审计缺口必须可见，绝不伪造 entry_id。
+AuditRPC:
+  Etcd:
+    Hosts:
+      - 127.0.0.1:2379
+    Key: audit.v1.rpc
+  NonBlock: true
+
+# 配置内容长度约束。MaxBytes 同时是 ops_config_version.cfg_value 的列宽依据，
+# 改大要先改迁移（deploy/migrations/ops-config/000001）。
+# MaxReasonLen 超长是**拒绝**而非截断：理由参与审计摘要。
+OpsValue:
+  MaxBytes: 8192
+  MaxKeyLen: 64
+  MaxReasonLen: 500
+  MaxOperatorNameLen: 64
+
+# 专题侧约束。MaxItems 不得超过 model.MaxTopicItems(500)，
+# MaxRefIDs 是「一个专题挂几十个分区」的保护栏（OpsTopic 超限即整次写入拒绝）。
+OpsTopic:
+  MaxItems: 500
+  MaxRefIDs: 64
+  DefaultItemLimit: 100
+  ListTTLSeconds: 60
+
+# 坑位侧约束。MaxCapacity/MaxItems 是服务端硬上限（200/200）之下的运营上限：
+# 坑位没有容量上限就等于给网关一个无界结果集。
+# DefaultTTLSeconds 刻意偏小 —— 运营改完坑位后要能在下一次刷新内看到效果。
+OpsSlot:
+  MaxCapacity: 200
+  MaxItems: 200
+  DefaultTTLSeconds: 30
+
+# 灰度规则侧约束。MaxWhitelistMids 只能 <= model.MaxWhitelistMids(200)：
+# 白名单是排障工具，不是放量手段（配得比硬上限更松会被 config_load_test 拒绝）。
+Rollout:
+  MaxWhitelistMids: 200
+  MaxRulesPerConfig: 50
+
+# 运行时解析约束。MaxBatchKeys 是网关聚合接口的扇出上界。
+Resolve:
+  MaxBatchKeys: 50
+  DefaultTTLSeconds: 60
+  DefaultTopicTTLSeconds: 60
+
+# 后台列表分页约束（ps 超限按「夹到上限」处理，见 model.PageOrDefault）。
+Query:
+  MaxPageSize: 100
+  CountTotal: true
+
+# 缓存键与 TTL。KeyPrefix 是多套环境共用一个 Redis 时唯一的隔离手段。
+# MaxTTLSeconds 是所有建议 TTL 的硬上限：一次错误放量最长要等一个 TTL 才被踢掉，
+# 因此宁可让调用方多打几次回源，也不给一个「改了半天不生效」的长缓存。
+# DeleteOnBump=false 只用于缓存与库不同集群的过渡期，正常部署不要关。
+Cache:
+  KeyPrefix: govideo:opsconfig
+  MaxTTLSeconds: 3600
+  DeleteOnBump: true

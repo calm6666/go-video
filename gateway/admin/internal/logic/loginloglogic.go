@@ -31,6 +31,9 @@ func (l *LoginLogLogic) LoginLog(req *types.ParamLoginLog) (resp *types.LoginLog
 	if l.svcCtx.Account == nil {
 		return nil, errors.New("account service not configured")
 	}
+	if err := adminSessionGate(l.ctx, "loginLog"); err != nil {
+		return nil, err
+	}
 	reply, err := l.svcCtx.Account.LoginLogs(l.ctx, &accountrpc.LoginLogsReq{Mid: req.Mid, Limit: req.Limit})
 	if err != nil {
 		l.Errorf("gateway/admin/loginLog: mid=%d err=%v", req.Mid, err)

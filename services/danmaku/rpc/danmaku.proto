@@ -1,0 +1,290 @@
+syntax = "proto3";
+
+package danmaku.v1;
+
+option go_package = "go-video/services/danmaku/rpc";
+
+// 说明：本服务是时间轴弹幕领域（对应参考仓库 dm/dm2 的领域层与实现层）。
+// 依据 AGENTS.md §5，弹幕与评论分库分表：danmaku 不复用 comment 的实时事务，
+// 也不引用 comment 的 model；两者只共享 oid 语义。
+// 依据 §8，机审结论落库前弹幕不得对所有人可见：PostDanmaku 落库状态固定为
+// 待审核/屏蔽池，只有 ApplyModerationResult 通过合法状态迁移后才能进入普通池。
+// 消息名统一使用 DanmakuInfo/BlockWordInfo 等，避免与 service Danmaku 同名冲突。
+
+// 空响应
+message EmptyReply {}
+
+// 弹幕展示模式（与 danmaku.mode 列一致）
+enum DanmakuMode {
+  MODE_UNSPECIFIED = 0; // 未指定（服务端按滚动处理）
+  MODE_SCROLL = 1;      // 滚动弹幕
+  MODE_BOTTOM = 2;      // 底部弹幕
+  MODE_TOP = 3;         // 顶部弹幕
+  MODE_COLOR = 4;       // 彩色弹幕（仅表示渲染样式，不做会员/付费判定）
+  MODE_ADVANCED = 5;    // 高级弹幕（反向/代码弹幕等，需人审放行）
+}
+
+// 弹幕状态机（与 danmaku.state 列一致，取值不可变更）
+enum DanmakuState {
+  STATE_NORMAL = 0;    // 正常：审核通过后对所有人可见
+  STATE_PENDING = 1;   // 待审核：仅发送者本人可见
+  STATE_FOLDED = 2;    // 折叠：命中屏蔽词或被降权，仅发送者本人可见
+  STATE_DELETED = 3;   // 已删除：软删除，保留审计证据
+  STATE_REJECTED = 4;  // 审核驳回：机审/人审拒绝
+}
+
+// 弹幕池（与 danmaku.pool 列一致）
+enum DanmakuPool {
+  POOL_UNSPECIFIED = 0; // 未指定
+  POOL_NORMAL = 1;      // 普通池：参与时间轴下发
+  POOL_REVIEW = 2;      // 审核池：等待机审/人审结论
+  POOL_BLOCK = 4;       // 屏蔽池：命中屏蔽词，只对发送者自己回显
+}
+
+// 审核结论（与 moderation.result.v1 payload 对齐，取值与 moderation.v1.Verdict 一致）
+enum ModerationVerdict {
+  VERDICT_UNSPECIFIED = 0; // 未指定，服务端拒绝
+  VERDICT_PASS = 1;        // 通过：进入普通池
+  VERDICT_REVIEW = 2;      // 转人审：保持待审核
+  VERDICT_REJECT = 3;      // 拒绝：置为驳回
+}
+
+// 屏蔽词作用域（与 danmaku_blockword.scope 列一致）
+enum BlockWordScope {
+  SCOPE_UNSPECIFIED = 0; // 未指定
+  SCOPE_GLOBAL = 1;      // 全局屏蔽词
+  SCOPE_OID = 2;         // 分区/单稿件屏蔽词（需带 oid）
+}
+
+// 屏蔽词管理动作（运营侧，需 operator_mid 权限字段）
+enum BlockWordAction {
+  BLOCK_WORD_UNSPECIFIED = 0; // 未指定，服务端拒绝
+  BLOCK_WORD_ADD = 1;         // 新增或重新启用
+  BLOCK_WORD_DISABLE = 2;     // 停用（保留行，便于审计）
+  BLOCK_WORD_DELETE = 3;      // 物理删除词条（保留 op_log 由运营后台负责）
+}
+
+// 用户级屏蔽类型（与 danmaku_user_block.type 列一致）
+enum UserBlockType {
+  USER_BLOCK_UNSPECIFIED = 0; // 未指定
+  USER_BLOCK_MID = 1;         // 屏蔽某用户发送的全部弹幕
+  USER_BLOCK_KEYWORD = 2;     // 屏蔽包含某关键词的弹幕
+}
+
+// 弹幕主体（DB 行投影）
+message DanmakuInfo {
+  int64 dmid = 1;             // 弹幕 ID
+  int64 oid = 2;              // 内容主键（视频 aid / 直播 room_id）
+  int64 aid = 3;              // 稿件 ID（归档与联表投影用）
+  int64 mid = 4;              // 发送者用户 ID
+  int64 progress_ms = 5;      // 时间轴位置（毫秒）
+  int32 mode = 6;             // 展示模式，参见 DanmakuMode
+  int32 fontsize = 7;         // 字号
+  int32 color = 8;            // RGB 颜色整数值
+  string content = 9;         // 弹幕正文
+  int32 state = 10;           // 状态，参见 DanmakuState
+  int32 pool = 11;            // 弹幕池，参见 DanmakuPool
+  int32 seg_no = 12;          // 时间分段号 = progress_ms / segment_ms
+  int64 ctime = 13;           // 创建时间（Unix 秒）
+  int64 mtime = 14;           // 修改时间（Unix 秒）
+}
+
+// --- 发送 ---
+
+message PostDanmakuReq {
+  int64 oid = 1;              // 内容主键
+  int64 aid = 2;              // 稿件 ID（可缺省为 0，服务端按 oid 处理）
+  int64 mid = 3;              // 发送者用户 ID（由 gateway 注入，本服务不解析 token）
+  int64 progress_ms = 4;      // 时间轴位置（毫秒）
+  DanmakuMode mode = 5;       // 展示模式
+  int32 fontsize = 6;         // 字号，缺省按服务端默认
+  int32 color = 7;            // 颜色，缺省 0xFFFFFF
+  string content = 8;         // 弹幕正文
+  string idempotency_key = 9; // 幂等键，客户端重试必须复用同一个值
+  string client_msg_id = 10;  // 客户端消息 ID（idempotency_key 为空时退化为幂等键）
+  string trace_id = 11;       // 链路追踪 ID
+}
+
+message PostDanmakuReply {
+  int64 dmid = 1;                 // 弹幕 ID（幂等重放时返回原值）
+  int32 state = 2;                // 落库状态
+  int32 pool = 3;                 // 落库弹幕池
+  int32 seg_no = 4;               // 时间分段号
+  int64 ctime = 5;                // 创建时间
+  bool replayed = 6;              // true 表示命中幂等键、未产生新写入
+  int64 moderation_task_id = 7;   // 机审任务 ID（0 表示未提交）
+}
+
+// --- 时间轴拉取 ---
+
+message ListDanmakuReq {
+  int64 oid = 1;              // 内容主键
+  int64 viewer_mid = 2;       // 查看者用户 ID（用于用户级屏蔽过滤，0 表示游客）
+  int32 start_seg = 3;        // 起始分段号（与 start_progress_ms 二选一）
+  int32 end_seg = 4;          // 结束分段号（含）
+  int64 start_progress_ms = 5; // 起始时间轴毫秒；> 0 时优先于 start_seg
+  int64 end_progress_ms = 6;   // 结束时间轴毫秒；> 0 时优先于 end_seg
+  int32 limit = 7;            // 本次最多返回条数，服务端会截断到上限
+  bool with_self_pending = 8; // 是否附带本人待审/折叠弹幕（发送后回显用）
+}
+
+// 分段计数（供客户端决定预取窗口）
+message SegmentCount {
+  int32 seg_no = 1;           // 分段号
+  int32 count = 2;            // 段内可见弹幕数
+}
+
+message ListDanmakuReply {
+  repeated DanmakuInfo danmaku = 1; // 弹幕列表，按 progress_ms 升序
+  repeated SegmentCount segment_counts = 2; // 各分段计数
+  int32 segment_seconds = 3;        // 服务端分段秒数，客户端据此计算分段号
+  int32 next_seg = 4;               // 下一窗口起始分段号（时间轴翻页用）
+  int32 cache_hits = 5;             // 命中段缓存的分段数（观测指标）
+}
+
+// --- 删除 ---
+
+message DeleteDanmakuReq {
+  int64 dmid = 1;             // 弹幕 ID
+  int64 mid = 2;              // 操作者用户 ID
+  bool admin = 3;             // 是否管理员（管理员可删任意弹幕）
+  string reason = 4;          // 删除原因（写入 op_log 审计）
+  string trace_id = 5;        // 链路追踪 ID
+}
+
+// --- 举报 ---
+
+message ReportDanmakuReq {
+  int64 dmid = 1;             // 被举报弹幕 ID
+  int64 reporter_mid = 2;     // 举报者用户 ID
+  int32 reason = 3;           // 举报原因码
+  string content = 4;         // 举报补充说明
+  string trace_id = 5;        // 链路追踪 ID
+}
+
+message ReportDanmakuReply {
+  int64 report_id = 1;        // 举报记录 ID（重复举报返回既有记录）
+  bool duplicated = 2;        // true 表示此前已举报过
+}
+
+// --- 屏蔽词管理（运营侧） ---
+
+// 屏蔽词条目
+message BlockWordInfo {
+  int64 word_id = 1;          // 词 ID
+  string word = 2;            // 屏蔽词
+  int32 scope = 3;            // 作用域，参见 BlockWordScope
+  int64 oid = 4;              // scope=SCOPE_OID 时的内容主键
+  int32 state = 5;            // 1 生效、0 停用
+  int64 operator = 6;         // 最近操作运营 ID
+  int64 ctime = 7;            // 创建时间
+  int64 mtime = 8;            // 修改时间
+}
+
+message BlockWordReq {
+  BlockWordAction action = 1; // 动作
+  string word = 2;            // 屏蔽词（去空格后 1~64 字符）
+  BlockWordScope scope = 3;   // 作用域
+  int64 oid = 4;              // scope=SCOPE_OID 时必填
+  int64 operator_mid = 5;     // 操作者（管理员/运营），必须 > 0
+  string trace_id = 6;        // 链路追踪 ID
+}
+
+message BlockWordReply {
+  int64 word_id = 1;          // 词 ID
+  int32 state = 2;            // 处理后的状态
+}
+
+message ListBlockWordsReq {
+  BlockWordScope scope = 1;   // 作用域过滤（SCOPE_UNSPECIFIED 表示不过滤）
+  int64 oid = 2;              // 分区过滤
+  bool only_enabled = 3;      // 仅返回生效词
+  int32 pn = 4;               // 页码（从 1 开始）
+  int32 ps = 5;               // 每页大小（最大 100）
+  int64 operator_mid = 6;     // 操作者（管理员/运营），必须 > 0
+}
+
+message ListBlockWordsReply {
+  repeated BlockWordInfo words = 1; // 词列表
+  int32 total = 2;                  // 总数
+}
+
+// --- 用户级屏蔽 ---
+
+// 用户屏蔽条目
+message UserBlockInfo {
+  int64 id = 1;               // 记录 ID
+  int64 mid = 2;              // 所属用户
+  int32 type = 3;             // 类型，参见 UserBlockType
+  int64 blocked_mid = 4;      // 被屏蔽用户
+  string keyword = 5;         // 被屏蔽关键词
+  int32 state = 6;            // 1 生效、0 已解除
+  int64 ctime = 7;            // 创建时间
+  int64 mtime = 8;            // 修改时间
+}
+
+message UserBlockReq {
+  int64 mid = 1;              // 操作用户（本人屏蔽列表）
+  UserBlockType type = 2;     // 屏蔽类型
+  int64 blocked_mid = 3;      // type=USER_BLOCK_MID 时必填
+  string keyword = 4;         // type=USER_BLOCK_KEYWORD 时必填
+  bool unblock = 5;           // true 表示解除屏蔽
+  string trace_id = 6;        // 链路追踪 ID
+}
+
+message ListUserBlocksReq {
+  int64 mid = 1;              // 所属用户
+  UserBlockType type = 2;     // 类型过滤（USER_BLOCK_UNSPECIFIED 表示不过滤）
+  int32 pn = 3;               // 页码
+  int32 ps = 4;               // 每页大小（最大 100）
+}
+
+message ListUserBlocksReply {
+  repeated UserBlockInfo blocks = 1; // 屏蔽列表
+  int32 total = 2;                   // 总数
+}
+
+// --- 审核结论回写（moderation.result.v1 消费者入口） ---
+
+message ApplyModerationResultReq {
+  int64 dmid = 1;              // 弹幕 ID
+  int64 task_id = 2;           // moderation 任务 ID
+  ModerationVerdict verdict = 3; // 审核结论
+  string reason = 4;           // 结论原因（关键词命中、模型分数等）
+  int64 operator = 5;          // 处理人（0 表示系统/机审）
+  string event_id = 6;         // moderation.result.v1 的 event_id，用于消费去重
+  string trace_id = 7;         // 链路追踪 ID
+}
+
+message ApplyModerationResultReply {
+  int64 dmid = 1;              // 弹幕 ID
+  int32 state = 2;             // 迁移后的状态
+  int32 pool = 3;              // 迁移后的弹幕池
+  bool applied = 4;            // false 表示重复投递或无需迁移
+  string message = 5;          // 说明（重复投递/终态等）
+}
+
+// Danmaku 时间轴弹幕服务。
+// 数据所有权见 AGENTS.md §5：时间轴消息、屏蔽词、用户屏蔽、举报和分片索引
+// 全部归本服务；审核结论只能由 moderation-orchestrator 通过
+// ApplyModerationResult 推进合法状态。
+service Danmaku {
+  // 发送弹幕：校验 → 限流 → 屏蔽词过滤 → 落待审状态 → 提交机审 → 计数
+  rpc PostDanmaku(PostDanmakuReq) returns (PostDanmakuReply);
+  // 按 oid + 时间分段批量拉取弹幕（段缓存命中优先，miss 回源 MySQL 并回填）
+  rpc ListDanmaku(ListDanmakuReq) returns (ListDanmakuReply);
+  // 删除弹幕（本人或管理员，软删除并保留 op_log 审计）
+  rpc DeleteDanmaku(DeleteDanmakuReq) returns (EmptyReply);
+  // 举报弹幕（写本地举报表，供 moderation 拉取，不直连其库）
+  rpc ReportDanmaku(ReportDanmakuReq) returns (ReportDanmakuReply);
+  // 运营侧屏蔽词增删改
+  rpc BlockWord(BlockWordReq) returns (BlockWordReply);
+  // 运营侧屏蔽词分页查询
+  rpc ListBlockWords(ListBlockWordsReq) returns (ListBlockWordsReply);
+  // 用户级屏蔽（屏蔽某用户或某关键词的弹幕）
+  rpc UserBlock(UserBlockReq) returns (EmptyReply);
+  // 用户级屏蔽列表
+  rpc ListUserBlocks(ListUserBlocksReq) returns (ListUserBlocksReply);
+  // 回写审核结论，按合法状态机推进（moderation.result.v1 消费者入口）
+  rpc ApplyModerationResult(ApplyModerationResultReq) returns (ApplyModerationResultReply);
+}

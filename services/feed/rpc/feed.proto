@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+package feed.v1;
+
+option go_package = "go-video/services/feed/rpc";
+
+// 说明：本契约覆盖动态与关注流领域：
+//   - 写扩散：PushFeed 时把新动态 fan-out 到所有粉丝的 Redis ZSet 收件箱。
+//   - 读关注流：PullFeed 走 ZREVRANGEBYSCORE 翻页。
+//   - 个人主页：ListUserFeed 从作者个人发件箱 ZSet 翻页。
+//   - 置顶、未读、删除均为领域动作。
+// 依据 AGENTS.md §1，不实现投币、广告或任何商业化；
+// 依据 §5，本服务只持有动态投影、收件箱和未读计数，
+// 不复制视频主数据，不直接更新推荐结果，不直连 social-graph 的 MySQL。
+
+// 空响应
+message EmptyReply {}
+
+// 对象类型
+enum OType {
+  OTYPE_UNSPECIFIED = 0; // 未指定
+  OTYPE_UGC_VIDEO = 1;   // UGC 视频稿件
+  OTYPE_PGC_WORK = 2;   // PGC 番剧/影视/纪录片
+  OTYPE_LIVE = 3;       // 直播间开播
+  OTYPE_ARTICLE = 4;    // 专栏
+}
+
+// 动作类型
+enum Action {
+  ACTION_UNSPECIFIED = 0; // 未指定
+  ACTION_PUBLISH = 1;    // 发布
+  ACTION_FORWARD = 2;    // 转发
+  ACTION_UPDATE = 3;     // 修改
+}
+
+// 动态条目
+message FeedItem {
+  int64 id = 1;          // 动态 ID（与 feed_outbox.id 一致）
+  int64 mid = 2;         // 发布者 ID
+  int64 oid = 3;         // 对象 ID（如视频稿件 ID）
+  OType otype = 4;        // 对象类型
+  Action action = 5;     // 动作类型
+  int64 ctime = 6;       // 发布时间（Unix 秒）
+  string title = 7;      // 标题
+  string cover = 8;      // 封面 URL
+  string uri = 9;        // 跳转 URI
+  int64 forward_id = 10; // 转发的源动态 ID（0 表示原创）
+}
+
+// 单个 mid 请求（用于未读相关接口）
+message MidReq {
+  int64 mid = 1;        // 用户 ID
+  string real_ip = 2;   // 请求来源 IP
+}
+
+// PushFeed：领域服务（video/catalog/live-room）推送新动态入收件箱
+message PushFeedReq {
+  int64 mid = 1;          // 发布者 ID
+  int64 oid = 2;          // 对象 ID
+  OType otype = 3;         // 对象类型
+  Action action = 4;       // 动作类型
+  int64 ctime = 5;        // 发布时间（Unix 秒；0 表示服务端取当前时间）
+  string title = 6;       // 标题
+  string cover = 7;       // 封面 URL
+  string uri = 8;         // 跳转 URI
+  int64 forward_id = 9;   // 转发的源动态 ID（0 表示原创）
+  string source = 10;      // 来源服务名（如 video/catalog/live-room）
+  string operator = 11;   // 操作者（系统/运营/本人）
+  string real_ip = 12;    // 调用方 IP
+}
+
+// PullFeed：用户拉取关注流（cursor 翻页）
+message PullFeedReq {
+  int64 mid = 1;     // 当前用户 ID
+  int64 cursor = 2;  // 翻页游标（上页最后一条 ctime，0 表示从头开始）
+  int32 ps = 3;      // 每页大小（最大 50，默认 20）
+  string real_ip = 4; // 调用方 IP
+}
+
+// 动态列表响应
+message FeedReply {
+  repeated FeedItem items = 1; // 动态列表（ctime 倒序）
+  int64 next_cursor = 2;       // 下一页游标（0 表示无更多）
+  bool has_more = 3;           // 是否还有更多
+}
+
+// ListUserFeed：查询某用户主页动态
+message ListUserFeedReq {
+  int64 vmid = 1;    // 被查看用户 ID
+  int64 mid = 2;     // 当前用户 ID（用于可见性判断，0 表示未登录）
+  int64 cursor = 3;  // 翻页游标
+  int32 ps = 4;      // 每页大小（最大 50，默认 20）
+  string real_ip = 5; // 调用方 IP
+}
+
+// PinFeed：置顶动态
+message PinFeedReq {
+  int64 mid = 1;       // 用户 ID（动态所属空间）
+  int64 feed_id = 2;   // 动态 ID
+  string operator = 3; // 操作者（本人/运营）
+  string real_ip = 4;  // 调用方 IP
+}
+
+// UnpinFeed：取消置顶
+message UnpinFeedReq {
+  int64 mid = 1;       // 用户 ID
+  int64 feed_id = 2;   // 动态 ID
+  string operator = 3; // 操作者
+  string real_ip = 4;  // 调用方 IP
+}
+
+// 未读计数响应
+message UnreadReply {
+  int64 unread = 1; // 未读动态数
+}
+
+// DeleteFeed：删除自己的动态（本人或运营）
+message DeleteFeedReq {
+  int64 mid = 1;       // 发布者 ID（用于定位 outbox）
+  int64 feed_id = 2;   // 动态 ID
+  string operator = 3;  // 操作者（本人/运营）
+  string real_ip = 4;   // 调用方 IP
+}
+
+// Feed 动态与关注流服务。
+// 依据 AGENTS.md §1，不实现投币、广告或商业化；
+// 依据 §5，本服务只持有动态投影、收件箱和未读计数，
+// 不复制视频主数据，不直接更新推荐结果。
+service Feed {
+  // 领域服务推送新动态（写扩散：fan-out 到所有粉丝收件箱）
+  rpc PushFeed(PushFeedReq) returns (EmptyReply);
+  // 拉取关注流（cursor 翻页）
+  rpc PullFeed(PullFeedReq) returns (FeedReply);
+  // 查询某用户主页动态
+  rpc ListUserFeed(ListUserFeedReq) returns (FeedReply);
+  // 置顶动态
+  rpc PinFeed(PinFeedReq) returns (EmptyReply);
+  // 取消置顶
+  rpc UnpinFeed(UnpinFeedReq) returns (EmptyReply);
+  // 查询用户未读动态数
+  rpc GetUnreadCount(MidReq) returns (UnreadReply);
+  // 清零未读计数
+  rpc ClearUnread(MidReq) returns (EmptyReply);
+  // 删除自己的动态
+  rpc DeleteFeed(DeleteFeedReq) returns (EmptyReply);
+}

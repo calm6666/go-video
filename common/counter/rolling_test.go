@@ -55,20 +55,22 @@ func TestRollingCounterRotate(t *testing.T) {
 	}
 }
 
-// TestRollingCounterMinInterval 验证高频累加下窗口累计值近似为请求总数。
+// TestRollingCounterMinInterval 验证高频累加下窗口累计值等于请求总数。
+//
+// 窗口取 10s，而不是贴着累加时长：原写法把 100 次 5ms tick 塞进 500ms 窗口，
+// 只要调度把 tick 拖慢（2026-09-22 整树 `-p 1` 跑到该包时实测耗时 1.96s），
+// 早期累加就滑出窗口，用例变成「测调度器」而不是「测窗口」。
+// 桶时长仍是 1s，累加过程照样跨桶，游标推进与过期跳过都在被测路径上。
 func TestRollingCounterMinInterval(t *testing.T) {
-	// 10 桶各 50ms，窗口 500ms。
-	c := NewRolling(500*time.Millisecond, 10)
+	c := NewRolling(10*time.Second, 10)
 	tk := time.NewTicker(5 * time.Millisecond)
 	defer tk.Stop()
 	for i := 0; i < 100; i++ {
 		<-tk.C
 		c.Add(1)
 	}
-	v := c.Value()
-	// 100 次累加分布于 500ms 窗口内，允许边界抖动。
-	if v < 80 || v > 100 {
-		t.Errorf("期望 80~100，得到 %d", v)
+	if v := c.Value(); v != 100 {
+		t.Errorf("期望 100，得到 %d", v)
 	}
 }
 

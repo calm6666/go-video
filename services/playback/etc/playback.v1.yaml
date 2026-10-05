@@ -1,0 +1,55 @@
+Name: playback.v1.rpc
+ListenOn: 0.0.0.0:8102
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: playback.v1.rpc
+Mode: dev
+
+# 业务缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会触发 conflict key redis）
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL 主库 DSN（仅本地示例，生产从配置中心/Secret 注入）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_playback?charset=utf8mb4&parseTime=true&loc=Local
+
+# rights 服务 RPC（PGC 版权窗口校验）。留空时不构造客户端，
+# PGC 签发会直接返回 playback: rights service unavailable，而不是伪造可播放。
+RightsRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: rights.v1.rpc
+
+# CDN A 型防盗链签名配置。
+# PrivateKey 是签名私钥，生产必须从 Secret/Vault 注入，禁止提交仓库；
+# 留空时 GetPlaybackToken 返回 playback: cdn private key is not configured，
+# 服务不会签发无签名地址（AGENTS.md §6）。下面的占位值仅供本地冒烟使用。
+Sign:
+  BaseURL: https://play.example.com
+  PrivateKey: local-dev-only-private-key
+  KeyID: playback-local-v1
+  # 签名地址有效期（秒）。PGC 内容还会被版权窗口结束时间进一步收紧。
+  TokenTTL: 1800
+  # 生产必须为 true；只有 Mode=dev/test 才允许 false（本地直连 MinIO 冒烟）。
+  EnableAuthKey: true
+
+# Outbox 发布链路：playback_outbox → playback.heartbeat.v1（AGENTS.md §5、§7）。
+# 默认构建（不带 `-tags playback_kafka`）没有链接队列发送端，Enabled 置 true 会让进程
+# 启动即失败（ErrKafkaRuntimeNotBuilt），而不是「安静地不投递」。
+# 本仓库从未连接过任何 Kafka/Redpanda，打开前必须先在 broker 上验证。
+# 这里没有 Username/Password/CaFile：go-queue v1.2.2 的 kq.NewPusher 不暴露鉴权/TLS 注入口。
+# 也没有 Group：本服务只生产事件，没有任何代码读它。
+Kafka:
+  Enabled: false
+  Brokers:
+  - 127.0.0.1:9092
+  PublishTopics:
+  - playback.heartbeat.v1            # 必须等于 model 的 event_type+schema_version 拼出的 topic，多写会被点名拒绝
+  MaxRetries: 5                      # 单事件累计尝试上限（含首次），达到即 state=2(失败)
+  RetryBackoffSec: 2                 # 退避基数：第 n 次失败后等 2 * 2^(n-1) 秒
+  RetryMaxBackoffSec: 1800           # 退避上限（秒），不得小于 RetryBackoffSec
+  PollIntervalSec: 2                 # 发布循环轮询间隔（进程启动时先立刻扫一轮）
+  BatchLimit: 100                    # 单轮取到的到期事件数
+  SendTimeoutSec: 5                  # 单条投递超时，超时按一次失败计入退避（不算已投递）

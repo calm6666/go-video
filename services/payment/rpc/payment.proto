@@ -1,0 +1,405 @@
+syntax = "proto3";
+
+package payment.v1;
+
+option go_package = "go-video/services/payment/rpc";
+
+// 资金域契约（AGENTS.md §1 商业化范围 2026-09-22 修订后纳入）。
+//
+// 本服务是「钱」的唯一写入口（§5）：余额、充值单、支付单、退款单、资金流水。
+// 其他服务只保存本服务返回的单据号，不得自记余额。
+//
+// 沙箱语义（必须读清楚，否则会误判成真实收单）：
+//   - 唯一可用渠道是 SANDBOX。OpenRecharge/SettleSandboxRecharge/CreatePayment
+//     只在本地台账上改数，不请求任何第三方支付网关，不产生真实资金移动；
+//   - 因此订单「支付成功 → 会员生效」是真实状态推进，而「真实收单」在本项目不存在；
+//   - 需要真实渠道才成立的能力一律不开接口：渠道异步回调验签、退款到银行卡、
+//     提现、打款出金、对账文件下载、发票税务。调用已声明但渠道未配置的方法时，
+//     返回 FailedPrecondition + "payment channel not configured"，绝不返回成功。
+//   - 硬币（虚拟社区货币，归 coin 服务）与本服务的现金余额是分开的两套账，不互换。
+
+// 空响应
+message EmptyReply {}
+
+// 充值/支付渠道。除 SANDBOX 外都是「已定义但未接入」的占位档，
+// 出现任何非 SANDBOX 入参都会被拒绝，而不是默默按沙箱处理。
+enum PayChannel {
+  PAY_CHANNEL_UNSPECIFIED = 0;
+  PAY_CHANNEL_SANDBOX = 1; // 唯一可用：本地台账，无真实资金
+}
+
+// 支付方式。BALANCE 扣本服务余额；SANDBOX_CHANNEL 表示「沙箱收单，立即成功」。
+enum PayMethod {
+  PAY_METHOD_UNSPECIFIED = 0;
+  PAY_METHOD_BALANCE = 1;
+  PAY_METHOD_SANDBOX_CHANNEL = 2;
+}
+
+enum RechargeState {
+  RECHARGE_STATE_UNSPECIFIED = 0;
+  RECHARGE_STATE_PENDING = 1;
+  RECHARGE_STATE_SUCCESS = 2;
+  RECHARGE_STATE_CANCELLED = 3;
+  RECHARGE_STATE_FAILED = 4;
+}
+
+enum PaymentState {
+  PAYMENT_STATE_UNSPECIFIED = 0;
+  PAYMENT_STATE_PENDING = 1;
+  PAYMENT_STATE_PAID = 2;
+  PAYMENT_STATE_FAILED = 3;
+  PAYMENT_STATE_CLOSED = 4;
+  PAYMENT_STATE_REFUNDED = 5;            // 全额退款
+  PAYMENT_STATE_PARTIALLY_REFUNDED = 6;  // 部分退款（refunded_minor 记录已退额）
+}
+
+enum RefundState {
+  REFUND_STATE_UNSPECIFIED = 0;
+  REFUND_STATE_SUCCEEDED = 1; // 沙箱余额退回是同步完成的
+  REFUND_STATE_FAILED = 2;
+}
+
+// 流水业务类型
+enum FlowBizType {
+  FLOW_BIZ_TYPE_UNSPECIFIED = 0;
+  FLOW_BIZ_TYPE_RECHARGE = 1;  // 充值入账
+  FLOW_BIZ_TYPE_PAYMENT = 2;   // 消费出账
+  FLOW_BIZ_TYPE_REFUND = 3;    // 退款入账
+  FLOW_BIZ_TYPE_ADMIN_ADJUST = 4; // 运营调整（正负都可能，必须有 reason）
+}
+
+// 余额账户。金额一律 int64 最小货币单位（分）+ 显式币种，不用浮点。
+message WalletInfo {
+  int64 mid = 1;
+  int64 balance_minor = 2;
+  int64 frozen_minor = 3;   // 预留位；本项目无预授权流程，恒为 0，读侧不要拿它当可用余额
+  string currency = 4;
+  int64 version = 5;
+  int64 ctime = 6;
+  int64 mtime = 7;
+}
+
+message RechargeInfo {
+  string recharge_no = 1;
+  int64 mid = 2;
+  int64 amount_minor = 3;
+  string currency = 4;
+  PayChannel channel = 5;
+  RechargeState state = 6;
+  string operator = 7;      // 沙箱结算由谁触发：user / 运营工号 / "cron"
+  string request_id = 8;
+  string reason = 9;
+  int64 settled_at = 10;
+  int64 ctime = 11;
+  int64 mtime = 12;
+}
+
+message PaymentInfo {
+  string payment_no = 1;
+  string biz_order_no = 2;  // 订单号（trade-order 的主键引用，唯一索引：一单一支付）
+  int64 mid = 3;
+  int64 amount_minor = 4;
+  int64 refunded_minor = 5;
+  string currency = 6;
+  PayMethod method = 7;
+  PaymentState state = 8;
+  string subject = 9;       // 摘要：不含 PII、不写凭据
+  int64 paid_at = 10;
+  int64 expire_at = 11;     // 受理超时；0 表示不过期
+  string request_id = 12;
+  int64 ctime = 13;
+  int64 mtime = 14;
+  // operator/remark 是「谁把这单推到当前态、理由是什么」的审计回显位（无 PII、无凭据）。
+  // 运营面必须能看到经办人，否则关单/人工结算就成了无从核对的黑盒。
+  string operator = 15;
+  string remark = 16;
+}
+
+message RefundInfo {
+  string refund_no = 1;
+  string payment_no = 2;
+  string biz_order_no = 3;
+  int64 mid = 4;
+  int64 amount_minor = 5;
+  string currency = 6;
+  RefundState state = 7;
+  string destination = 8;   // BALANCE（退余额）；原路退回渠道在本项目不可用
+  string operator = 9;
+  string request_id = 10;
+  string reason = 11;
+  int64 ctime = 12;
+}
+
+message FlowInfo {
+  int64 flow_id = 1;
+  int64 mid = 2;
+  FlowBizType biz_type = 3;
+  string biz_no = 4;        // recharge_no / payment_no / refund_no / adjust 单号
+  int64 delta_minor = 5;    // 正入负出
+  int64 balance_after_minor = 6;
+  string currency = 7;
+  string remark = 8;
+  string operator = 9;
+  string request_id = 10;
+  int64 ctime = 11;
+}
+
+// --- 钱包 ---
+
+message GetWalletReq {
+  int64 mid = 1;
+  string currency = 2; // 空表示默认币种 CNY
+}
+
+message GetWalletReply {
+  WalletInfo wallet = 1;
+}
+
+// 运营/沙箱批量补余额用的调整流水（正负皆可）。与充值分开：充值要有充值单可查，
+// 调整只有台账，二者的审计口径不同，不能混成一条路径。
+message AdjustBalanceReq {
+  int64 mid = 1;
+  int64 delta_minor = 2; // 不允许为 0
+  string currency = 3;
+  string operator = 4;   // 网关按会话渲染
+  string request_id = 5;
+  string reason = 6;     // 必填
+}
+
+message AdjustBalanceReply {
+  bool duplicated = 1;
+  WalletInfo wallet = 2;
+  int64 flow_id = 3;
+}
+
+// --- 充值（沙箱）---
+
+message OpenRechargeReq {
+  int64 mid = 1;
+  int64 amount_minor = 2;
+  string currency = 3;
+  PayChannel channel = 4; // 只有 SANDBOX 受理
+  string request_id = 5;
+  string client_trace_id = 6;
+}
+
+message OpenRechargeReply {
+  bool duplicated = 1;    // 命中 request_id 重放，未重复建单
+  RechargeInfo recharge = 2;
+}
+
+// 沙箱结算：直接把充值单置为 SUCCESS 并入账。真实渠道下这一步应由渠道回调驱动，
+// 本项目没有回调，因此这一步就是「钱到账」的唯一入口——只动本地台账。
+message SettleSandboxRechargeReq {
+  string recharge_no = 1;
+  string operator = 2;    // 发起人；自动结算为 "cron"
+  string request_id = 3;
+  string reason = 4;
+}
+
+message SettleSandboxRechargeReply {
+  bool duplicated = 1;
+  RechargeInfo recharge = 2;
+  WalletInfo wallet = 3;
+  int64 flow_id = 4;
+}
+
+message CancelRechargeReq {
+  string recharge_no = 1;
+  string operator = 2;
+  string request_id = 3;
+  string reason = 4; // 必填
+}
+
+message CancelRechargeReply {
+  bool duplicated = 1;
+  RechargeInfo recharge = 2;
+}
+
+message ListRechargesReq {
+  int64 mid = 1; // 0 表示跨用户（运营面）
+  RechargeState state = 2;
+  int64 from_ts = 3;
+  int64 to_ts = 4;
+  int64 page = 5;
+  int64 size = 6;
+}
+
+message ListRechargesReply {
+  repeated RechargeInfo recharges = 1;
+  int64 total = 2;
+  int64 page = 3;
+  int64 size = 4;
+}
+
+// --- 支付单（供 trade-order 使用）---
+
+// 建单即受理：BALANCE 走余额扣减（不足则 FailedPrecondition，且不写流水）；
+// SANDBOX_CHANNEL 直接 PAID。biz_order_no 唯一索引保证一单一支付，
+// 同单号不同金额必须冲突报错，不能静默改价。
+message CreatePaymentReq {
+  string biz_order_no = 1;
+  int64 mid = 2;
+  int64 amount_minor = 3;
+  string currency = 4;
+  PayMethod method = 5;
+  string subject = 6;
+  int64 expire_at = 7;
+  string request_id = 8;
+  string operator = 9; // 用户自助为 "user"
+}
+
+message CreatePaymentReply {
+  bool duplicated = 1;
+  PaymentInfo payment = 2;
+  WalletInfo wallet = 3; // 余额支付时回余额快照；渠道支付为受理前快照
+}
+
+message GetPaymentReq {
+  string payment_no = 1;   // 与 biz_order_no 二选一
+  string biz_order_no = 2;
+}
+
+message GetPaymentReply {
+  bool found = 1;
+  PaymentInfo payment = 2;
+}
+
+message ClosePaymentReq {
+  string payment_no = 1;
+  string operator = 2;
+  string request_id = 3;
+  string reason = 4; // 必填
+}
+
+message ClosePaymentReply {
+  bool duplicated = 1;
+  PaymentInfo payment = 2;
+}
+
+message ListPaymentsReq {
+  int64 mid = 1;
+  PaymentState state = 2;
+  PayMethod method = 3;
+  int64 from_ts = 4;
+  int64 to_ts = 5;
+  int64 page = 6;
+  int64 size = 7;
+}
+
+message ListPaymentsReply {
+  repeated PaymentInfo payments = 1;
+  int64 total = 2;
+  int64 page = 3;
+  int64 size = 4;
+}
+
+// --- 退款 ---
+
+// 只支持退回到余额（destination=BALANCE）：沙箱里钱本就是台账加的，退回到台账是自洽的。
+// 原路退回真实渠道需要渠道凭证，本服务不开该路径，被请求时返回 not-configured。
+message RefundPaymentReq {
+  string payment_no = 1;
+  int64 amount_minor = 2; // 0 表示全额剩余可退
+  bool to_balance = 3;    // false 即要求原路退回渠道 → 拒绝
+  string operator = 4;
+  string request_id = 5;
+  string reason = 6;      // 必填
+}
+
+message RefundPaymentReply {
+  bool duplicated = 1;
+  RefundInfo refund = 2;
+  PaymentInfo payment = 3;
+  WalletInfo wallet = 4;
+}
+
+message ListRefundsReq {
+  int64 mid = 1;
+  string payment_no = 2;
+  int64 page = 3;
+  int64 size = 4;
+  // 跨用户审计（mid=0）必须给时间窗，与 ListPayments/ListFlows 同一收口口径；
+  // 缺这两个字段时服务只能靠 payment_no 兜，无法按时间段核对退款台账。
+  int64 from_ts = 5;
+  int64 to_ts = 6;
+}
+
+message ListRefundsReply {
+  repeated RefundInfo refunds = 1;
+  int64 total = 2;
+  int64 page = 3;
+  int64 size = 4;
+}
+
+// --- 流水与渠道自述 ---
+
+message ListFlowsReq {
+  int64 mid = 1; // 0 表示跨用户（运营面）
+  FlowBizType biz_type = 2;
+  string biz_no = 3;
+  int64 from_ts = 4;
+  int64 to_ts = 5;
+  int64 page = 6;
+  int64 size = 7;
+}
+
+message ListFlowsReply {
+  repeated FlowInfo flows = 1;
+  int64 total = 2;
+  int64 page = 3;
+  int64 size = 4;
+}
+
+// 渠道自述：把「沙箱、没有真实资金」这件事说成可查询的事实，
+// 而不是只写在 README 里——运营页和排障都要能直接读到。
+message DescribeChannelsReq {}
+
+message ChannelState {
+  PayChannel channel = 1;
+  bool enabled = 2;
+  bool real_money = 3; // 恒为 false；留这一列是为了让前端能显式标注「非真实资金」
+  string note = 4;
+}
+
+message DescribeChannelsReply {
+  bool sandbox_only = 1;
+  repeated ChannelState channels = 2;
+  string currency_default = 3;
+}
+
+// Payment 资金服务：余额、充值、支付、退款与流水。
+service Payment {
+  // 查询余额
+  rpc GetWallet(GetWalletReq) returns (GetWalletReply);
+  // 运营调整余额（有台账、有理由）
+  rpc AdjustBalance(AdjustBalanceReq) returns (AdjustBalanceReply);
+
+  // 开充值单（仅 SANDBOX）
+  rpc OpenRecharge(OpenRechargeReq) returns (OpenRechargeReply);
+  // 沙箱结算充值单并入账
+  rpc SettleSandboxRecharge(SettleSandboxRechargeReq) returns (SettleSandboxRechargeReply);
+  // 取消未结算充值单
+  rpc CancelRecharge(CancelRechargeReq) returns (CancelRechargeReply);
+  // 充值台账分页
+  rpc ListRecharges(ListRechargesReq) returns (ListRechargesReply);
+
+  // 受理支付（余额扣减或沙箱渠道立即成功）
+  rpc CreatePayment(CreatePaymentReq) returns (CreatePaymentReply);
+  // 支付单读取（按 payment_no 或订单号）
+  rpc GetPayment(GetPaymentReq) returns (GetPaymentReply);
+  // 关闭未支付/未履约支付单
+  rpc ClosePayment(ClosePaymentReq) returns (ClosePaymentReply);
+  // 支付台账分页
+  rpc ListPayments(ListPaymentsReq) returns (ListPaymentsReply);
+
+  // 退款（只退回余额；原路退回渠道返回 not-configured）
+  rpc RefundPayment(RefundPaymentReq) returns (RefundPaymentReply);
+  // 退款台账分页
+  rpc ListRefunds(ListRefundsReq) returns (ListRefundsReply);
+
+  // 资金流水分页
+  rpc ListFlows(ListFlowsReq) returns (ListFlowsReply);
+  // 渠道能力自述（沙箱模式与真实渠道是否配置）
+  rpc DescribeChannels(DescribeChannelsReq) returns (DescribeChannelsReply);
+}

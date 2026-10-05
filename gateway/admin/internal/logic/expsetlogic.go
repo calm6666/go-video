@@ -30,6 +30,9 @@ func (l *ExpSetLogic) ExpSet(req *types.ParamExp) (resp *types.EmptyResponse, er
 	if l.svcCtx.UserProfile == nil {
 		return nil, errors.New("user-profile service not configured")
 	}
+	if err := adminSessionGate(l.ctx, "expSet"); err != nil {
+		return nil, err
+	}
 	if _, err = l.svcCtx.UserProfile.SetExp(l.ctx, &userprofilerc.AddExpReq{
 		Mid:     req.Mid,
 		Count:   req.Count,

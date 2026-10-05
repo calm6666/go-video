@@ -1,14 +1,33 @@
 Name: engagement.v1.rpc
-ListenOn: 0.0.0.0:8083
+ListenOn: 0.0.0.0:8084
 Etcd:
   Hosts:
   - 127.0.0.1:2379
   Key: engagement.v1.rpc
 
-# Redis 缓存与计数器
-Redis:
+# 业务缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会触发 conflict key redis）
+CacheRedis:
   Host: 127.0.0.1:6379
   Type: node
 
 # MySQL 主库 DSN（仅本地示例，生产从配置中心/Secret 注入）
 DataSource: root:root@tcp(127.0.0.1:3306)/go_video_engagement?charset=utf8mb4&parseTime=true&loc=Local
+
+# Outbox 发布链路：engagement_outbox → engagement.action.v1（AGENTS.md §5）。
+# 默认构建（不带 `-tags engagement_kafka`）没有链接队列发送端，Enabled 置 true 会让进程
+# 启动即失败（ErrKafkaRuntimeNotBuilt），而不是「安静地不投递」。
+# 本仓库从未连接过任何 Kafka/Redpanda，打开前必须先在 broker 上验证。
+# 这里没有 Username/Password/CaFile：go-queue v1.2.2 的 kq.NewPusher 不暴露鉴权/TLS 注入口。
+# 也没有 Group：本服务只生产事件，没有任何代码读它。
+Kafka:
+  Enabled: false
+  Brokers:
+  - 127.0.0.1:9092
+  PublishTopics:
+  - engagement.action.v1             # 必须等于 model 的 event_type+schema_version 拼出的 topic，多写会被点名拒绝
+  MaxRetries: 5                      # 单事件累计尝试上限（含首次），达到即 state=2(失败)
+  RetryBackoffSec: 2                 # 退避基数：第 n 次失败后等 2 * 2^(n-1) 秒
+  RetryMaxBackoffSec: 1800           # 退避上限（秒），不得小于 RetryBackoffSec
+  PollIntervalSec: 2                 # 发布循环轮询间隔（进程启动时先立刻扫一轮）
+  BatchLimit: 100                    # 单轮取到的到期事件数
+  SendTimeoutSec: 5                  # 单条投递超时，超时按一次失败计入退避（不算已投递）

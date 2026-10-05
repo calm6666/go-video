@@ -56,10 +56,46 @@ func expCoinKey(mid, day int64) string {
 	return fmt.Sprintf(expCoinPrefix, day, mid)
 }
 
+// Cacher 是 Repository 对 Redis 缓存的最小依赖面（与 rights/playback/catalog 各轮的
+// Cacher 同构）。抽取本接口的唯一目的是给 internal/logic 的单测留注入缝：
+// 测试用内存替身组装**真实 Repository**，让「缓存 → DB → 回填」整条判定链留在被测路径上，
+// 而不是把 Repository 一起 mock 掉。生产路径仍然只走 New。
+//
+// 方法全部使用**未加工的 key**（bs_123 / exp_123 / moral_123 …），即 key 派生、TTL 选择、
+// 「miss 记 -1」这类策略仍留在 Repository 侧——它们正是业务口径，必须可被断言；
+// Cacher 只负责 Redis 读写原语。原 *Cache 上的组合方法（delBaseCache/statCache/…）
+// 因此迁移成了 *Repository 的方法，语义逐字保持不变。
+//
+// 注意 *Cache 对读错误的处理是「吞成 miss 并记日志」（见 GetJSON/GetInt），
+// 而 GetBit 会把错误如实上抛——这两套口径都由用例分别钉住，替身不得自行放宽。
+type Cacher interface {
+	// Ping 健康探测。
+	Ping(ctx context.Context) error
+	// GetJSON 读取并反序列化 JSON；miss 返回 nil（v 保持零值）。
+	GetJSON(ctx context.Context, key string, v any) error
+	// SetJSON 写入 JSON（带过期时间）。
+	SetJSON(ctx context.Context, key string, v any, ttlSeconds int)
+	// GetInt 读取整数；miss 返回 (0, false)。
+	GetInt(ctx context.Context, key string) (int64, bool)
+	// SetInt 写入整数（带过期时间）。
+	SetInt(ctx context.Context, key string, v int64, ttlSeconds int)
+	// Del 删除 key。
+	Del(ctx context.Context, key string) error
+	// GetBit 读取位图某一位。
+	GetBit(ctx context.Context, key string, offset int64) (bool, error)
+	// Incr 计数 +1 并返回新值。
+	Incr(ctx context.Context, key string) (int64, error)
+	// Expire 设置过期时间。
+	Expire(ctx context.Context, key string, seconds int) error
+}
+
 // Cache 封装 user-profile 的 Redis 缓存操作（go-zero redis，JSON 值）。
 type Cache struct {
 	rds *redis.Redis
 }
+
+// 编译期确认 *Cache 满足注入缝接口。
+var _ Cacher = (*Cache)(nil)
 
 // NewCache 构造 Cache。
 func NewCache(rds *redis.Redis) *Cache {
@@ -74,8 +110,8 @@ func (c *Cache) Ping(ctx context.Context) error {
 	return errors.New("user-profile/cache: redis ping failed")
 }
 
-// getJSON 读取并反序列化 JSON 缓存；miss 返回 (nil, nil)。
-func (c *Cache) getJSON(ctx context.Context, key string, v any) error {
+// GetJSON 读取并反序列化 JSON 缓存；miss 与读故障都返回 nil（故障仅记日志）。
+func (c *Cache) GetJSON(ctx context.Context, key string, v any) error {
 	bs, err := c.rds.GetCtx(ctx, key)
 	if err != nil {
 		if err == redis.Nil {
@@ -94,8 +130,8 @@ func (c *Cache) getJSON(ctx context.Context, key string, v any) error {
 	return nil
 }
 
-// setJSON 写入 JSON 缓存（带过期时间）。
-func (c *Cache) setJSON(ctx context.Context, key string, v any, ttlSeconds int) {
+// SetJSON 写入 JSON 缓存（带过期时间，失败仅记日志）。
+func (c *Cache) SetJSON(ctx context.Context, key string, v any, ttlSeconds int) {
 	bs, err := json.Marshal(v)
 	if err != nil {
 		logx.Errorf("user-profile/cache: marshal %s err=%v", key, err)
@@ -106,8 +142,8 @@ func (c *Cache) setJSON(ctx context.Context, key string, v any, ttlSeconds int) 
 	}
 }
 
-// del 删除缓存 key（miss 不视为错误）。
-func (c *Cache) del(ctx context.Context, key string) error {
+// Del 删除缓存 key（miss 不视为错误）。
+func (c *Cache) Del(ctx context.Context, key string) error {
 	_, err := c.rds.DelCtx(ctx, key)
 	if err != nil && err != redis.Nil {
 		return err
@@ -115,8 +151,27 @@ func (c *Cache) del(ctx context.Context, key string) error {
 	return nil
 }
 
-// getInt 读取整数缓存；miss 返回 (0, false)。
-func (c *Cache) getInt(ctx context.Context, key string) (int64, bool) {
+// GetBit 读取位图某一位（redis.Nil 视为 0，其余故障上抛）。
+func (c *Cache) GetBit(ctx context.Context, key string, offset int64) (bool, error) {
+	v, err := c.rds.GetBitCtx(ctx, key, offset)
+	if err != nil && err != redis.Nil {
+		return false, err
+	}
+	return v == 1, nil
+}
+
+// Incr 计数 +1。
+func (c *Cache) Incr(ctx context.Context, key string) (int64, error) {
+	return c.rds.IncrCtx(ctx, key)
+}
+
+// Expire 设置 key 过期时间。
+func (c *Cache) Expire(ctx context.Context, key string, seconds int) error {
+	return c.rds.ExpireCtx(ctx, key, seconds)
+}
+
+// GetInt 读取整数缓存；miss 返回 (0, false)。
+func (c *Cache) GetInt(ctx context.Context, key string) (int64, bool) {
 	bs, err := c.rds.GetCtx(ctx, key)
 	if err != nil || len(bs) == 0 {
 		return 0, false
@@ -128,134 +183,126 @@ func (c *Cache) getInt(ctx context.Context, key string) (int64, bool) {
 	return v, true
 }
 
-// setInt 写入整数缓存（带过期时间）。
-func (c *Cache) setInt(ctx context.Context, key string, v int64, ttlSeconds int) {
+// SetInt 写入整数缓存（带过期时间）。
+func (c *Cache) SetInt(ctx context.Context, key string, v int64, ttlSeconds int) {
 	if err := c.rds.SetexCtx(ctx, key, strconv.FormatInt(v, 10), ttlSeconds); err != nil {
 		logx.Errorf("user-profile/cache: setint %s err=%v", key, err)
 	}
 }
 
+// --- 以下是 key 派生与 miss 策略（原 *Cache 的组合方法，逐字保持语义） ---
+
 // delBaseCache 失效基础资料缓存（参考 DelBaseInfoCache）。
-func (c *Cache) delBaseCache(ctx context.Context, mid int64) error {
-	return c.del(ctx, keyBase(mid))
+func (r *Repository) delBaseCache(ctx context.Context, mid int64) error {
+	return r.cache.Del(ctx, keyBase(mid))
 }
 
 // delExpCache 失效经验缓存。
-func (c *Cache) delExpCache(ctx context.Context, mid int64) error {
-	return c.del(ctx, keyExp(mid))
+func (r *Repository) delExpCache(ctx context.Context, mid int64) error {
+	return r.cache.Del(ctx, keyExp(mid))
 }
 
 // delMoralCache 失效节操缓存（参考 DelMoralCache）。
-func (c *Cache) delMoralCache(ctx context.Context, mid int64) error {
-	return c.del(ctx, keyMoral(mid))
+func (r *Repository) delMoralCache(ctx context.Context, mid int64) error {
+	return r.cache.Del(ctx, keyMoral(mid))
 }
 
 // delRealnameCache 失效实名信息缓存（参考 DeleteRealnameInfo）。
-func (c *Cache) delRealnameCache(ctx context.Context, mid int64) error {
-	return c.del(ctx, keyRealname(mid))
+func (r *Repository) delRealnameCache(ctx context.Context, mid int64) error {
+	return r.cache.Del(ctx, keyRealname(mid))
 }
 
 // delCaptureCode 删除实名验证码（参考 DeleteRealnameCaptureCode）。
-func (c *Cache) delCaptureCode(ctx context.Context, mid int64) error {
-	return c.del(ctx, keyCaptureCode(mid))
+func (r *Repository) delCaptureCode(ctx context.Context, mid int64) error {
+	return r.cache.Del(ctx, keyCaptureCode(mid))
 }
 
 // captureCode 读取实名验证码；miss 返回 -1。
-func (c *Cache) captureCode(ctx context.Context, mid int64) (int, error) {
-	if v, ok := c.getInt(ctx, keyCaptureCode(mid)); ok {
+func (r *Repository) captureCode(ctx context.Context, mid int64) (int, error) {
+	if v, ok := r.cache.GetInt(ctx, keyCaptureCode(mid)); ok {
 		return int(v), nil
 	}
 	return -1, nil
 }
 
 // setCaptureCode 写入实名验证码（10 分钟过期）。
-func (c *Cache) setCaptureCode(ctx context.Context, mid int64, code int) error {
-	c.setInt(ctx, keyCaptureCode(mid), int64(code), captureCodeTTL)
+func (r *Repository) setCaptureCode(ctx context.Context, mid int64, code int) error {
+	r.cache.SetInt(ctx, keyCaptureCode(mid), int64(code), captureCodeTTL)
 	return nil
 }
 
 // captureTimes 读取验证码发送次数；miss 返回 -1（参考 RealnameCaptureTimesCache）。
-func (c *Cache) captureTimes(ctx context.Context, mid int64) (int, error) {
-	if v, ok := c.getInt(ctx, keyCaptureTimes(mid)); ok {
+func (r *Repository) captureTimes(ctx context.Context, mid int64) (int, error) {
+	if v, ok := r.cache.GetInt(ctx, keyCaptureTimes(mid)); ok {
 		return int(v), nil
 	}
 	return -1, nil
 }
 
 // setCaptureTimes 写入验证码发送次数。
-func (c *Cache) setCaptureTimes(ctx context.Context, mid int64, times int) error {
-	c.setInt(ctx, keyCaptureTimes(mid), int64(times), captureTimesTTL)
+func (r *Repository) setCaptureTimes(ctx context.Context, mid int64, times int) error {
+	r.cache.SetInt(ctx, keyCaptureTimes(mid), int64(times), captureTimesTTL)
 	return nil
 }
 
 // incrCaptureTimes 发送次数 +1（参考 IncreaseRealnameCaptureTimes）。
-func (c *Cache) incrCaptureTimes(ctx context.Context, mid int64) error {
-	_, err := c.rds.IncrCtx(ctx, keyCaptureTimes(mid))
-	if err != nil {
+func (r *Repository) incrCaptureTimes(ctx context.Context, mid int64) error {
+	key := keyCaptureTimes(mid)
+	if _, err := r.cache.Incr(ctx, key); err != nil {
 		return err
 	}
 	// 首次写入补 TTL
-	if v, ok := c.getInt(ctx, keyCaptureTimes(mid)); ok && v <= 1 {
-		c.rds.ExpireCtx(ctx, keyCaptureTimes(mid), captureTimesTTL)
+	if v, ok := r.cache.GetInt(ctx, key); ok && v <= 1 {
+		_ = r.cache.Expire(ctx, key, captureTimesTTL)
 	}
 	return nil
 }
 
 // captureErrTimes 读取验证码错误次数；miss 返回 -1。
-func (c *Cache) captureErrTimes(ctx context.Context, mid int64) (int, error) {
-	if v, ok := c.getInt(ctx, keyCaptureErr(mid)); ok {
+func (r *Repository) captureErrTimes(ctx context.Context, mid int64) (int, error) {
+	if v, ok := r.cache.GetInt(ctx, keyCaptureErr(mid)); ok {
 		return int(v), nil
 	}
 	return -1, nil
 }
 
 // setCaptureErrTimes 写入验证码错误次数。
-func (c *Cache) setCaptureErrTimes(ctx context.Context, mid int64, times int) error {
-	c.setInt(ctx, keyCaptureErr(mid), int64(times), captureErrTTL)
+func (r *Repository) setCaptureErrTimes(ctx context.Context, mid int64, times int) error {
+	r.cache.SetInt(ctx, keyCaptureErr(mid), int64(times), captureErrTTL)
 	return nil
 }
 
 // incrCaptureErrTimes 错误次数 +1。
-func (c *Cache) incrCaptureErrTimes(ctx context.Context, mid int64) error {
-	_, err := c.rds.IncrCtx(ctx, keyCaptureErr(mid))
-	if err != nil {
+func (r *Repository) incrCaptureErrTimes(ctx context.Context, mid int64) error {
+	key := keyCaptureErr(mid)
+	if _, err := r.cache.Incr(ctx, key); err != nil {
 		return err
 	}
-	if v, ok := c.getInt(ctx, keyCaptureErr(mid)); ok && v <= 1 {
-		c.rds.ExpireCtx(ctx, keyCaptureErr(mid), captureErrTTL)
+	if v, ok := r.cache.GetInt(ctx, key); ok && v <= 1 {
+		_ = r.cache.Expire(ctx, key, captureErrTTL)
 	}
 	return nil
 }
 
 // delCaptureErrTimes 清空验证码错误次数（发送新验证码后重置）。
-func (c *Cache) delCaptureErrTimes(ctx context.Context, mid int64) error {
-	return c.del(ctx, keyCaptureErr(mid))
+func (r *Repository) delCaptureErrTimes(ctx context.Context, mid int64) error {
+	return r.cache.Del(ctx, keyCaptureErr(mid))
 }
 
 // statCache 读取当日经验奖励统计（参考 dao/redis.go StatCache 的 GETBIT 组合）。
-func (c *Cache) statCache(ctx context.Context, mid, day int64) (login, watch, share bool, coin int64, err error) {
-	login, err = c.getBit(ctx, expAddedKey(statLogin, mid, day), mid%expShard)
-	if err != nil {
+// 位图读取失败会如实上抛（与 JSON/整数缓存「吞成 miss」的口径不同，见 GetBit 注释）。
+func (r *Repository) statCache(ctx context.Context, mid, day int64) (login, watch, share bool, coin int64, err error) {
+	if login, err = r.cache.GetBit(ctx, expAddedKey(statLogin, mid, day), mid%expShard); err != nil {
 		return
 	}
-	watch, err = c.getBit(ctx, expAddedKey(statView, mid, day), mid%expShard)
-	if err != nil {
+	if watch, err = r.cache.GetBit(ctx, expAddedKey(statView, mid, day), mid%expShard); err != nil {
 		return
 	}
-	share, err = c.getBit(ctx, expAddedKey(statShare, mid, day), mid%expShard)
-	if err != nil {
+	if share, err = r.cache.GetBit(ctx, expAddedKey(statShare, mid, day), mid%expShard); err != nil {
 		return
 	}
-	if v, ok := c.getInt(ctx, expCoinKey(mid, day)); ok {
+	if v, ok := r.cache.GetInt(ctx, expCoinKey(mid, day)); ok {
 		coin = v
 	}
 	return
-}
-
-func (c *Cache) getBit(ctx context.Context, key string, offset int64) (bool, error) {
-	v, err := c.rds.GetBitCtx(ctx, key, offset)
-	if err != nil && err != redis.Nil {
-		return false, err
-	}
-	return v == 1, nil
 }

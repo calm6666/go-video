@@ -1,0 +1,344 @@
+# 运营面 · `/admin/catalog`
+
+> 由 `node scripts/gen-api-docs.mjs` 从契约真源生成，**请勿手工编辑**；改接口先改 `.api`/`.proto` 再重新生成。
+
+> 真源：`gateway/admin/api/admin.api`　·　生成一致性由本脚本的 routes.go 漂移门禁把守。
+
+## 本组概览
+
+| 小节 | 鉴权 | 路由数 |
+|---|---|---|
+| catalog 域运营路由 | 免鉴权 | 1 |
+| catalog 域写入口（受 AdminPermission 保护） | AdminPermission | 5 |
+
+合计 **6** 条。
+
+入参编码看下方各表的「位置」列：`path`→路径段、`form`→URL 查询串（POST 也一样）、`json`→JSON 请求体。
+为什么 `form` 只能走查询串，见 [接口文档索引](../../README.md#阅读前要知道的四件事)第 4 条。
+
+## catalog 域运营路由（免鉴权，1 条）
+
+鉴权：免鉴权（刻意不进 `routePermissions` 的只读运营面）
+
+| 方法 | 完整路径 | 说明 | handler | logic 文件 |
+|---|---|---|---|---|
+| GET | `/admin/catalog/works` | 分页查询作品 | `listCatalogWorks` | `listcatalogworkslogic.go` |
+
+### GET `/admin/catalog/works` — 分页查询作品
+
+- 权限口径：免鉴权
+- goctl 入口：`gateway/admin/internal/handler/listcatalogworkshandler.go`
+- 业务实现：`gateway/admin/internal/logic/listcatalogworkslogic.go`
+
+请求：`ParamListWorks`
+
+| Go 字段 | query 参数 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Typeid` | `typeid` | form | `int32` | 是 | — | — |
+| `State` | `state` | form | `int32` | 是 | default=-1 | — |
+| `Pn` | `pn` | form | `int32` | 是 | default=1 | — |
+| `Ps` | `ps` | form | `int32` | 是 | default=20 | — |
+
+响应：`CatalogWorksResponse`
+
+| Go 字段 | JSON 字段 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Code` | `code` | json | `int` | 是 | — | — |
+| `Message` | `message` | json | `string` | 是 | — | — |
+| `Data` | `data` | json | `CatalogWorksData` | 是 | — | — |
+| `TTL` | `ttl` | json | `int64` | 是 | — | — |
+
+
+响应类型自带统一信封 `code`/`message`/`data`/`ttl`（AGENTS.md §6）；`data` 指向的结构体见本文「类型附录」。
+
+## catalog 域写入口（受 AdminPermission 保护）（AdminPermission，5 条）
+
+鉴权：`AdminPermission` —— 需 `Authorization: Bearer <admin_token>`，再按下表「权限点」判定；中间件对 `routePermissions` 表外路径 fail-closed，因此这一列空的行等于「谁都进不来」，必须补登记。
+
+| 方法 | 完整路径 | 说明 | 权限点（resource / action） | handler | logic 文件 |
+|---|---|---|---|---|---|
+| POST | `/admin/catalog/works` | 运营创建作品 | `catalog:work` / `create` | `createCatalogWork` | `createcatalogworklogic.go` |
+| POST | `/admin/catalog/seasons` | 运营创建季 | `catalog:season` / `create` | `createCatalogSeason` | `createcatalogseasonlogic.go` |
+| POST | `/admin/catalog/episodes` | 运营创建集 | `catalog:episode` / `create` | `createCatalogEpisode` | `createcatalogepisodelogic.go` |
+| POST | `/admin/catalog/episodes/:epid/publish` | 上架集（状态流转到 PUBLISHED，需 rights 校验） | `catalog:episode` / `publish` | `publishCatalogEpisode` | `publishcatalogepisodelogic.go` |
+| POST | `/admin/catalog/episodes/:epid/offline` | 下架集 | `catalog:episode` / `offline` | `offlineCatalogEpisode` | `offlinecatalogepisodelogic.go` |
+
+### POST `/admin/catalog/works` — 运营创建作品
+
+- 权限口径：AdminPermission · 权限点 `catalog:work` / `create`
+- goctl 入口：`gateway/admin/internal/handler/createcatalogworkhandler.go`
+- 业务实现：`gateway/admin/internal/logic/createcatalogworklogic.go`
+
+请求：`ParamCreateWork`
+
+| Go 字段 | JSON 字段 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Title` | `title` | json | `string` | 是 | — | — |
+| `Cover` | `cover` | json | `string` | 是 | — | — |
+| `Typeid` | `typeid` | json | `int32` | 是 | — | — |
+| `Intro` | `intro` | json | `string` | 是 | — | — |
+| `Operator` | `operator` | json | `string` | 是 | — | — |
+
+响应：`CatalogWorkResponse`
+
+| Go 字段 | JSON 字段 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Code` | `code` | json | `int` | 是 | — | — |
+| `Message` | `message` | json | `string` | 是 | — | — |
+| `Data` | `data` | json | `CatalogWorkData` | 是 | — | — |
+| `TTL` | `ttl` | json | `int64` | 是 | — | — |
+
+
+响应类型自带统一信封 `code`/`message`/`data`/`ttl`（AGENTS.md §6）；`data` 指向的结构体见本文「类型附录」。
+
+### POST `/admin/catalog/seasons` — 运营创建季
+
+- 权限口径：AdminPermission · 权限点 `catalog:season` / `create`
+- goctl 入口：`gateway/admin/internal/handler/createcatalogseasonhandler.go`
+- 业务实现：`gateway/admin/internal/logic/createcatalogseasonlogic.go`
+
+请求：`ParamCreateSeason`
+
+| Go 字段 | JSON 字段 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `SeasonId` | `season_id` | json | `int64` | 是 | — | — |
+| `SeasonNo` | `season_no` | json | `int32` | 是 | — | — |
+| `Title` | `title` | json | `string` | 是 | — | — |
+| `Cover` | `cover` | json | `string` | 是 | — | — |
+| `Operator` | `operator` | json | `string` | 是 | — | — |
+
+响应：`CatalogSeasonResponse`
+
+| Go 字段 | JSON 字段 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Code` | `code` | json | `int` | 是 | — | — |
+| `Message` | `message` | json | `string` | 是 | — | — |
+| `Data` | `data` | json | `CatalogSeasonData` | 是 | — | — |
+| `TTL` | `ttl` | json | `int64` | 是 | — | — |
+
+
+响应类型自带统一信封 `code`/`message`/`data`/`ttl`（AGENTS.md §6）；`data` 指向的结构体见本文「类型附录」。
+
+### POST `/admin/catalog/episodes` — 运营创建集
+
+- 权限口径：AdminPermission · 权限点 `catalog:episode` / `create`
+- goctl 入口：`gateway/admin/internal/handler/createcatalogepisodehandler.go`
+- 业务实现：`gateway/admin/internal/logic/createcatalogepisodelogic.go`
+
+请求：`ParamCreateEpisode`
+
+| Go 字段 | JSON 字段 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `SeasonId` | `season_id` | json | `int64` | 是 | — | — |
+| `EpNo` | `ep_no` | json | `int32` | 是 | — | — |
+| `Title` | `title` | json | `string` | 是 | — | — |
+| `AssetId` | `asset_id` | json | `int64` | 是 | — | — |
+| `Duration` | `duration` | json | `int64` | 是 | — | — |
+| `Operator` | `operator` | json | `string` | 是 | — | — |
+
+响应：`CatalogEpisodeResponse`
+
+| Go 字段 | JSON 字段 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Code` | `code` | json | `int` | 是 | — | — |
+| `Message` | `message` | json | `string` | 是 | — | — |
+| `Data` | `data` | json | `CatalogEpisodeData` | 是 | — | — |
+| `TTL` | `ttl` | json | `int64` | 是 | — | — |
+
+
+响应类型自带统一信封 `code`/`message`/`data`/`ttl`（AGENTS.md §6）；`data` 指向的结构体见本文「类型附录」。
+
+### POST `/admin/catalog/episodes/:epid/publish` — 上架集（状态流转到 PUBLISHED，需 rights 校验）
+
+- 权限口径：AdminPermission · 权限点 `catalog:episode` / `publish`
+- goctl 入口：`gateway/admin/internal/handler/publishcatalogepisodehandler.go`
+- 业务实现：`gateway/admin/internal/logic/publishcatalogepisodelogic.go`
+
+请求：`ParamCatalogEpid`
+
+| Go 字段 | JSON 字段 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Epid` | `epid` | path | `int64` | 是 | — | — |
+
+响应：`CatalogEpisodeResponse`
+
+| Go 字段 | JSON 字段 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Code` | `code` | json | `int` | 是 | — | — |
+| `Message` | `message` | json | `string` | 是 | — | — |
+| `Data` | `data` | json | `CatalogEpisodeData` | 是 | — | — |
+| `TTL` | `ttl` | json | `int64` | 是 | — | — |
+
+
+响应类型自带统一信封 `code`/`message`/`data`/`ttl`（AGENTS.md §6）；`data` 指向的结构体见本文「类型附录」。
+
+### POST `/admin/catalog/episodes/:epid/offline` — 下架集
+
+- 权限口径：AdminPermission · 权限点 `catalog:episode` / `offline`
+- goctl 入口：`gateway/admin/internal/handler/offlinecatalogepisodehandler.go`
+- 业务实现：`gateway/admin/internal/logic/offlinecatalogepisodelogic.go`
+
+请求：`ParamCatalogEpid`
+
+| Go 字段 | JSON 字段 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Epid` | `epid` | path | `int64` | 是 | — | — |
+
+响应：`CatalogEpisodeResponse`
+
+| Go 字段 | JSON 字段 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Code` | `code` | json | `int` | 是 | — | — |
+| `Message` | `message` | json | `string` | 是 | — | — |
+| `Data` | `data` | json | `CatalogEpisodeData` | 是 | — | — |
+| `TTL` | `ttl` | json | `int64` | 是 | — | — |
+
+
+响应类型自带统一信封 `code`/`message`/`data`/`ttl`（AGENTS.md §6）；`data` 指向的结构体见本文「类型附录」。
+
+## 类型附录
+
+### `ParamListWorks`
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Typeid` | `typeid` | form | `int32` | 是 | — | — |
+| `State` | `state` | form | `int32` | 是 | default=-1 | — |
+| `Pn` | `pn` | form | `int32` | 是 | default=1 | — |
+| `Ps` | `ps` | form | `int32` | 是 | default=20 | — |
+
+### `CatalogWorksResponse`
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Code` | `code` | json | `int` | 是 | — | — |
+| `Message` | `message` | json | `string` | 是 | — | — |
+| `Data` | `data` | json | `CatalogWorksData` | 是 | — | — |
+| `TTL` | `ttl` | json | `int64` | 是 | — | — |
+
+### `ParamCreateWork`
+
+> catalog 域请求参数
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Title` | `title` | json | `string` | 是 | — | — |
+| `Cover` | `cover` | json | `string` | 是 | — | — |
+| `Typeid` | `typeid` | json | `int32` | 是 | — | — |
+| `Intro` | `intro` | json | `string` | 是 | — | — |
+| `Operator` | `operator` | json | `string` | 是 | — | — |
+
+### `CatalogWorkResponse`
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Code` | `code` | json | `int` | 是 | — | — |
+| `Message` | `message` | json | `string` | 是 | — | — |
+| `Data` | `data` | json | `CatalogWorkData` | 是 | — | — |
+| `TTL` | `ttl` | json | `int64` | 是 | — | — |
+
+### `ParamCreateSeason`
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `SeasonId` | `season_id` | json | `int64` | 是 | — | — |
+| `SeasonNo` | `season_no` | json | `int32` | 是 | — | — |
+| `Title` | `title` | json | `string` | 是 | — | — |
+| `Cover` | `cover` | json | `string` | 是 | — | — |
+| `Operator` | `operator` | json | `string` | 是 | — | — |
+
+### `CatalogSeasonResponse`
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Code` | `code` | json | `int` | 是 | — | — |
+| `Message` | `message` | json | `string` | 是 | — | — |
+| `Data` | `data` | json | `CatalogSeasonData` | 是 | — | — |
+| `TTL` | `ttl` | json | `int64` | 是 | — | — |
+
+### `ParamCreateEpisode`
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `SeasonId` | `season_id` | json | `int64` | 是 | — | — |
+| `EpNo` | `ep_no` | json | `int32` | 是 | — | — |
+| `Title` | `title` | json | `string` | 是 | — | — |
+| `AssetId` | `asset_id` | json | `int64` | 是 | — | — |
+| `Duration` | `duration` | json | `int64` | 是 | — | — |
+| `Operator` | `operator` | json | `string` | 是 | — | — |
+
+### `CatalogEpisodeResponse`
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Code` | `code` | json | `int` | 是 | — | — |
+| `Message` | `message` | json | `string` | 是 | — | — |
+| `Data` | `data` | json | `CatalogEpisodeData` | 是 | — | — |
+| `TTL` | `ttl` | json | `int64` | 是 | — | — |
+
+### `ParamCatalogEpid`
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Epid` | `epid` | path | `int64` | 是 | — | — |
+
+### `CatalogWorksData`
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Total` | `total` | json | `int64` | 是 | — | — |
+| `Works` | `works` | json | `[]CatalogWorkItem` | 是 | — | — |
+
+### `CatalogWorkData`
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Work` | `work` | json | `CatalogWorkItem` | 是 | — | — |
+
+### `CatalogSeasonData`
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Season` | `season` | json | `CatalogSeasonItem` | 是 | — | — |
+
+### `CatalogEpisodeData`
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Episode` | `episode` | json | `CatalogEpisodeItem` | 是 | — | — |
+
+### `CatalogWorkItem`
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `SeasonId` | `season_id` | json | `int64` | 是 | — | — |
+| `Title` | `title` | json | `string` | 是 | — | — |
+| `Cover` | `cover` | json | `string` | 是 | — | — |
+| `Typeid` | `typeid` | json | `int32` | 是 | — | — |
+| `Intro` | `intro` | json | `string` | 是 | — | — |
+| `State` | `state` | json | `int32` | 是 | — | — |
+
+### `CatalogSeasonItem`
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `SeasonId` | `season_id` | json | `int64` | 是 | — | — |
+| `SeasonNo` | `season_no` | json | `int32` | 是 | — | — |
+| `Title` | `title` | json | `string` | 是 | — | — |
+| `Cover` | `cover` | json | `string` | 是 | — | — |
+| `State` | `state` | json | `int32` | 是 | — | — |
+
+### `CatalogEpisodeItem`
+
+| Go 字段 | 参数/JSON 键 | 位置 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|---|---|
+| `Epid` | `epid` | json | `int64` | 是 | — | — |
+| `SeasonId` | `season_id` | json | `int64` | 是 | — | — |
+| `EpNo` | `ep_no` | json | `int32` | 是 | — | — |
+| `Title` | `title` | json | `string` | 是 | — | — |
+| `AssetId` | `asset_id` | json | `int64` | 是 | — | — |
+| `Duration` | `duration` | json | `int64` | 是 | — | — |
+| `State` | `state` | json | `int32` | 是 | — | — |
+
+
+<!-- file: docs/api/http/admin/05-admin-catalog.md -->

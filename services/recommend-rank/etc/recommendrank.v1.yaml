@@ -1,0 +1,62 @@
+Name: recommendrank.v1.rpc
+ListenOn: 0.0.0.0:8123
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: recommendrank.v1.rpc
+
+# 运行时配置缓存、ACTIVE 模型版本、RUNNING 实验集合、幂等回放
+# 键名固定为 CacheRedis：zrpc.RpcServerConf 内嵌了同名 Redis 字段（鉴权/限流用），
+# 业务缓存必须用 CacheRedis，否则配置加载报 "conflict key redis"，服务启动即失败。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL 主库 DSN（仅本地示例，生产从配置中心/Secret 注入；表结构见
+# deploy/migrations/recommend-rank/000001~000005）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_recommend_rank?charset=utf8mb4&parseTime=true&loc=Local
+
+# 排序领域参数。契约里的 MaxCandidates/MaxReturn/BucketCount/MaxDecisionPage/
+# MaxDigestAids/MaxFeatureKeys 全部来自本段，不写死在代码常量上。
+Rank:
+  DefaultModelKey: home_feed_multi_gate   # 请求未指定 model_key 时使用的逻辑模型名
+
+  # --- 入参/出参硬上限（超限报错，不静默裁剪） ---
+  MaxCandidates: 600                      # 单次排序接受的候选条数上限
+  MaxReturn: 100                          # 单次排序返回条数上限
+  MaxDecisionPage: 100                    # ListRankDecisions 单页上限
+  MaxDigestAids: 20                       # 决策摘要 top_aids 保留条数
+  MaxFeatureKeys: 512                     # 单个特征配置版本的特征条数上限
+  MaxWeightSum: 10                        # 多目标权重之和上限（rpc ObjectiveWeight 校验口径）
+  MaxOverridesBytes: 4096                 # 实验 overrides JSON 字节上限
+  MaxArtifactRefBytes: 512                # 模型工件引用长度上限（只存对象存储 key）
+
+  # --- 分桶与实验 ---
+  BucketCount: 1000                       # 分桶空间（千分位），落库口径固定
+  RunningExperimentScanLimit: 200         # 一次读取 RUNNING 变体的条数上限
+  LayerVariantScanLimit: 200              # 同层重叠校验读取的变体条数上限
+  AssignmentScanLimit: 500                # 分桶主体核对单页条数上限
+
+  # --- 超时与降级（详见 README 降级矩阵） ---
+  DegradeEnabled: true                    # false 时依赖故障直接报错（压测/回放）
+  DefaultFallback: recall_order           # recall_order | previous_model | safety_only
+  ScoreBudgetMs: 80                       # 打分时间预算，超预算裁剪未打分候选
+  TtlSeconds: 30                          # 正常结果建议网关缓存秒数；降级固定 0
+  DownstreamTimeoutMs: 30                 # 下游单次超时，必须远小于 rpc 超时
+
+  # --- 下游能力开关：未接线前一律 false，宁可显式降级也不伪造特征/安全结论 ---
+  FeatureFetchEnabled: false              # 待 feature-store 落地后打开
+  BehaviorFetchEnabled: false             # 待 spm 落地后打开
+  SafetyCheckEnabled: false               # 待接 moderation-orchestrator 复核后打开
+  OpsConfigEnabled: false                 # 待 ops-config 落地后打开（运营干预唯一入口）
+
+  # --- 批量与缓存口径 ---
+  FeatureBatchSize: 128                   # 单次取特征的候选条数上限
+  FeatureCacheTTLSeconds: 5               # 特征快照缓存秒数，0 关闭
+  RuntimeConfigCacheTTLSeconds: 5         # 运行时配置缓存秒数，0 关闭
+  DecisionReplayCacheTTLSeconds: 60       # 幂等回放读缓存秒数，0 表示只读 DB
+
+  # --- 保留期与归档 ---
+  DecisionRetentionDays: 14               # 决策摘要保留天数（先归档再分批删）
+  ArchiveBatchSize: 1000                  # 单批归档/删除行数
+  AssignmentRetentionDays: 180            # 分桶记录保留天数

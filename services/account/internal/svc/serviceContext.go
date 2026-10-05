@@ -22,7 +22,7 @@ type ServiceContext struct {
 // 当 UserProfileRPC 和 SocialGraphRPC 配置留空时，对应的下游 client 为 nil，
 // repository 会降级返回零值字段，不阻塞主流程。
 func NewServiceContext(c config.Config) *ServiceContext {
-	rds := redis.MustNewRedis(c.Redis)
+	rds := redis.MustNewRedis(c.CacheRedis)
 	conn := sqlx.NewMysql(c.DataSource)
 
 	// 下游 RPC client：当对应服务尚未部署时为 nil，repository 降级处理。
@@ -32,9 +32,11 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		userProfile = repository.NewUserProfileClient(c.UserProfileRPC)
 	}
 
+	// social-graph 服务已接入：注入 zrpc client 适配器（SocialGraphClient）。
+	// 未配置时仍为 nil，repository 的关系面按「下游未部署」降级（见 repository/relation.go）。
 	var socialGraph repository.SocialGraphClient
 	if len(c.SocialGraphRPC.Etcd.Hosts) > 0 || c.SocialGraphRPC.Target != "" {
-		// TODO: 注入 social-graph zrpc client 适配器
+		socialGraph = repository.NewSocialGraphClient(c.SocialGraphRPC)
 	}
 
 	repo := repository.New(rds, conn, c, userProfile, socialGraph)

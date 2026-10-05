@@ -47,6 +47,44 @@ function Cleanup-ZrpcArtifacts {
     }
 }
 
+# descriptorPrefixedProtos must be generated with a repository-root include
+# path (-I .) instead of the bare file name used above, so their registered
+# descriptor path carries directories.
+# protobuf's global registry deduplicates by FILE PATH, not package name. The
+# bare name "membership.proto" is already registered by
+# go.etcd.io/etcd/api/v3/membershippb, and every zrpc server links clientv3 via
+# etcd service discovery, so a bare-path membership descriptor makes any process
+# that imports both packages panic at init with
+#   proto: file "membership.proto" is already registered
+# (GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn only hides it). Regenerating with
+# "services/membership/rpc/membership.proto" removes the clash. Generated files
+# still land beside the .proto (paths=source_relative from the repo root) and
+# the Go package stays `rpc`, so no import or wire-format change follows.
+# Add a proto here when its bare file name collides with a dependency; never
+# hand-edit the generated files to fix it.
+$descriptorPrefixedProtos = @('membership.proto')
+
+function Regenerate-PrefixedDescriptor {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$ProtoFullName
+    )
+
+    $relativeProto = (Resolve-Path -LiteralPath $ProtoFullName).Path.Substring($RepoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
+    Push-Location $RepoRoot
+    try {
+        & protoc -I . `
+            --go_out=. `
+            --go-grpc_out=. `
+            --go_opt=paths=source_relative `
+            --go-grpc_opt=paths=source_relative `
+            $relativeProto
+        if ($LASTEXITCODE -ne 0) { throw "protoc descriptor-path regeneration failed for $relativeProto" }
+    } finally {
+        Pop-Location
+    }
+}
+
 if ($Service) {
     $serviceDir = Join-Path $servicesRoot $Service
     if (-not (Test-Path -LiteralPath $serviceDir -PathType Container)) {
@@ -86,5 +124,9 @@ foreach ($target in $targets) {
             Pop-Location
         }
         Cleanup-ZrpcArtifacts -TargetDir $target.FullName -ProtoFile $proto.FullName -HasApi ($apiFiles.Count -gt 0)
+        if ($descriptorPrefixedProtos -contains $proto.Name) {
+            Write-Host "protoc (repo-root descriptor path): $($proto.Name)"
+            Regenerate-PrefixedDescriptor -RepoRoot $repoRoot -ProtoFullName $proto.FullName
+        }
     }
 }

@@ -30,6 +30,9 @@ func (l *RealnameStrippedLogic) RealnameStripped(req *types.ParamModify) (resp *
 	if l.svcCtx.UserProfile == nil {
 		return nil, errors.New("user-profile service not configured")
 	}
+	if err := adminSessionGate(l.ctx, "realnameStripped"); err != nil {
+		return nil, err
+	}
 	reply, err := l.svcCtx.UserProfile.RealnameStrippedInfo(l.ctx, &userprofilerc.MemberMidReq{Mid: req.Mid})
 	if err != nil {
 		l.Errorf("gateway/admin/realnameStripped: mid=%d err=%v", req.Mid, err)

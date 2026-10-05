@@ -1,0 +1,597 @@
+syntax = "proto3";
+
+package eventcollector.v1;
+
+option go_package = "go-video/services/event-collector/rpc";
+
+// 说明：event-collector 是用户行为事件（AGENTS.md §7 的 SPM 语义 = 用户行为分析链路）
+// 的**采集入口**，只提供 gRPC（无 .api）；对端入口在 gateway/app。
+//
+// 硬约束（AGENTS.md §5、§7）：
+//   - 事件本体**不同步写业务主库**。本服务库 go_video_event_collector 只保存：
+//     接收批次（event_ingest_batch）、逐条校验/拒绝结论与去重键（event_record）、
+//     采样与脱敏配置版本（event_dispatch_policy）、投递记录与死信（event_record.delivery_* /
+//     event_dead_letter）。事件正文经 common/eventenvelope 投递 MQ，由 spm 消费。
+//   - 明文 IP、设备号、手机号等不得入库，也不得进入事件 payload：入口处只保留
+//     加盐哈希（device_hash）、IP 段（ip_segment，默认 /24）与盐版本，原始值仅在
+//     请求生命周期内存在。盐由 `Collector.Privacy.SaltRef` 指向的环境变量/Secret 注入。
+//   - 不承载任何广告位、投放、会员、订单、支付、投币、分成字段；本文件出现的
+//     `spm`/`trace_position` 只是页面行为链路标识（AGENTS.md §7）。
+//
+// 投递语义：接收事务只保证「事件已可靠落接收库」，MQ 发送由 internal/dispatcher
+// 异步完成（至少一次 + 下游按 event_id 去重）。
+
+// 空响应。
+message EmptyReply {}
+
+// 事件来源。
+enum Source {
+  SOURCE_UNSPECIFIED = 0;
+  SOURCE_CLIENT = 1; // 客户端 SDK 批量上报（经 gateway/app，可采样）
+  SOURCE_SERVER = 2; // 服务端内部埋点（engagement/playback/search 等，不采样、需服务身份）
+}
+
+// 客户端平台（AGENTS.md §1 的四类端 + 服务端自报）。
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0;
+  PLATFORM_ANDROID = 1;
+  PLATFORM_IOS = 2;
+  PLATFORM_HARMONYOS = 3;
+  PLATFORM_DESKTOP = 4;
+  PLATFORM_SERVER = 5; // Source=SOURCE_SERVER 时的默认值
+}
+
+// 行为事件类别：决定 event_type 与投递 topic（AGENTS.md §7 列出的链路）。
+enum BehaviorCategory {
+  BEHAVIOR_CATEGORY_UNSPECIFIED = 0;
+  BEHAVIOR_CATEGORY_PLAY = 1;      // 播放开始/恢复：behavior.play.v1
+  BEHAVIOR_CATEGORY_CLICK = 2;     // 点击：behavior.click.v1
+  BEHAVIOR_CATEGORY_SEARCH = 3;    // 搜索提交/结果点击：behavior.search.v1
+  BEHAVIOR_CATEGORY_SKIP = 4;      // 跳过/关闭/不感兴趣：behavior.skip.v1
+  BEHAVIOR_CATEGORY_LIKE = 5;      // 点赞：behavior.like.v1
+  BEHAVIOR_CATEGORY_FAVORITE = 6;  // 收藏：behavior.favorite.v1
+  BEHAVIOR_CATEGORY_FOLLOW = 7;    // 关注：behavior.follow.v1
+  BEHAVIOR_CATEGORY_SHARE = 8;     // 分享：behavior.share.v1
+  BEHAVIOR_CATEGORY_QUALITY = 9;   // 播放质量（卡顿、首帧、错误码）：behavior.quality.v1
+  BEHAVIOR_CATEGORY_EXPOSURE = 10; // 曝光：behavior.exposure.v1
+}
+
+// 单条事件的处理结论。
+enum EventDecision {
+  EVENT_DECISION_UNSPECIFIED = 0;
+  EVENT_DECISION_ACCEPTED = 1;    // 通过校验，已落接收库并等待投递
+  EVENT_DECISION_DUPLICATED = 2;  // event_id 已存在，不重复落库、不重复投递
+  EVENT_DECISION_REJECTED = 3;    // 校验失败，按 reason 记录拒绝原因
+  EVENT_DECISION_SAMPLED_OUT = 4; // 命中采样规则，主动丢弃（不落投递队列）
+  EVENT_DECISION_DEFERRED = 5;    // 批次被限流/降级，整批未落库，客户端需稍后重试
+}
+
+// 拒绝或丢弃原因（稳定枚举，客户端与埋点方据此修正，不做人读拼接）。
+enum RejectReason {
+  REJECT_REASON_UNSPECIFIED = 0;
+  REJECT_REASON_NONE = 1;              // 无问题
+  REJECT_MISSING_EVENT_ID = 2;         // event_id 缺失
+  REJECT_MISSING_EVENT_TYPE = 3;       // event_type 缺失且无法由 category 推导
+  REJECT_UNSUPPORTED_EVENT_TYPE = 4;   // event_type 不在白名单
+  REJECT_MISSING_SCHEMA_VERSION = 5;   // schema_version 缺失
+  REJECT_UNSUPPORTED_SCHEMA_VERSION = 6; // schema_version 高于服务端支持版本
+  REJECT_MISSING_OCCURRED_AT = 7;      // occurred_at 缺失
+  REJECT_CLOCK_SKEW = 8;               // occurred_at 与服务器时间偏差超过阈值（明显时间漂移）
+  REJECT_TIME_IN_FUTURE = 9;           // occurred_at 在未来
+  REJECT_MISSING_TRACE_ID = 10;        // trace_id 缺失（服务端来源必填）
+  REJECT_MISSING_CONTENT_KEY = 11;     // 内容主键（content_id/vid/aid/session_id）全缺
+  REJECT_MISSING_SUBJECT = 12;         // 未登录且无设备标识，事件无法归属
+  REJECT_EVENT_TOO_OLD = 13;           // 超过允许的回补窗口
+  REJECT_PRIVACY_FIELD = 14;           // payload 含禁止入库字段（明文 IP/设备号/手机号等）
+  REJECT_PAYLOAD_TOO_LARGE = 15;       // 单事件 payload 超限
+  REJECT_INVALID_PAYLOAD = 16;         // payload 不是合法 JSON 对象
+  REJECT_INVALID_METRIC = 17;          // 数值指标越界（负数、位置大于时长等）
+  REJECT_RATE_LIMITED = 18;            // 触发 mid/设备/IP 段限流
+  REJECT_BATCH_TOO_LARGE = 19;         // 单请求条数或字节超限
+  REJECT_BATCH_ID_MISSING = 20;        // batch_id 缺失，无法做批次幂等
+  REJECT_SOURCE_NOT_ALLOWED = 21;      // 来源与方法不匹配（客户端方法收到 SOURCE_SERVER 等）
+  REJECT_SAMPLING_POLICY_STALE = 22;   // 客户端声明的策略版本无法解析，退回服务端默认策略
+  REJECT_STORE_FAILED = 23;            // 接收库写入失败（DB 故障，整批可重试）
+  REJECT_INTERNAL = 24;                // 其他内部错误，细节只进日志与 trace
+}
+
+// 投递状态（event_record.delivery_state）。
+enum DeliveryState {
+  DELIVERY_STATE_UNSPECIFIED = 0;
+  DELIVERY_STATE_NONE = 1;    // 不投递（被采样丢弃或重复计数）
+  DELIVERY_STATE_PENDING = 2; // 待投递
+  DELIVERY_STATE_SENT = 3;    // 已投递到 MQ
+  DELIVERY_STATE_RETRYING = 4;// 投递失败，退避中
+  DELIVERY_STATE_DEAD = 5;    // 超过最大次数，已转 event_dead_letter
+}
+
+// 批次接收状态（event_ingest_batch.state）。
+enum BatchState {
+  BATCH_STATE_UNSPECIFIED = 0;
+  BATCH_STATE_RECEIVED = 1;   // 已落库，尚未完成校验
+  BATCH_STATE_VALIDATED = 2;  // 校验完成，待投递或已投递
+  BATCH_STATE_DISPATCHING = 3;// 投递中
+  BATCH_STATE_DISPATCHED = 4; // 全部待投递事件已发送
+  BATCH_STATE_PARTIAL = 5;    // 部分事件投递失败（退避或死信中）
+  BATCH_STATE_REJECTED = 6;   // 整批被拒（大小/来源/限流）
+}
+
+// 采集与投递策略状态（event_dispatch_policy.state）。
+enum PolicyState {
+  POLICY_STATE_UNSPECIFIED = 0;
+  POLICY_STATE_DRAFT = 1;    // 草稿：可修改，不生效
+  POLICY_STATE_ACTIVE = 2;   // 生效中：同一时刻只有一版 ACTIVE
+  POLICY_STATE_ARCHIVED = 3; // 已下线：只读，历史批次的归因依据
+}
+
+// EventContext 一次批量上报共享的上下文（避免每条事件重复携带、压扁请求体）。
+// 注意：本消息里的 device_id / ip 是**明文入参**，服务端只做加盐哈希与脱敏，
+// 绝不写入数据库，也不会出现在投递到 MQ 的信封里。
+message EventContext {
+  int64 mid = 1;                  // 登录用户 mid，0 表示未登录
+  string device_id = 2;           // 客户端设备号明文（idfa/oaid/harmony odid/桌面机器码）
+  string device_type = 3;         // 设备号类型：idfa/oaid/odid/machine_id/...
+  string device_hash = 4;         // 服务端回填：sha256(salt_version, device_id)，只读
+  string ip = 5;                  // 出口 IP 明文（网关透传），只用于哈希与 IP 段
+  string ip_segment = 6;          // 服务端回填：脱敏 IP 段，如 203.0.113.0/24
+  Platform platform = 7;
+  string app_id = 8;              // 应用标识（区分多产品）
+  string app_version = 9;         // 客户端版本
+  string sdk_version = 10;        // 埋点 SDK 版本
+  string os_version = 11;         // 系统版本
+  string network_type = 12;       // wifi/2g/3g/4g/5g/unknown
+  string model = 13;              // 机型（不含序列号）
+  string region = 14;             // 地区代码，与版权地域判断无关，只作行为维度
+  string session_id = 15;         // 客户端会话 ID（不是 playback_session 主键时也允许）
+  string page = 16;               // 页面标识
+  string spm = 17;                // 行为链路标识（AGENTS.md §7：仅用户行为分析，非广告位）
+}
+
+// BehaviorEvent 单条行为事件。
+message BehaviorEvent {
+  string event_id = 1;        // 必填：全局唯一（客户端建议用 ULID/UUID），服务端按它去重
+  string event_type = 2;      // 建议显式给出 behavior.<category>；为空时由 category 推导
+  int32 schema_version = 3;   // 必填：事件 payload 结构版本，>=1
+  int64 occurred_at = 4;      // 必填：事件发生时间（Unix 秒，客户端本地时钟）
+  int64 reported_at = 5;      // 客户端产生上报的时刻（Unix 秒，用于离线回补识别）
+  BehaviorCategory category = 6;
+  string trace_id = 7;        // 链路 ID：SOURCE_SERVER 必填，SOURCE_CLIENT 缺失时服务端补
+  string content_type = 8;    // 内容主类型：ugc/pgc/live/keyword/... 与内容主键配套
+  int64 content_id = 9;       // 内容 ID（catalog 作品/集或稿件 ID）
+  int64 aid = 10;             // 稿件 aid（UGC 场景）
+  string vid = 11;            // 稿件 vid（UGC 场景）
+  int64 target_mid = 12;      // 行为对象用户（关注/分享对象），0 表示无
+  string session_id = 13;     // 播放/会话主键，quality/play 场景用于串联
+  int64 position_ms = 14;     // 播放进度
+  int64 duration_ms = 15;     // 内容总时长
+  int32 buffer_count = 16;    // 卡顿次数（quality）
+  int64 first_frame_ms = 17;  // 首帧耗时（quality）
+  int32 avg_bitrate = 18;     // 平均码率 bps（quality）
+  string error_code = 19;     // 播放错误码（quality），稳定枚举字符串
+  string keyword = 20;        // 搜索词（search 场景，已按长度截断，不入库明文超长子串）
+  int32 result_index = 21;    // 点击/跳过在结果列表中的位次（0 表示不适用）
+  string target_url = 22;     // 跳转目标标识（客户端自定义 scheme/路由，不是外部 URL 明文）
+  string payload = 23;        // 扩展 JSON 文本：只允许白名单字段，受大小限制，禁止敏感明文
+}
+
+// EventResult 单条事件的处理结论（与请求中的顺序一致，用 index 对齐）。
+message EventResult {
+  int32 index = 1;            // 对应请求 events 下标，从 0 开始
+  string event_id = 2;        // 归一化后的事件 ID（服务端补齐时返回真值）
+  EventDecision decision = 3;
+  RejectReason reason = 4;    // decision=REJECTED/SAMPLED_OUT/DEFERRED 时的原因
+  string message = 5;         // 人读提示，已脱敏，不含 payload 原文
+  string topic = 6;           // 决定投递的目标 topic（未投递时为空）
+  int32 schema_version = 7;   // 服务端采用的 schema 版本
+}
+
+// --- 批量采集 ---
+
+// CollectEventsReq 客户端 SDK 批量上报。
+// 幂等：batch_id 由客户端生成并保证唯一，重复上报返回首次结果（deduplicated=true），
+// 单请求受 MaxEventsPerBatch 与 MaxRequestBytes 双重限制。
+message CollectEventsReq {
+  string batch_id = 1;              // 必填：批次幂等键
+  Source source = 2;                // 未指定按 SOURCE_CLIENT 处理
+  EventContext context = 3;         // 必填：批次共享上下文
+  repeated BehaviorEvent events = 4; // 必填：至少 1 条
+  string policy_version = 5;        // 客户端缓存的策略版本，空表示用服务端 ACTIVE 版本
+  int32 client_seq = 6;             // 客户端自增序号，用于识别乱序/重发批次
+  string request_id = 7;            // 传输层请求 ID，排障用
+}
+
+message CollectEventsReply {
+  string batch_id = 1;
+  BatchState state = 2;
+  int32 total = 3;
+  int32 accepted = 4;
+  int32 duplicated = 5;
+  int32 rejected = 6;
+  int32 sampled_out = 7;
+  repeated EventResult results = 8;
+  string policy_version = 9;        // 本批实际采用的采样/脱敏版本（落库字段）
+  int32 next_report_interval_seconds = 10; // 建议客户端下次上报间隔（降级/限流时放大）
+  int32 retry_after_ms = 11;        // decision=DEFERRED/REJECT_RATE_LIMITED 时的退避提示
+  bool degraded = 12;               // true 表示服务端处于降级状态（限流或依赖故障）
+  int64 server_time = 13;           // 供客户端校准时钟偏移，避免系统性时间漂移
+}
+
+// IngestServerEventsReq 服务端内部埋点入口（engagement/playback/search 等）。
+// 与客户端入口的差异：不做采样、trace_id 必填、要求调用方服务身份，
+// 且 idempotency_key 必填（跨进程重试常见）。
+message IngestServerEventsReq {
+  string batch_id = 1;              // 必填：批次幂等键
+  string caller_service = 2;        // 必填：来源服务名（如 engagement），作为信封 producer
+  string idempotency_key = 3;       // 必填：同一次动作唯一
+  EventContext context = 4;         // 可只填 mid/platform=PLATFORM_SERVER
+  repeated BehaviorEvent events = 5;
+  string trace_id = 6;              // 批次级 trace_id，事件未自带时继承
+}
+
+message IngestServerEventsReply {
+  string batch_id = 1;
+  BatchState state = 2;
+  int32 total = 3;
+  int32 accepted = 4;
+  int32 duplicated = 5;
+  int32 rejected = 6;
+  repeated EventResult results = 7;
+  string policy_version = 8;
+  int32 retry_after_ms = 9;
+  bool degraded = 10;
+}
+
+// ValidateEventSchemaReq 单事件干跑校验：不落库、不投递，供网关与埋点方自检。
+message ValidateEventSchemaReq {
+  Source source = 1;
+  BehaviorEvent event = 2;
+  EventContext context = 3;   // 可空：用于校验「内容主键 + 归属主体」是否齐备
+}
+
+message ValidateEventSchemaReply {
+  bool valid = 1;
+  EventDecision decision = 2;
+  RejectReason reason = 3;
+  repeated string missing_fields = 4; // 缺失的必填字段名，便于客户端定位
+  string event_type = 5;              // 归一化后的 event_type
+  string topic = 6;                   // 归一化后的投递 topic
+  int32 schema_version = 7;
+  string note = 8;                    // 非致命提示（如字段被截断、被脱敏）
+}
+
+// --- 批次与事件记录查询 ---
+
+// IngestBatch 接收批次投影（不含任何事件明文）。
+message IngestBatch {
+  int64 id = 1;
+  string batch_id = 2;
+  Source source = 3;
+  string caller_service = 4;
+  Platform platform = 5;
+  string app_id = 6;
+  string app_version = 7;
+  string sdk_version = 8;
+  int64 mid = 9;
+  string device_hash = 10;     // 加盐哈希，非明文
+  string ip_segment = 11;      // 脱敏 IP 段，非明文
+  int32 salt_version = 12;     // 本次使用的盐版本，轮换后可重算
+  string policy_version = 13;  // 采样/脱敏配置版本
+  int32 total = 14;
+  int32 accepted = 15;
+  int32 duplicated = 16;
+  int32 rejected = 17;
+  int32 sampled_out = 18;
+  int32 dispatched = 19;
+  int32 dead = 20;
+  int64 request_bytes = 21;
+  BatchState state = 22;
+  RejectReason top_reason = 23; // 整批最主要的拒绝原因（无问题为 NONE）
+  string last_error = 24;
+  string trace_id = 25;
+  int64 received_at = 26;
+  int64 finished_at = 27;
+  int64 ctime = 28;
+  int64 mtime = 29;
+}
+
+message GetIngestBatchReq {
+  string batch_id = 1;
+}
+
+message GetIngestBatchReply {
+  IngestBatch batch = 1;
+  bool found = 2;
+}
+
+// ListIngestBatchesReq 批次分页（按 (ctime, id) 倒序游标）。
+message ListIngestBatchesReq {
+  Source source = 1;
+  BatchState state = 2;
+  int64 mid = 3;
+  string device_hash = 4;
+  string ip_segment = 5;
+  int64 ctime_from = 6;
+  int64 ctime_to = 7;
+  string cursor = 8;
+  int32 page_size = 9;
+}
+
+message ListIngestBatchesReply {
+  repeated IngestBatch list = 1;
+  string next_cursor = 2;
+  bool has_more = 3;
+  int64 total = 4;
+}
+
+// EventRecord 单条事件的接收与投递记录（event_record 投影，payload 只存摘要）。
+message EventRecord {
+  int64 id = 1;
+  string event_id = 2;
+  string batch_id = 3;
+  string event_type = 4;
+  BehaviorCategory category = 5;
+  int32 schema_version = 6;
+  int64 occurred_at = 7;
+  int64 received_at = 8;
+  int64 clock_skew_seconds = 9;   // occurred_at 与服务器时间的偏差，用于识别时钟漂移
+  EventDecision decision = 10;
+  RejectReason reason = 11;
+  string reason_detail = 12;       // 已脱敏的补充说明
+  DeliveryState delivery_state = 13;
+  string topic = 14;
+  string envelope_event_id = 15;   // 投递信封的 event_id（与入参 event_id 分开记账）
+  int32 delivery_attempts = 16;
+  int64 next_retry_at = 17;
+  string last_error = 18;
+  int64 mid = 19;
+  string device_hash = 20;
+  string ip_segment = 21;
+  int32 salt_version = 22;
+  string content_type = 23;
+  int64 content_id = 24;
+  string vid = 25;
+  int64 target_mid = 26;
+  string payload_digest = 27;      // sha256:<hex>，原文不入库
+  int32 payload_bytes = 28;
+  string sanitize_version = 29;    // 实际生效的脱敏规则版本
+  string policy_version = 30;
+  string trace_id = 31;
+  int64 ctime = 32;
+  int64 mtime = 33;
+}
+
+message GetEventRecordReq {
+  string event_id = 1;
+}
+
+message GetEventRecordReply {
+  EventRecord record = 1;
+  bool found = 2;
+}
+
+// ListEventRecordsReq 事件记录分页（按 (ctime, id) 倒序游标）。
+// 说明：本表是接收与投递台账，不是行为事实表；行为分析请消费 MQ topic。
+message ListEventRecordsReq {
+  string batch_id = 1;
+  string event_type = 2;
+  BehaviorCategory category = 3;
+  EventDecision decision = 4;
+  RejectReason reason = 5;
+  DeliveryState delivery_state = 6;
+  string topic = 7;
+  int64 mid = 8;
+  string device_hash = 9;
+  int64 ctime_from = 10;
+  int64 ctime_to = 11;
+  string cursor = 12;
+  int32 page_size = 13;
+}
+
+message ListEventRecordsReply {
+  repeated EventRecord list = 1;
+  string next_cursor = 2;
+  bool has_more = 3;
+  int64 total = 4;
+}
+
+// --- 投递推进 ---
+
+// RetryPendingDeliveryReq 推进到期未发送的事件（由 services/cron 的投递兜底任务调用，
+// 也可运维手工触发）。limit 与 topic 双重约束，避免一次扫全表。
+message RetryPendingDeliveryReq {
+  string topic = 1;              // 空表示全部 topic
+  int64 now = 2;                 // 0 表示服务端当前时间
+  int32 limit = 3;               // 0 表示服务端默认 Dispatch.BatchSize
+  string idempotency_key = 4;    // 必填：防止重复提交同一轮推进
+  string operator = 5;
+}
+
+message RetryPendingDeliveryReply {
+  int32 scanned = 1;
+  int32 sent = 2;
+  int32 retrying = 3;
+  int32 dead = 4;
+  int64 next_run_at = 5; // 建议下一轮执行时间
+}
+
+// DeadLetter 投递死信（超过最大重试次数的事件摘要，原文不入库）。
+message DeadLetter {
+  int64 id = 1;
+  string event_id = 2;
+  string batch_id = 3;
+  string event_type = 4;
+  string topic = 5;
+  string payload_digest = 6;
+  string reason = 7;
+  int32 attempts = 8;
+  string state = 9;            // open/replayed/discarded
+  int64 created_at = 10;
+  int64 handled_at = 11;
+  string operator = 12;
+}
+
+message ListDeadLettersReq {
+  string topic = 1;
+  string state = 2;            // 空表示全部
+  int64 ctime_from = 3;
+  int64 ctime_to = 4;
+  string cursor = 5;
+  int32 page_size = 6;
+}
+
+message ListDeadLettersReply {
+  repeated DeadLetter list = 1;
+  string next_cursor = 2;
+  bool has_more = 3;
+  int64 total = 4;
+}
+
+// ReplayDeadLetterReq 重放死信：重新入投递队列，不重新校验采样。
+// 幂等：idempotency_key + 单条 event_id 唯一约束，重复重放返回首次结果。
+message ReplayDeadLetterReq {
+  repeated int64 dead_letter_ids = 1; // 单次上限 MaxReplayPerRequest
+  string idempotency_key = 2;
+  string operator = 3;
+  string reason = 4;                  // 必填：为什么重放
+}
+
+message ReplayDeadLetterReply {
+  int32 replayed = 1;
+  int32 skipped = 2;                  // 已是 replayed/discarded 状态被跳过的数量
+  repeated int64 failed_ids = 3;      // 重放时重新入队失败的死信 ID
+}
+
+// --- 采样与脱敏配置版本 ---
+
+// SampleRule 单类事件的采样比例（基点，10000 = 全量）。
+message SampleRule {
+  string event_type = 1;   // behavior.play 等；"*" 表示兜底规则
+  int32 sample_bps = 2;    // 0..10000
+  bool quality_events = 3; // true 表示该规则只作用于播放质量类事件（问题排查期通常全量）
+}
+
+// DispatchPolicy 采样与脱敏配置版本（event_dispatch_policy）。
+// 每次采集都把生效的 version 写进批次与事件记录，保证事后能重放归因；
+// 密钥、盐值本身不入库，只写 SaltRef 指向的环境变量名。
+message DispatchPolicy {
+  string version = 1;             // 语义化版本，如 2026.09.20-1，唯一
+  PolicyState state = 2;
+  repeated SampleRule sample_rules = 3;
+  int32 salt_version = 4;         // 脱敏哈希盐版本，轮换后旧数据不可逆推
+  string salt_ref = 5;            // 取盐的环境变量名（如 EVENT_COLLECTOR_SALT_V2），不含值
+  repeated string field_whitelist = 6; // payload 允许保留的字段名
+  repeated string drop_fields = 7;     // 明确禁止入库的字段名（明文 ip/imei/phone/token 等）
+  int32 max_events_per_batch = 8;
+  int64 max_request_bytes = 9;
+  int32 max_event_payload_bytes = 10;
+  int32 max_clock_skew_seconds = 11;   // 允许的未来/过去偏移绝对值
+  int32 max_backfill_seconds = 12;     // 允许的回补窗口（occurred_at 过旧即拒绝）
+  int32 keyword_max_runes = 13;        // 搜索词截断长度
+  int32 retention_days = 14;           // 接收台账保留天数，超期由 cron 清理
+  int32 deliver_max_attempts = 15;     // 投递重试上限，超过转死信
+  int64 retry_base_seconds = 16;
+  int64 retry_max_seconds = 17;
+  string note = 18;
+  string operator = 19;
+  int64 ctime = 20;
+  int64 mtime = 21;
+}
+
+// UpsertDispatchPolicyReq 新建/修改草稿版本（ACTIVE 版本不可原地改，只能新建）。
+message UpsertDispatchPolicyReq {
+  DispatchPolicy policy = 1;
+  string idempotency_key = 2;
+  string operator = 3;
+}
+
+message DispatchPolicyReply {
+  DispatchPolicy policy = 1;
+  bool created = 2;
+}
+
+// ActivateDispatchPolicyReq 切换生效版本。
+// expected_current_version 非空时做乐观校验，避免并发误切；旧 ACTIVE 自动转 ARCHIVED。
+message ActivateDispatchPolicyReq {
+  string version = 1;
+  string expected_current_version = 2;
+  string idempotency_key = 3;
+  string operator = 4;
+  string reason = 5;
+}
+
+message GetActiveDispatchPolicyReq {}
+
+message ListDispatchPoliciesReq {
+  PolicyState state = 1;
+  string cursor = 2;
+  int32 page_size = 3;
+}
+
+message ListDispatchPoliciesReply {
+  repeated DispatchPolicy list = 1;
+  string next_cursor = 2;
+  bool has_more = 3;
+  int64 total = 4;
+}
+
+// --- 健康度 ---
+
+// TopicHealth 单个 topic 的投递积压视图。
+message TopicHealth {
+  string topic = 1;
+  int64 pending = 2;
+  int64 retrying = 3;
+  int64 dead_open = 4;
+  int64 sent_last_hour = 5;
+  int64 oldest_pending_ctime = 6; // 0 表示无积压
+}
+
+message GetCollectorHealthReq {
+  int64 now = 1;
+}
+
+message GetCollectorHealthReply {
+  int64 server_time = 1;
+  repeated TopicHealth topics = 2;
+  int64 batches_rejected_last_hour = 3;
+  int64 rate_limited_last_hour = 4;   // 触发限流的请求数（mid/设备/IP 段维度合计）
+  int32 active_salt_version = 5;      // 生效策略的盐版本，0 表示策略缺失（应视为不健康）
+  string policy_version = 6;
+  string salt_ref = 7;                // 只报告变量名，不报告盐值
+  bool salt_available = 8;            // 盐是否可从 Secret 读到（缺失时隐私脱敏无法执行）
+  string version = 9;                 // 服务构建版本
+}
+
+// EventCollector 用户行为事件采集入口（AGENTS.md §7：只服务行为分析，不含广告参数）。
+service EventCollector {
+  // 客户端 SDK 批量上报（batch_id 幂等，受条数/字节/限流约束）。
+  rpc CollectEvents(CollectEventsReq) returns (CollectEventsReply);
+  // 服务端内部埋点上报（不采样、trace_id 必填、要求服务身份）。
+  rpc IngestServerEvents(IngestServerEventsReq) returns (IngestServerEventsReply);
+  // 单事件干跑校验：不落库不投递，返回缺失字段与归一化结果。
+  rpc ValidateEventSchema(ValidateEventSchemaReq) returns (ValidateEventSchemaReply);
+  // 查询批次接收台账。
+  rpc GetIngestBatch(GetIngestBatchReq) returns (GetIngestBatchReply);
+  // 分页查询批次台账。
+  rpc ListIngestBatches(ListIngestBatchesReq) returns (ListIngestBatchesReply);
+  // 查询单条事件的校验结论与投递状态。
+  rpc GetEventRecord(GetEventRecordReq) returns (GetEventRecordReply);
+  // 分页查询事件台账。
+  rpc ListEventRecords(ListEventRecordsReq) returns (ListEventRecordsReply);
+  // 推进到期未发送事件（cron 兜底任务与运维入口）。
+  rpc RetryPendingDelivery(RetryPendingDeliveryReq) returns (RetryPendingDeliveryReply);
+  // 分页查询投递死信。
+  rpc ListDeadLetters(ListDeadLettersReq) returns (ListDeadLettersReply);
+  // 重放投递死信。
+  rpc ReplayDeadLetter(ReplayDeadLetterReq) returns (ReplayDeadLetterReply);
+  // 新建/修改采样与脱敏策略草稿。
+  rpc UpsertDispatchPolicy(UpsertDispatchPolicyReq) returns (DispatchPolicyReply);
+  // 切换生效策略版本（旧版本转 ARCHIVED，保留归因）。
+  rpc ActivateDispatchPolicy(ActivateDispatchPolicyReq) returns (DispatchPolicyReply);
+  // 查询当前生效策略。
+  rpc GetActiveDispatchPolicy(GetActiveDispatchPolicyReq) returns (DispatchPolicyReply);
+  // 分页查询策略版本。
+  rpc ListDispatchPolicies(ListDispatchPoliciesReq) returns (ListDispatchPoliciesReply);
+  // 采集与投递健康度。
+  rpc GetCollectorHealth(GetCollectorHealthReq) returns (GetCollectorHealthReply);
+}

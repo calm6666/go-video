@@ -34,6 +34,9 @@ func (l *CacheClearLogic) CacheClear(req *types.ParamMsg) (resp *types.EmptyResp
 	if l.svcCtx.Account == nil {
 		return nil, errors.New("account service not configured")
 	}
+	if err := adminSessionGate(l.ctx, "cacheClear"); err != nil {
+		return nil, err
+	}
 	var msg struct {
 		New struct {
 			Mid int64 `json:"mid"`

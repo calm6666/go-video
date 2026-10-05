@@ -5,6 +5,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/zeromicro/go-zero/core/stores/redis"
 	"github.com/zeromicro/go-zero/core/stores/sqlx"
@@ -85,8 +86,10 @@ type RelationStat struct {
 
 // Repository 是 account 服务的数据访问入口，组合本地模型、缓存和下游 RPC。
 type Repository struct {
-	cache           *Cache
-	conn            sqlx.SqlConn
+	cache Cacher
+	conn  sqlx.SqlConn
+	// 下面 6 个 model 与 2 个下游 client 都是接口，生产由 New 注入真实实现，
+	// 测试由 NewWithDeps 注入内存替身（见 internal/logic/fakes_test.go）。
 	accountModel    model.AccountModel
 	credentialModel model.AccountCredentialModel
 	secretModel     model.AccountSecretModel
@@ -95,9 +98,9 @@ type Repository struct {
 	captureLogModel model.AccountCaptureLogModel
 	userProfile     UserProfileClient
 	socialGraph     SocialGraphClient
-	async           *fanout.Fanout
+	async           asyncRunner
 	// delayQ 缓存延迟失效队列（updateVip 二次失效，见 cache_delay.go）。
-	delayQ *delayQueue
+	delayQ delaySink
 	// delayStop 通知缓存延迟消费协程退出。
 	delayStop chan struct{}
 	// passportRSA 登录密码 RSA 加解密器（未配置密钥时为 nil，按明文密码处理）。
@@ -107,37 +110,127 @@ type Repository struct {
 	refreshTTLDays int64
 }
 
-// New 构造 Repository。userProfile 和 socialGraph 可为 nil，表示对应服务尚未接入，
+// asyncRunner 抽象缓存回填的异步执行器（与 user-profile 同口径）。
+// 生产用 fanout.Fanout（入队后由 worker 协程执行）；测试装配用同步执行器（Do 内联执行），
+// 这样「写路径第几步回填了哪个 key」才是可断言的事实，而不是竞态。
+type asyncRunner interface {
+	Do(ctx context.Context, f func(ctx context.Context)) error
+	Close() error
+}
+
+// syncRunner 是 NewWithDeps 使用的同步执行器：Do 立即内联执行任务。
+type syncRunner struct{}
+
+func (syncRunner) Do(ctx context.Context, f func(ctx context.Context)) error {
+	f(ctx)
+	return nil
+}
+
+func (syncRunner) Close() error { return nil }
+
+// delaySink 抽象缓存延迟二次失效队列。*delayQueue 本身就是纯内存、无后台协程的结构，
+// 抽成接口只是为了让测试装配能替换它（确定驱动见 Repository.DrainDelayedCache）。
+type delaySink interface {
+	Put(mid int64, at time.Time)
+	PopExpired(now time.Time) []int64
+	Close()
+}
+
+// Options 是 NewWithDeps 的 non-model 依赖。零值即可用于测试：
+// PassportRSA 为 nil 时按明文密码处理（与未配置密钥的生产环境一致），
+// Async 为 nil 时同步执行回填，TokenTTLDays/RefreshTTLDays 沿用 New 的默认规则。
+type Options struct {
+	// PassportRSA 登录密码加解密器；nil 表示未配置密钥（开发模式，密码按明文处理）。
+	PassportRSA *PassportRSA
+	// TokenTTLDays access token 有效期（天），<=0 时取 TokenTTLDays 常量。
+	TokenTTLDays int64
+	// RefreshTTLDays refresh token 有效期（天），<=0 时取 RefreshTTLDays 常量。
+	RefreshTTLDays int64
+	// Async 异步回填执行器；nil 表示同步执行（测试口径），生产由 New 注入 fanout。
+	Async asyncRunner
+	// DelayQ 延迟二次失效队列；nil 表示用真实内存队列 newDelayQueue()。
+	DelayQ delaySink
+}
+
+// New 构造 Repository。生产路径唯一入口，全部依赖为真实实现。
+// userProfile 和 socialGraph 可为 nil，表示对应服务尚未接入，
 // repository 会降级返回零值字段。
 func New(rds *redis.Redis, conn sqlx.SqlConn, c config.Config, userProfile UserProfileClient, socialGraph SocialGraphClient) *Repository {
-	tokenTTL := c.TokenTTLDays
+	r := NewWithDeps(NewCache(rds), conn,
+		model.NewAccountModel(conn),
+		model.NewAccountCredentialModel(conn),
+		model.NewAccountSecretModel(conn),
+		model.NewAccountSessionModel(conn),
+		model.NewAccountLoginLogModel(conn),
+		model.NewAccountCaptureLogModel(conn),
+		userProfile, socialGraph,
+		Options{
+			PassportRSA:    NewPassportRSA(c.PassportRSA.PublicKey, c.PassportRSA.PrivateKey),
+			TokenTTLDays:   c.TokenTTLDays,
+			RefreshTTLDays: c.RefreshTTLDays,
+			Async:          fanout.New("accountRepository", fanout.Worker(1), fanout.Buffer(1024)),
+		})
+	go r.cacheDelayProc()
+	return r
+}
+
+// NewWithDeps 是注入缝：显式给出缓存、事务连接、6 个 model 与 2 个下游 client，
+// 供 internal/logic 的单测用内存依赖组装**真实 Repository**（见 cache.go 的 Cacher 注释）。
+//
+// 与 New 的差别只有两处，且不改变任何查询与判定语义：
+//   - 不启动 cacheDelayProc 后台协程（否则用例只能用 sleep 等 5 秒竞态；
+//     需要驱动延迟二次失效时改调 DrainDelayedCache，走的是同一段代码）；
+//   - Async 未给出时用同步执行器，使缓存回填进入可断言的调用序列
+//     （生产是入队异步执行，时序不同但内容一致）。
+//
+// 生产代码不得调用本函数，一律走 New。
+func NewWithDeps(
+	cache Cacher,
+	conn sqlx.SqlConn,
+	accountMd model.AccountModel,
+	credentialMd model.AccountCredentialModel,
+	secretMd model.AccountSecretModel,
+	sessionMd model.AccountSessionModel,
+	loginLogMd model.AccountLoginLogModel,
+	captureLogMd model.AccountCaptureLogModel,
+	userProfile UserProfileClient,
+	socialGraph SocialGraphClient,
+	opt Options,
+) *Repository {
+	tokenTTL := opt.TokenTTLDays
 	if tokenTTL <= 0 {
 		tokenTTL = TokenTTLDays
 	}
-	refreshTTL := c.RefreshTTLDays
+	refreshTTL := opt.RefreshTTLDays
 	if refreshTTL <= 0 {
 		refreshTTL = RefreshTTLDays
 	}
-	r := &Repository{
-		cache:           NewCache(rds),
+	async := opt.Async
+	if async == nil {
+		async = syncRunner{}
+	}
+	delayQ := opt.DelayQ
+	if delayQ == nil {
+		delayQ = newDelayQueue()
+	}
+	return &Repository{
+		cache:           cache,
 		conn:            conn,
-		accountModel:    model.NewAccountModel(conn),
-		credentialModel: model.NewAccountCredentialModel(conn),
-		secretModel:     model.NewAccountSecretModel(conn),
-		sessionModel:    model.NewAccountSessionModel(conn),
-		loginLogModel:   model.NewAccountLoginLogModel(conn),
-		captureLogModel: model.NewAccountCaptureLogModel(conn),
+		accountModel:    accountMd,
+		credentialModel: credentialMd,
+		secretModel:     secretMd,
+		sessionModel:    sessionMd,
+		loginLogModel:   loginLogMd,
+		captureLogModel: captureLogMd,
 		userProfile:     userProfile,
 		socialGraph:     socialGraph,
-		async:           fanout.New("accountRepository", fanout.Worker(1), fanout.Buffer(1024)),
-		delayQ:          newDelayQueue(),
+		async:           async,
+		delayQ:          delayQ,
 		delayStop:       make(chan struct{}),
-		passportRSA:     NewPassportRSA(c.PassportRSA.PublicKey, c.PassportRSA.PrivateKey),
+		passportRSA:     opt.PassportRSA,
 		tokenTTLDays:    tokenTTL,
 		refreshTTLDays:  refreshTTL,
 	}
-	go r.cacheDelayProc()
-	return r
 }
 
 // Ping 检查底层 Redis 连通性，供健康检查使用。

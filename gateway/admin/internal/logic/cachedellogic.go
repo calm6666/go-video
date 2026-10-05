@@ -31,6 +31,9 @@ func (l *CacheDelLogic) CacheDel(req *types.ParamModify) (resp *types.EmptyRespo
 	if l.svcCtx.Account == nil {
 		return nil, errors.New("account service not configured")
 	}
+	if err := adminSessionGate(l.ctx, "cacheDel"); err != nil {
+		return nil, err
+	}
 	if _, err = l.svcCtx.Account.DelCache(l.ctx, &accountrpc.DelCacheReq{
 		Mid:    req.Mid,
 		Action: req.ModifiedAttr,

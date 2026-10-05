@@ -49,7 +49,7 @@ func moralNoticeType(reasonType int64) (name, notifyType string, ok bool) {
 // Moral 查询节操值（缓存→DB，不存在按默认值，参考 service.Moral）。
 func (r *Repository) Moral(ctx context.Context, mid int64) (*rpc.MoralReply, error) {
 	var payload model.UserMoral
-	if err := r.cache.getJSON(ctx, keyMoral(mid), &payload); err != nil {
+	if err := r.cache.GetJSON(ctx, keyMoral(mid), &payload); err != nil {
 		logx.Errorf("user-profile/moral: get moral cache mid=%d err=%v", mid, err)
 	}
 	if payload.Mid != 0 {
@@ -64,7 +64,7 @@ func (r *Repository) Moral(ctx context.Context, mid int64) (*rpc.MoralReply, err
 	}
 	p := *moral
 	_ = r.async.Do(ctx, func(c context.Context) {
-		r.cache.setJSON(c, keyMoral(mid), p, cacheTTLMoral)
+		r.cache.SetJSON(c, keyMoral(mid), p, cacheTTLMoral)
 	})
 	return toMoralReply(moral), nil
 }
@@ -125,7 +125,7 @@ func (r *Repository) UpdateMoral(ctx context.Context, arg *UpdateMoralArg) error
 	if err != nil {
 		return err
 	}
-	if err := r.cache.delMoralCache(ctx, arg.Mid); err != nil {
+	if err := r.delMoralCache(ctx, arg.Mid); err != nil {
 		logx.Errorf("user-profile/moral: del moral cache mid=%d err=%v", arg.Mid, err)
 	}
 	r.moralNotice(ctx, arg.Mid, before, after, arg.ReasonType, arg.Origin, arg.Operator, arg.IsNotify)
@@ -177,7 +177,7 @@ func (r *Repository) BatchUpdateMoral(ctx context.Context, mids []int64, arg *Up
 		return nil, err
 	}
 	for mid, before := range beforeMap {
-		if err := r.cache.delMoralCache(ctx, mid); err != nil {
+		if err := r.delMoralCache(ctx, mid); err != nil {
 			logx.Errorf("user-profile/moral: del moral cache mid=%d err=%v", mid, err)
 		}
 		r.moralNotice(ctx, mid, before, afterMap[mid], arg.ReasonType, arg.Origin, arg.Operator, arg.IsNotify)

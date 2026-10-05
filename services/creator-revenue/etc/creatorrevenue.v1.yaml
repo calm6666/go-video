@@ -1,0 +1,27 @@
+Name: creatorrevenue.v1.rpc
+ListenOn: 0.0.0.0:8164
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: creatorrevenue.v1.rpc
+
+# 概览/规则读路径的只读加速位（真值恒在 MySQL，缓存故障只回源不出单）。
+# 键名固定为 CacheRedis：zrpc.RpcServerConf 内嵌了同名 Redis 字段（限流用），
+# 业务缓存必须用 CacheRedis，否则配置加载报 "conflict key redis"。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL 主库 DSN（仅本地示例，生产从配置中心/Secret 注入）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_creator_revenue?charset=utf8mb4&parseTime=true&loc=Local
+
+# 创作者分成领域参数。
+# 注意：这里只配「护栏与批量上限」，真实单价/门槛/封顶在 cr_revenue_rule 表里，
+# 由运营走 UpsertRevenueRule(DRAFT) → SetRevenueRuleState(ACTIVE) 状态机维护。
+CreatorRevenue:
+  DefaultCurrency: CNY          # 请求未带 currency 时的记账币种
+  MaxPageSize: 100              # 列表类接口单页上限，超出按上限截断
+  MaxRuleUnitPricePer1000Minor: 1000000   # 单价护栏：每 1000 单位最高应计（分），¥10000/千单位
+  MaxMonthlyCapMinor: 50000000           # 封顶护栏：单用户单来源单月上限（分），¥500000；0 不限
+  GenerateMaxBatch: 500         # GenerateSettlement 全量出单单批上限，超出回 truncated=true
+  SummaryRecentPeriods: 12      # GetRevenueSummary 已确认合计回看周期数（月），0 表示全历史

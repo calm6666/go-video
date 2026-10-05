@@ -1,0 +1,335 @@
+syntax = "proto3";
+
+package notification.v1;
+
+option go_package = "go-video/services/notification/rpc";
+
+// 说明：本文件是 notification 领域对外契约的唯一来源（AGENTS.md §4：.proto 可人工维护）。
+// 依据 docs/service-catalog.md，notification 只做“外部通道投递”（Push/短信/邮件），
+// 站内信本体归 inbox（两者在 notify 合并域内保持包级边界，AGENTS.md §3/§5）。
+// 依据 AGENTS.md §1，本契约不提供营销/广告投放能力，也不定义小程序通道。
+// 隐私约束（docs/api-and-events.md §4）：接收人标识只允许 mid 或受控引用 target_ref，
+// 明文手机号/邮箱不进入本契约与数据库。
+
+// 空响应
+message EmptyReply {}
+
+// 投递通道（不含小程序，AGENTS.md §6）
+enum Channel {
+  CHANNEL_UNSPECIFIED = 0; // 未指定
+  CHANNEL_PUSH = 1;        // 应用推送（Android/iOS/HarmonyOS/桌面端）
+  CHANNEL_SMS = 2;         // 短信
+  CHANNEL_EMAIL = 3;       // 邮件
+}
+
+// 模板语言（不含小程序端专属语言包）
+enum Language {
+  LANGUAGE_UNSPECIFIED = 0; // 未指定，按用户偏好或全局默认回落
+  LANGUAGE_ZH_CN = 1;       // 简体中文
+  LANGUAGE_ZH_TW = 2;       // 繁体中文
+  LANGUAGE_EN = 3;          // 英文
+}
+
+// 投递任务状态机（合法迁移见 services/notification/README.md）
+enum DeliveryState {
+  DELIVERY_STATE_UNSPECIFIED = 0; // 未指定
+  DELIVERY_PENDING = 1;           // 已落库待投递
+  DELIVERY_SENT = 2;              // 供应商已受理（终态）
+  DELIVERY_FAILED = 3;            // 不可重试失败（终态，需人工介入）
+  DELIVERY_RETRY = 4;             // 待退避重试
+  DELIVERY_DEAD_LETTER = 5;       // 超过重试上限，转死信留档（终态）
+  DELIVERY_SUPPRESSED = 6;        // 被免打扰/频控/去重拦截，未调用供应商（终态）
+}
+
+// 模板状态
+enum TemplateState {
+  TEMPLATE_STATE_UNSPECIFIED = 0; // 未指定
+  TEMPLATE_STATE_DRAFT = 1;       // 草稿，不可用于投递
+  TEMPLATE_STATE_PUBLISHED = 2;   // 已发布，可投递
+  TEMPLATE_STATE_OFFLINE = 3;     // 已下线，只读留档
+}
+
+// 事件消费状态（docs/api-and-events.md §6）
+enum EventState {
+  EVENT_STATE_UNSPECIFIED = 0; // 未指定
+  EVENT_RECEIVED = 1;          // 已收到，未开始处理
+  EVENT_PROCESSING = 2;        // 处理中
+  EVENT_SUCCEEDED = 3;         // 处理成功（终态）
+  EVENT_RETRY = 4;             // 处理失败，等待退避重试
+  EVENT_DEAD_LETTER = 5;       // 重试耗尽，转死信留档（终态）
+}
+
+// 死信处置状态
+enum DeadLetterState {
+  DEAD_LETTER_STATE_UNSPECIFIED = 0; // 未指定
+  DEAD_LETTER_PENDING = 1;           // 待运营处理
+  DEAD_LETTER_RETRIED = 2;           // 已被重投（终态）
+  DEAD_LETTER_DISCARDED = 3;         // 已丢弃（终态）
+}
+
+// 投递优先级；HIGH 用于验证码/安全提醒，可绕过免打扰窗口（不绕过频控）
+enum Priority {
+  PRIORITY_UNSPECIFIED = 0;
+  PRIORITY_LOW = 1;    // 低优先（运营类提醒）
+  PRIORITY_NORMAL = 2; // 普通
+  PRIORITY_HIGH = 3;   // 高优先（安全提醒、审核结论）
+}
+
+// 接收人（只携带受控标识，不放明文联系方式）
+message Recipient {
+  int64 mid = 1;           // 用户 ID（首选，account 域主键）
+  string target_ref = 2;   // 受控投递引用：push 设备 token 引用、供应商侧收件人 ID 或哈希标识
+  Language language = 3;   // 期望语言；LANGUAGE_UNSPECIFIED 时按用户偏好回落
+  string device_id = 4;    // push 设备标识（客户端上报，可用于多设备去重）
+}
+
+// 模板（notification_template 表投影）
+message TemplateInfo {
+  int64 id = 1;              // 自增主键
+  string template_code = 2;  // 模板业务码
+  Channel channel = 3;       // 通道
+  Language language = 4;     // 语言
+  string title_tpl = 5;      // 标题模板
+  string body_tpl = 6;       // 正文模板
+  int32 version = 7;         // 版本号（同一 code/channel/lang 递增）
+  TemplateState state = 8;   // 模板状态
+  string operator = 9;       // 最后操作人（运营账号，来自 operation 域）
+  int64 ctime = 10;          // 创建时间（Unix 秒）
+  int64 mtime = 11;          // 修改时间（Unix 秒）
+}
+
+// 投递记录（notification_delivery 表投影，含供应商回执）
+message DeliveryInfo {
+  string delivery_id = 1;      // 投递任务 ID
+  string biz_key = 2;          // 业务幂等键（唯一索引）
+  int64 mid = 3;               // 接收人用户 ID（0 表示仅有 target_ref）
+  Channel channel = 4;         // 通道
+  string template_code = 5;    // 模板码
+  int32 template_version = 6;  // 模板版本
+  string target_ref = 7;       // 受控投递标识（非明文号码）
+  string payload_digest = 8;   // 渲染结果摘要（sha256 hex），不落明文正文
+  DeliveryState state = 9;     // 状态
+  string provider = 10;        // 实际使用的通道适配器名
+  string provider_msg_id = 11; // 供应商回执消息 ID
+  int32 retry_count = 12;      // 已重试次数
+  int64 next_retry_at = 13;    // 下次重试时间（Unix 秒，0 表示不再重试）
+  string last_error = 14;      // 最近一次错误（脱敏）
+  int64 sent_at = 15;          // 投递成功时间（Unix 秒）
+  int64 expire_at = 16;        // 过期时间（Unix 秒，0 表示不过期）
+  int32 priority = 17;         // 优先级，参见 Priority
+  string trace_id = 18;        // 链路 ID
+  int64 ctime = 19;            // 创建时间（Unix 秒）
+  int64 mtime = 20;            // 修改时间（Unix 秒）
+}
+
+// 死信记录（notification_dead_letter 表投影）
+message DeadLetterInfo {
+  int64 id = 1;             // 自增主键
+  string event_id = 2;      // 事件 ID（去重键）
+  string event_type = 3;    // 事件类型
+  string topic = 4;         // 来源 topic
+  string payload_digest = 5;// 原始报文摘要（不落明文，避免敏感信息留档）
+  string reason = 6;        // 死信原因
+  DeadLetterState state = 7;// 处置状态
+  string operator = 8;      // 处置人
+  int64 ctime = 9;          // 创建时间（Unix 秒）
+  int64 mtime = 10;         // 修改时间（Unix 秒）
+}
+
+// 用户通道偏好与免打扰设置（notification_dnd_pref 表投影）
+message DndPreference {
+  int64 mid = 1;             // 用户 ID
+  repeated Channel muted_channels = 2; // 已关闭的通道（不在列表内表示允许）
+  string quiet_start = 3;    // 免打扰开始时间 HH:MM（本地时区）
+  string quiet_end = 4;      // 免打扰结束时间 HH:MM（支持跨天，如 22:00-08:00）
+  string timezone = 5;       // IANA 时区名，例如 Asia/Shanghai
+  bool enabled = 6;          // 免打扰总开关
+  int64 ctime = 7;           // 创建时间（Unix 秒）
+  int64 mtime = 8;           // 修改时间（Unix 秒）
+}
+
+// ==================== 投递 ====================
+
+message SendNotificationReq {
+  repeated Recipient recipients = 1;      // 接收人列表（1..200，超出拒绝，避免批量放大）
+  Channel channel = 2;                    // 通道
+  string template_code = 3;               // 模板码（必须为已发布版本）
+  map<string, string> template_params = 4;// 模板变量（禁止放手机号/身份证等明文敏感值）
+  string idempotency_key = 5;             // 调用方幂等键；同 key 重复调用不产生新任务
+  string biz_key = 6;                     // 业务唯一键（落库唯一索引，跨实例去重）
+  Priority priority = 7;                  // 优先级
+  int64 expire_at = 8;                    // 过期时间（Unix 秒）；0 表示不过期，过期任务不再投递
+  string trace_id = 9;                    // 调用方 trace_id
+  Language default_language = 10;         // 请求级默认语言；接收人未指定语言时回落此值，再回落全局默认
+}
+
+message SendNotificationReply {
+  repeated DeliveryInfo deliveries = 1; // 每个接收人一条投递记录
+  int32 suppressed = 2;                 // 被免打扰/频控拦截的数量
+  bool duplicate = 3;                   // biz_key 是否命中已存在的任务（幂等回放）
+}
+
+message RenderTemplateReq {
+  Channel channel = 1;               // 通道
+  string template_code = 2;          // 模板码
+  int32 version = 3;                 // 指定版本；0 表示使用当前已发布版本
+  Language language = 4;             // 语言
+  map<string, string> template_params = 5; // 模板变量
+  string operator = 6;               // 预览操作人（必填，供审计）
+}
+
+message RenderTemplateReply {
+  string title = 1;              // 渲染后标题
+  string body = 2;               // 渲染后正文
+  int32 version = 3;             // 实际使用的模板版本
+  Language language = 4;         // 实际使用的语言
+  repeated string missing_vars = 5; // 缺失变量名（非空即渲染被拒绝）
+}
+
+// ==================== 模板管理 ====================
+
+message UpsertTemplateReq {
+  string template_code = 1;  // 模板码
+  Channel channel = 2;       // 通道
+  Language language = 3;     // 语言
+  string title_tpl = 4;      // 标题模板
+  string body_tpl = 5;       // 正文模板
+  string operator = 6;       // 操作人（必填）
+  bool publish = 7;          // true 时直接发布为新版本；false 保存为草稿
+}
+
+message UpsertTemplateReply {
+  TemplateInfo template = 1; // 落库后的模板（含 version 与 state）
+}
+
+message ListTemplatesReq {
+  string template_code = 1; // 可选过滤
+  Channel channel = 2;      // 可选过滤（CHANNEL_UNSPECIFIED 表示不过滤）
+  Language language = 3;    // 可选过滤
+  TemplateState state = 4;  // 可选过滤
+  int32 pn = 5;             // 页码，从 1 开始
+  int32 ps = 6;             // 每页大小，最大 100
+}
+
+message ListTemplatesReply {
+  repeated TemplateInfo templates = 1; // 模板列表
+  int64 total = 2;                     // 总数
+}
+
+message PublishTemplateReq {
+  string template_code = 1; // 模板码
+  Channel channel = 2;      // 通道
+  Language language = 3;    // 语言
+  int32 version = 4;        // 要发布的草稿版本
+  string operator = 5;      // 操作人（必填）
+}
+
+message PublishTemplateReply {
+  TemplateInfo template = 1; // 发布后的模板
+}
+
+// ==================== 投递记录查询 ====================
+
+message GetDeliveryStatusReq {
+  string delivery_id = 1; // 投递任务 ID
+}
+
+message GetDeliveryStatusReply {
+  DeliveryInfo delivery = 1; // 投递记录（未找到时为默认值，found=false）
+  bool found = 2;            // 是否存在
+}
+
+message ListDeliveriesReq {
+  int64 mid = 1;                    // 可选：按接收人过滤
+  Channel channel = 2;              // 可选过滤
+  DeliveryState state = 3;          // 可选过滤
+  string biz_key = 4;               // 可选：按幂等键精确查询
+  int64 start_ctime = 5;            // 可选：创建时间下界（Unix 秒）
+  int64 end_ctime = 6;              // 可选：创建时间上界（Unix 秒）
+  int32 pn = 7;                     // 页码，从 1 开始
+  int32 ps = 8;                     // 每页大小，最大 100
+}
+
+message ListDeliveriesReply {
+  repeated DeliveryInfo deliveries = 1; // 投递记录
+  int64 total = 2;                      // 总数
+}
+
+// ==================== 死信处理 ====================
+
+message ListDeadLettersReq {
+  string event_id = 1;         // 可选：按事件 ID 精确查询
+  DeadLetterState state = 2;   // 可选过滤
+  string topic = 3;            // 可选过滤
+  int32 pn = 4;                // 页码，从 1 开始
+  int32 ps = 5;                // 每页大小，最大 100
+}
+
+message ListDeadLettersReply {
+  repeated DeadLetterInfo dead_letters = 1; // 死信列表
+  int64 total = 2;                          // 总数
+}
+
+message RetryDeadLetterReq {
+  int64 id = 1;       // 死信记录 ID
+  string operator = 2;// 操作人（必填，写审计）
+  string reason = 3;  // 重投原因
+}
+
+message RetryDeadLetterReply {
+  repeated string delivery_ids = 1; // 重投产生的投递任务 ID
+  int32 retried = 2;                // 重投数量
+  string message = 3;               // 结果说明（脱敏）
+}
+
+// ==================== 用户偏好 ====================
+
+message UpdateDndPreferenceReq {
+  int64 mid = 1;                      // 用户 ID
+  repeated Channel muted_channels = 2;// 关闭的通道列表（全量覆盖语义）
+  string quiet_start = 3;             // HH:MM，空串表示不设置免打扰时段
+  string quiet_end = 4;               // HH:MM，与 quiet_start 成对
+  string timezone = 5;                // IANA 时区名，空串表示使用全局默认
+  bool enabled = 6;                   // 免打扰总开关
+}
+
+message UpdateDndPreferenceReply {
+  DndPreference preference = 1; // 落库后的偏好
+}
+
+message GetDndPreferenceReq {
+  int64 mid = 1; // 用户 ID
+}
+
+message GetDndPreferenceReply {
+  DndPreference preference = 1; // 偏好（未设置过时返回默认值）
+  bool found = 2;               // 是否已存在设置
+}
+
+// Notification 外部通道投递。
+// 只负责 Push/短信/邮件的模板渲染、频控与免打扰校验、供应商投递、退避重试与死信留档；
+// 站内信写入归 inbox，本服务不提供任何营销/广告投放接口（AGENTS.md §1）。
+service Notification {
+  // 投递通知：模板渲染 -> 频次/免打扰校验 -> 落投递任务（biz_key 幂等）-> 按配置同步或异步投递
+  rpc SendNotification(SendNotificationReq) returns (SendNotificationReply);
+  // 仅渲染模板供上游预览，不落库
+  rpc RenderTemplate(RenderTemplateReq) returns (RenderTemplateReply);
+  // 新增或更新模板（草稿或直接发布新版本）
+  rpc UpsertTemplate(UpsertTemplateReq) returns (UpsertTemplateReply);
+  // 分页查询模板
+  rpc ListTemplates(ListTemplatesReq) returns (ListTemplatesReply);
+  // 发布指定草稿版本
+  rpc PublishTemplate(PublishTemplateReq) returns (PublishTemplateReply);
+  // 查询单条投递记录（含供应商回执）
+  rpc GetDeliveryStatus(GetDeliveryStatusReq) returns (GetDeliveryStatusReply);
+  // 分页查询投递记录
+  rpc ListDeliveries(ListDeliveriesReq) returns (ListDeliveriesReply);
+  // 分页查询死信
+  rpc ListDeadLetters(ListDeadLettersReq) returns (ListDeadLettersReply);
+  // 运营侧重投死信（按 operator 记审计，幂等）
+  rpc RetryDeadLetter(RetryDeadLetterReq) returns (RetryDeadLetterReply);
+  // 更新用户通道偏好与免打扰设置
+  rpc UpdateDndPreference(UpdateDndPreferenceReq) returns (UpdateDndPreferenceReply);
+  // 查询用户通道偏好与免打扰设置
+  rpc GetDndPreference(GetDndPreferenceReq) returns (GetDndPreferenceReply);
+}

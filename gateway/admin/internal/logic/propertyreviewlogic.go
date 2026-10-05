@@ -32,6 +32,9 @@ func (l *PropertyReviewLogic) PropertyReview(req *types.ParamPropertyReview) (re
 	if l.svcCtx.UserProfile == nil {
 		return nil, errors.New("user-profile service not configured")
 	}
+	if err := adminSessionGate(l.ctx, "propertyReview"); err != nil {
+		return nil, err
+	}
 	extra := req.Extra
 	if extra != "" {
 		var m map[string]any

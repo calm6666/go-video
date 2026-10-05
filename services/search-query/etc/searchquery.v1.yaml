@@ -1,0 +1,49 @@
+Name: search-query.v1.rpc
+ListenOn: 0.0.0.0:8107
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: search-query.v1.rpc
+
+# 业务缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会触发 conflict key redis）
+# 用途：搜索结果短缓存(sq:res:*)、热词快照(sq:hot:*)、屏蔽词集合(sq:bw:*)、
+#       联想词典 ZSET(sq:sug:v1，由离线聚合维护)、查询计数(sq:cnt:*)。
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# 本服务自有库 DSN（仅本地示例；生产从配置中心/Secret 注入，禁止提交真实口令）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_search_query?charset=utf8mb4&parseTime=true&loc=Local
+
+# OpenSearch 只读查询配置。
+# 重要：Endpoints 或 Alias 为空 => 视为“引擎未配置”，Search/Suggest 一律返回
+# ErrSearchUnavailable（明确的降级错误），不会返回伪造的空成功结果。
+# Alias 必须等于 search-indexer 的 OpenSearch.IndexPrefix：重建流程只原子切换那一个别名，
+# 独立的只读别名当前无人维护，会把查询留在正在退役的物理索引上（本服务不创建索引、不切别名）。
+OpenSearch:
+  Endpoints:
+    - http://127.0.0.1:9200
+  Alias: go_video_content
+  Username: ""
+  Password: "" # 生产从 Secret/Vault 注入，示例必须留空
+  TimeoutMs: 1500
+  MaxResultWindow: 10000
+
+# 查询侧限制与降级策略。
+Search:
+  PsDefault: 30
+  PsLimit: 50
+  MaxOffset: 900          # 深分页保护：起始 offset 超过即返回 ErrDeepPage（不超过 MaxResultWindow）
+  KeywordMaxLen: 64
+  CacheTTLSeconds: 30     # 0 表示关闭结果缓存（此时降级兜底也没有数据可用）；命中缓存不续期
+  DegradeEnabled: true    # 引擎已配置但熔断/失败时是否允许返回仍在 TTL 内的缓存（带 Degraded 标记）；
+                          # false 则直接报错。引擎未配置时本开关不参与判定，一律报错
+  SuggestLimit: 10
+  SuggestCandidateWindow: 500
+  HotKeywordLimit: 20
+  HistoryLimit: 30
+  HistoryEnabled: true
+  BlockWordCacheTTLSeconds: 60
+  HighlightPreTag: "<em>" # 仅作为文本标记返回，渲染由客户端决定
+  HighlightPostTag: "</em>"
+  DefaultSort: 1          # rpc.SortMode: 1=综合

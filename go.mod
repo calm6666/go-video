@@ -6,6 +6,7 @@ require (
 	github.com/go-ego/cedar v0.10.2
 	github.com/go-playground/validator/v10 v10.30.3
 	github.com/oklog/ulid/v2 v2.1.2
+	github.com/zeromicro/go-queue v1.2.2
 	github.com/zeromicro/go-zero v1.9.2
 	golang.org/x/time v0.10.0
 	google.golang.org/grpc v1.65.0
@@ -54,11 +55,13 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/openzipkin/zipkin-go v0.4.3 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.2 // indirect
+	github.com/pierrec/lz4/v4 v4.1.21 // indirect
 	github.com/prometheus/client_golang v1.21.1 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
 	github.com/redis/go-redis/v9 v9.14.0 // indirect
+	github.com/segmentio/kafka-go v0.4.47 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	go.etcd.io/etcd/api/v3 v3.5.15 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.5.15 // indirect

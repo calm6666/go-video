@@ -1,0 +1,785 @@
+syntax = "proto3";
+
+package livemedia.v1;
+
+option go_package = "go-video/services/live-media/rpc";
+
+// live-media 服务：直播实时媒体的转码、分发、录制、回放拼接与回收的领域服务。
+//
+// 数据所有权（AGENTS.md §5）：本服务拥有
+//   live_transcode_task（直播转码任务）、live_stream_output（分发输出/码率梯）、
+//   live_record_task（录制任务）、live_record_segment（录制切片）、
+//   live_replay_task（回放拼接任务）、live_replay_asset_ref（回放资产引用）、
+//   live_retention_task（回收任务）、live_media_outbox（事件 Outbox）。
+// 直播间、推流密钥与流状态归 live-room / live-ingest；媒资元数据归 asset；稿件与发布
+// 状态归 video；转码模板主数据归 transcode。本服务只保存它们的主键引用，绝不复制主数据。
+//
+// 硬约束：
+//   1. 回放必须走普通视频的审核与发布链路（asset.RegisterAsset → video.CreateSubmission →
+//      moderation-orchestrator.SubmitForReview）。本服务只写 aid/asset_id 引用，
+//      永不把回放标记成"已发布"；rpc.ReviewState 只是来自 video 的只读投影。
+//   2. 直播实时链路（live_stream_output）与回放发布状态分开建模：断流即下线档位，
+//      与回放是否过审无关。
+//   3. 大文件不进 MySQL，只存 bucket/object_key 引用（AGENTS.md §5、docs/migrations 约定）。
+//   4. 任务状态机一律用「条件 UPDATE + RowsAffected」推进，非法迁移返回错误，不做假成功。
+//   5. 真实 FFmpeg / CDN / 对象存储调用不在本服务进程内发生：由 Worker 拉起，
+//      本契约只提供任务登记、进度回报与产物登记入口（见服务 README 的已知缺口）。
+//
+// 时间字段统一为 Unix 秒（字段名以 _at 结尾，0 表示未设置）；时长用毫秒（*_ms）。
+// 跨服务只传主键：room_id / live_session_id / asset_id / aid / template_id / mid。
+
+// ---------------------------------------------------------------------------
+// 枚举
+// ---------------------------------------------------------------------------
+
+// 直播转码任务状态机（live_transcode_task.state）：
+//
+//	PENDING ──Start/Worker 拉起──▶ RUNNING ──Stop──▶ STOPPING ──▶ STOPPED(终态)
+//	   ▲                              │
+//	   │──Retry── FAILED ◀──超时/异常/断流┘
+//	PENDING ──Cancel──▶ CANCELLED(终态)
+//
+// FAILED → PENDING 只允许通过 RetryLiveTranscode（attempt+1），其它写操作不得复活终态任务。
+enum LiveTranscodeState {
+  LIVE_TRANSCODE_STATE_UNSPECIFIED = 0; // 未指定（仅用作查询"不过滤"）
+  LIVE_TRANSCODE_STATE_PENDING = 1;     // 待拉起（任务已登记，Worker 尚未启动 FFmpeg）
+  LIVE_TRANSCODE_STATE_RUNNING = 2;     // 运行中（Worker 已拉起并持续上报心跳）
+  LIVE_TRANSCODE_STATE_STOPPING = 3;    // 停止中（已下发停止指令，等待 Worker 收尾）
+  LIVE_TRANSCODE_STATE_STOPPED = 4;     // 已停止（终态）
+  LIVE_TRANSCODE_STATE_FAILED = 5;      // 失败（可 Retry；超过 max_attempts 后由运营/回收处理）
+  LIVE_TRANSCODE_STATE_CANCELLED = 6;   // 已取消（终态）
+}
+
+// 录制任务状态机（live_record_task.state），与转码任务同构但独立：
+// 录制必须能断点续录，因此 last_seq 只增不减，STOPPED 后才允许拼接回放。
+enum LiveRecordState {
+  LIVE_RECORD_STATE_UNSPECIFIED = 0; // 未指定
+  LIVE_RECORD_STATE_PENDING = 1;     // 待开始（已登记时间区间）
+  LIVE_RECORD_STATE_RECORDING = 2;   // 录制中
+  LIVE_RECORD_STATE_STOPPING = 3;    // 停止中（等待最后一片落库）
+  LIVE_RECORD_STATE_STOPPED = 4;     // 已停止（终态，可拼接回放）
+  LIVE_RECORD_STATE_FAILED = 5;      // 失败（可 Retry 续录，从 last_seq+1 继续）
+  LIVE_RECORD_STATE_CANCELLED = 6;   // 已取消（终态）
+}
+
+// 录制切片状态（live_record_segment.state）。
+// 切片是回放拼接的最小单位，必须能表达"缺口"，否则回放会出现时间轴空洞。
+enum SegmentState {
+  SEGMENT_STATE_UNSPECIFIED = 0; // 未指定
+  SEGMENT_STATE_UPLOADING = 1;   // 上传中（Worker 已切片，对象存储尚未确认）
+  SEGMENT_STATE_UPLOADED = 2;    // 已上传（对象存储已确认，未校验）
+  SEGMENT_STATE_VERIFIED = 3;    // 已校验（时长/大小/checksum 通过，可参与拼接）
+  SEGMENT_STATE_MISSING = 4;     // 缺失（断点续录时探测到的空洞，回放拼接需跳过并记录）
+  SEGMENT_STATE_CORRUPT = 5;     // 损坏（校验失败，永不参与拼接）
+}
+
+// 回放拼接任务状态机（live_replay_task.state）。
+// 注意：终态是 REVIEW_SUBMITTED / COMPLETED，其中 COMPLETED 只表示"由 video 投影得知回放已可用"，
+// 本服务不会、也不允许把自己或稿件写成已发布（AGENTS.md §5/§8）。
+enum ReplayState {
+  REPLAY_STATE_UNSPECIFIED = 0;    // 未指定
+  REPLAY_STATE_PENDING = 1;        // 待拼接
+  REPLAY_STATE_MERGING = 2;        // 拼接中（Worker 正在切片合并/转封装）
+  REPLAY_STATE_UPLOADING = 3;      // 产物上传中（对象存储写入）
+  REPLAY_STATE_REGISTERED = 4;     // 已登记媒资（asset_id 已回填）
+  REPLAY_STATE_REVIEW_SUBMITTED = 5; // 已提交审核（aid 已回填，等待 moderation/video 结论）
+  REPLAY_STATE_COMPLETED = 6;      // 回放可用（只读投影：video 侧已发布）
+  REPLAY_STATE_FAILED = 7;         // 失败（终态，可重新提交新任务）
+  REPLAY_STATE_CANCELLED = 8;      // 已取消（终态）
+}
+
+// 回放所引用稿件的审核/发布投影（live_replay_asset_ref.review_state）。
+// 该值只由 ApplyReplayContentState 或 content.published.v1 消费者写入，
+// 事实源永远是 video 服务；本枚举只是本地可读投影，不得反向推进稿件状态。
+enum ReviewState {
+  REVIEW_STATE_UNSPECIFIED = 0; // 未同步（尚未拿到 video 的结论）
+  REVIEW_STATE_REVIEWING = 1;   // 审核中
+  REVIEW_STATE_REJECTED = 2;    // 驳回（回放不可用）
+  REVIEW_STATE_PUBLISHED = 3;   // video 侧已发布（回放可对外提供）
+  REVIEW_STATE_OFFLINE = 4;     // video 侧已下架
+  REVIEW_STATE_DELETED = 5;     // video 侧已删除（引用需回收）
+}
+
+// 分发输出协议（live_stream_output.protocol）。
+enum StreamProtocol {
+  STREAM_PROTOCOL_UNSPECIFIED = 0; // 未指定
+  STREAM_PROTOCOL_HLS = 1;         // HLS（m3u8 + ts/ll-hls 分片）
+  STREAM_PROTOCOL_HTTP_FLV = 2;    // HTTP-FLV（CDN 边缘拉流）
+  STREAM_PROTOCOL_RTMP = 3;        // RTMP 转出（兼容老播放器）
+  STREAM_PROTOCOL_ARTC = 4;        // 低延迟 RTC 分发（依赖 CDN 能力，见已知缺口）
+}
+
+// 码率档位（live_stream_output.bitrate_level）。档位是直播侧的稳定语义，
+// 具体宽高码率参数在下发任务时以快照字段写入，不复制 transcode 模板主数据。
+enum BitrateLevel {
+  BITRATE_LEVEL_UNSPECIFIED = 0; // 未指定
+  BITRATE_LEVEL_SOURCE = 1;      // 原画（不转码，仅分发）
+  BITRATE_LEVEL_UHD = 2;         // 1080p
+  BITRATE_LEVEL_HD = 3;          // 720p
+  BITRATE_LEVEL_SD = 4;          // 480p
+  BITRATE_LEVEL_LD = 5;          // 360p
+  BITRATE_LEVEL_AUDIO = 6;       // 纯音频
+}
+
+// 回收任务的回收对象（live_retention_task.target_kind）。
+enum RetentionTargetKind {
+  RETENTION_TARGET_KIND_UNSPECIFIED = 0; // 未指定
+  RETENTION_TARGET_KIND_SEGMENT = 1;     // 录制切片（超期或已被回放合并吸收）
+  RETENTION_TARGET_KIND_REPLAY = 2;      // 回放产物（引用已删除或超期）
+  RETENTION_TARGET_KIND_STREAM_OUTPUT = 3; // 直播分发残留（断流后未清理的档位）
+}
+
+// 回收任务状态（live_retention_task.state）。
+// 回收是"先登记意图、再执行、最后留证"的三步流程，禁止边查边删（无法审计，AGENTS.md §8）。
+enum RetentionState {
+  RETENTION_STATE_UNSPECIFIED = 0; // 未指定
+  RETENTION_STATE_PENDING = 1;     // 待执行（含 dry_run 预演）
+  RETENTION_STATE_RUNNING = 2;     // 执行中
+  RETENTION_STATE_SUCCEEDED = 3;   // 已完成（终态）
+  RETENTION_STATE_FAILED = 4;      // 失败（终态，需人工介入）
+  RETENTION_STATE_CANCELLED = 5;   // 已取消（终态）
+}
+
+// 任务失败原因分类（errno 之外的可读语义，便于运营聚合与告警）。
+enum FailureReason {
+  FAILURE_REASON_UNSPECIFIED = 0; // 未指定
+  FAILURE_REASON_TIMEOUT = 1;     // 超时（timeout_at 到期未上报心跳）
+  FAILURE_REASON_SOURCE_LOST = 2; // 源流丢失/断流
+  FAILURE_REASON_WORKER_CRASH = 3; // Worker 异常退出
+  FAILURE_REASON_STORAGE = 4;     // 对象存储写入失败
+  FAILURE_REASON_CDN = 5;         // CDN 调用失败
+  FAILURE_REASON_UPSTREAM_DENIED = 6; // 上游服务拒绝（asset/video/moderation 返回业务错误）
+  FAILURE_REASON_MANUAL = 7;      // 人工停止/取消
+  FAILURE_REASON_DATA_GAP = 8;    // 数据缺口（录制切片空洞导致无法拼接）
+}
+
+// ---------------------------------------------------------------------------
+// 公共结构
+// ---------------------------------------------------------------------------
+
+// 空响应
+message EmptyReply {}
+
+// 统一分页参数：pn 从 1 开始，ps 上限 50（服务端会夹取，不返回错误）。
+message PageParam {
+  int32 pn = 1; // 页码（从 1 开始，<=0 视为 1）
+  int32 ps = 2; // 每页大小（最大 50，<=0 或超限取默认 20）
+}
+
+// 统一分页响应头部。
+message PageResult {
+  int32 total = 1; // 符合条件的总行数
+}
+
+// ---------------------------------------------------------------------------
+// 直播转码任务
+// ---------------------------------------------------------------------------
+
+message StartLiveTranscodeReq {
+  int64 room_id = 1;             // 直播间 ID（live-room 主键）
+  int64 live_session_id = 2;     // 直播场次 ID（live-room/live-ingest 主键，0 表示未提供）
+  int64 template_id = 3;         // 转码模板 ID（transcode 主键；直播模板能力见已知缺口）
+  BitrateLevel bitrate_level = 4; // 码率档位
+  StreamProtocol protocol = 5;   // 输出协议
+  string source_ref = 6;         // 拉流源引用（live-ingest 侧的短期地址或流标识，禁止存长期密钥）
+  int64 anchor_mid = 7;          // 主播 mid（仅审计用，不做商业化判断）
+  int32 max_attempts = 8;        // 最大重试次数（0 用服务端默认）
+  int32 timeout_seconds = 9;     // 无心跳超时秒数（0 用服务端默认）
+  string request_id = 10;        // 幂等键：同 request_id 重放返回同一任务
+  string trace_id = 11;          // 调用方透传 trace_id
+}
+
+message LiveTranscodeTaskInfo {
+  int64 task_id = 1;                 // 任务 ID
+  int64 room_id = 2;                 // 直播间 ID
+  int64 live_session_id = 3;         // 直播场次 ID
+  int64 template_id = 4;             // 转码模板 ID（引用，不复制模板主数据）
+  BitrateLevel bitrate_level = 5;    // 码率档位
+  StreamProtocol protocol = 6;       // 输出协议
+  string source_ref = 7;             // 拉流源引用
+  int64 anchor_mid = 8;              // 主播 mid
+  LiveTranscodeState state = 9;      // 状态
+  int32 progress = 10;               // 进度或健康度提示（0-100，含义见 state 注释）
+  int32 attempt = 11;                // 已执行次数（Retry 时 +1）
+  int32 max_attempts = 12;           // 最大重试次数
+  int64 started_at = 13;             // 实际启动时间（Unix 秒）
+  int64 stopped_at = 14;             // 实际停止时间（Unix 秒，0 表示未停止）
+  int64 heartbeat_at = 15;           // 最近一次 Worker 心跳时间（Unix 秒）
+  int64 timeout_at = 16;             // 心跳超时判定时刻（Unix 秒）
+  int64 version = 17;                // 乐观并发版本号（上报时必须回传 expected_version）
+  FailureReason reason = 18;         // 失败/停止原因
+  int32 errno = 19;                  // 错误码（0 表示无错误）
+  string err_msg = 20;               // 脱敏错误信息（不含密钥/完整 URL）
+  string request_id = 21;            // 幂等键
+  string trace_id = 22;              // 最近一次调用的 trace_id
+  int64 ctime = 23;                  // 创建时间（Unix 秒）
+  int64 mtime = 24;                  // 修改时间（Unix 秒）
+}
+
+message LiveTranscodeTaskReq {
+  int64 task_id = 1; // 任务 ID
+}
+
+message StopLiveTranscodeReq {
+  int64 task_id = 1;          // 任务 ID
+  int64 expected_version = 2; // 乐观并发版本（0 表示不校验，仍受状态机约束）
+  FailureReason reason = 3;   // 停止原因（MANUAL/UPSTREAM_DENIED 等）
+  string request_id = 4;      // 幂等键
+  string operator = 5;        // 操作者标识（system/运营账号，仅审计）
+  string trace_id = 6;
+}
+
+message RetryLiveTranscodeReq {
+  int64 task_id = 1;          // 任务 ID（必须处于 FAILED）
+  int64 expected_version = 2; // 乐观并发版本
+  string reason = 3;          // 重试说明
+  string request_id = 4;      // 幂等键（同 request_id 重放不会重复 ++attempt）
+  string operator = 5;
+  string trace_id = 6;
+}
+
+message CancelLiveTranscodeReq {
+  int64 task_id = 1;
+  int64 expected_version = 2;
+  FailureReason reason = 3;   // 取消原因
+  string request_id = 4;      // 幂等键
+  string operator = 5;
+  string trace_id = 6;
+}
+
+message ReportLiveTranscodeProgressReq {
+  int64 task_id = 1;
+  int64 expected_version = 2;  // 上报方持有的版本；不匹配返回冲突，服务端不覆盖新状态
+  LiveTranscodeState state = 3; // 目标状态（RUNNING/STOPPING/STOPPED/FAILED）
+  int32 progress = 4;           // 进度（0-100）
+  FailureReason reason = 5;     // 失败/停止原因（FAILED/TIMEOUT 必填）
+  int32 errno = 6;
+  string err_msg = 7;
+  string worker_id = 8;         // Worker 标识（仅审计与排障）
+  string trace_id = 9;
+}
+
+message ListLiveTranscodeTasksReq {
+  int64 room_id = 1;                 // 按房间过滤（<=0 不过滤）
+  int64 live_session_id = 2;         // 按场次过滤（<=0 不过滤）
+  LiveTranscodeState state = 3;      // 按状态过滤（UNSPECIFIED 不过滤）
+  int64 template_id = 4;             // 按模板过滤（<=0 不过滤）
+  PageParam page = 5;
+}
+
+message ListLiveTranscodeTasksReply {
+  PageResult page = 1;
+  repeated LiveTranscodeTaskInfo tasks = 2;
+}
+
+// ---------------------------------------------------------------------------
+// 分发输出（直播实时链路，与回放发布状态无关）
+// ---------------------------------------------------------------------------
+
+message UpsertStreamOutputReq {
+  int64 room_id = 1;
+  int64 live_session_id = 2;
+  int64 task_id = 3;               // 产生该输出的转码任务（0 表示源流直出不经转码）
+  BitrateLevel bitrate_level = 4;
+  StreamProtocol protocol = 5;
+  // 产物只存引用：playlist/流路径是对象存储或 CDN 的相对路径，不含签名与密钥。
+  string bucket = 6;
+  string object_key = 7;
+  string cdn_domain = 8;           // CDN 域名（配置项，非密钥）
+  // 档位参数快照（下发时刻的值，不是 transcode 模板的镜像；模板变更不回写历史行）。
+  int32 width = 9;
+  int32 height = 10;
+  int32 bitrate_kbps = 11;
+  int32 fps = 12;
+  int64 online_expire_at = 13;     // 在线有效期（Unix 秒，0 表示由断流事件下线）
+  string request_id = 14;          // 幂等键；(room,session,level,protocol) 唯一约束兜底
+  string trace_id = 15;
+}
+
+message StreamOutputInfo {
+  int64 output_id = 1;
+  int64 room_id = 2;
+  int64 live_session_id = 3;
+  int64 task_id = 4;
+  BitrateLevel bitrate_level = 5;
+  StreamProtocol protocol = 6;
+  string bucket = 7;
+  string object_key = 8;
+  string cdn_domain = 9;
+  int32 width = 10;
+  int32 height = 11;
+  int32 bitrate_kbps = 12;
+  int32 fps = 13;
+  int32 state = 14;                // 1 在线、2 已下线（与 rpc 无枚举一致，避免误用直播房间状态）
+  int64 online_at = 15;            // 上线时间（Unix 秒）
+  int64 offline_at = 16;           // 下线时间（Unix 秒，0 表示仍在线）
+  int64 online_expire_at = 17;     // 在线有效期（Unix 秒）
+  string request_id = 18;
+  int64 ctime = 19;
+  int64 mtime = 20;
+  FailureReason reason = 21;       // 下线原因（state=2 时有效：源流丢失/到期/人工）
+}
+
+message OfflineStreamOutputReq {
+  int64 output_id = 1;             // output_id 与 (room_id, bitrate_level, protocol) 二选一
+  int64 room_id = 2;
+  BitrateLevel bitrate_level = 3;
+  StreamProtocol protocol = 4;
+  FailureReason reason = 5;        // 下线原因（源流丢失/人工/到期）
+  string request_id = 6;           // 幂等键（重复下线同一输出返回同一结果）
+  string trace_id = 7;
+}
+
+message ListStreamOutputsReq {
+  int64 room_id = 1;          // 必填：房间维度查询当前档位
+  int64 live_session_id = 2;  // <=0 表示只看当前在线档位
+  bool include_offline = 3;   // 是否包含已下线档位（默认只返回在线）
+  PageParam page = 4;
+}
+
+message ListStreamOutputsReply {
+  PageResult page = 1;
+  repeated StreamOutputInfo outputs = 2;
+}
+
+// ---------------------------------------------------------------------------
+// 录制任务与切片
+// ---------------------------------------------------------------------------
+
+message StartLiveRecordReq {
+  int64 room_id = 1;
+  int64 live_session_id = 2;
+  int64 source_task_id = 3;        // 从哪个转码任务/源流录制（0 表示原画源）
+  int64 start_at = 4;              // 期望录制起点（Unix 秒，0 表示立即）
+  int64 end_at = 5;                // 期望录制终点（Unix 秒，0 表示随场次结束）
+  int32 segment_seconds = 6;       // 分片时长（秒，0 用服务端默认）
+  int32 timeout_seconds = 7;       // Worker 无心跳超时（秒，0 用服务端默认）
+  string output_bucket = 8;        // 切片存储桶（引用，不存凭据）
+  string output_prefix = 9;        // 切片对象 key 前缀
+  string request_id = 10;          // 幂等键
+  string trace_id = 11;
+}
+
+message LiveRecordTaskInfo {
+  int64 record_id = 1;
+  int64 room_id = 2;
+  int64 live_session_id = 3;
+  int64 source_task_id = 4;
+  LiveRecordState state = 5;
+  int64 start_at = 6;              // 期望起点（Unix 秒）
+  int64 end_at = 7;                // 期望终点（Unix 秒）
+  int64 record_start_at = 8;       // 实际开始录制时间（Unix 秒）
+  int64 record_end_at = 9;         // 实际结束时间（Unix 秒，0 表示未结束）
+  int32 segment_seconds = 10;      // 分片时长（秒）
+  int64 last_seq = 11;             // 已登记的最大切片序号（断点续录起点 = last_seq+1）
+  int64 segment_count = 12;        // 已登记切片数（含 MISSING）
+  int64 gap_count = 13;            // 缺口（MISSING/CORRUPT）切片数
+  int64 recorded_duration_ms = 14; // 有效录制时长（毫秒，VERIFIED 切片求和）
+  string output_bucket = 15;
+  string output_prefix = 16;
+  int64 heartbeat_at = 17;
+  int64 timeout_at = 18;
+  int64 version = 19;
+  FailureReason reason = 20;
+  int32 errno = 21;
+  string err_msg = 22;
+  string request_id = 23;
+  string trace_id = 24;
+  int64 ctime = 25;
+  int64 mtime = 26;
+}
+
+message LiveRecordTaskReq {
+  int64 record_id = 1;
+}
+
+message StopLiveRecordReq {
+  int64 record_id = 1;
+  int64 expected_version = 2;
+  int64 end_at = 3;                // 期望结束时刻（Unix 秒，0 表示立即）
+  FailureReason reason = 4;
+  string request_id = 5;
+  string operator = 6;
+  string trace_id = 7;
+}
+
+// ReportLiveRecordProgress：Worker 上报录制心跳与状态。
+message ReportLiveRecordProgressReq {
+  int64 record_id = 1;
+  int64 expected_version = 2;      // 乐观并发版本
+  LiveRecordState state = 3;       // RECORDING/STOPPING/STOPPED/FAILED
+  int64 last_seq = 4;              // Worker 已产出的最大序号（服务端只接受单调递增）
+  int64 heartbeat_at = 5;          // 0 表示由服务端取当前时间（Unix 秒）
+  FailureReason reason = 6;
+  int32 errno = 7;
+  string err_msg = 8;
+  string worker_id = 9;
+  string trace_id = 10;
+}
+
+// ReportRecordSegment：Worker 逐片登记。
+// 幂等由 (record_id, seq) 唯一键保证：同一 seq 重放只更新校验信息，不新增行、不回退状态。
+// 断点续录：Worker 从 GetLiveRecordTask.last_seq+1 继续；检测到空洞时用 state=MISSING 显式登记，
+// 不得静默跳过（回放拼接需要知道时间轴上有洞）。
+message ReportRecordSegmentReq {
+  int64 record_id = 1;
+  int64 seq = 2;                   // 切片序号（从 1 开始，必须 > 0）
+  int64 start_at = 3;              // 切片起点（Unix 秒）
+  int64 end_at = 4;                // 切片终点（Unix 秒）
+  int64 duration_ms = 5;           // 切片时长（毫秒）
+  SegmentState state = 6;          // UPLOADING/UPLOADED/VERIFIED/MISSING/CORRUPT
+  string bucket = 7;               // 对象存储桶（MISSING 时可为空）
+  string object_key = 8;           // 切片对象 key
+  int64 size_bytes = 9;            // 字节数
+  string checksum = 10;            // 内容摘要（sha256 hex，脱敏：不是凭据）
+  string worker_id = 11;
+  string trace_id = 12;
+}
+
+message RecordSegmentInfo {
+  int64 id = 1;                    // 自增主键
+  int64 record_id = 2;
+  int64 room_id = 3;
+  int64 live_session_id = 4;
+  int64 seq = 5;
+  int64 start_at = 6;              // Unix 秒
+  int64 end_at = 7;                // Unix 秒
+  int64 duration_ms = 8;
+  SegmentState state = 9;
+  string bucket = 10;
+  string object_key = 11;
+  int64 size_bytes = 12;
+  string checksum = 13;
+  string worker_id = 14;
+  int64 registered_at = 15;        // 首次登记时间（Unix 秒）
+  int64 mtime = 16;                // 最近一次更新时间（Unix 秒）
+}
+
+message ListRecordSegmentsReq {
+  int64 record_id = 1;             // 必填
+  SegmentState state = 2;          // 按状态过滤（UNSPECIFIED 不过滤）
+  int64 after_seq = 3;             // keyset 游标：只返回 seq > after_seq 的切片（0 表示从头）
+  int32 limit = 4;                 // 单次返回上限（最大 500，默认 200）
+  // 说明：切片是只增不减的大表（一场 3 小时直播 = 数千行），深翻页用 keyset 而非 pn/ps。
+}
+
+message ListRecordSegmentsReply {
+  repeated RecordSegmentInfo segments = 1;
+  int64 next_after_seq = 2;        // 下一页游标；无更多数据时返回最后一条 seq
+  bool has_more = 3;
+  int64 total = 4;                 // 该 record_id 下的切片总数（含缺口）
+}
+
+message ListLiveRecordTasksReq {
+  int64 room_id = 1;
+  int64 live_session_id = 2;
+  LiveRecordState state = 3;
+  PageParam page = 4;
+}
+
+message ListLiveRecordTasksReply {
+  PageResult page = 1;
+  repeated LiveRecordTaskInfo tasks = 2;
+}
+
+// ---------------------------------------------------------------------------
+// 回放拼接与回收
+// ---------------------------------------------------------------------------
+
+// SubmitReplayTask：登记回放拼接任务。
+// 本方法只做「登记 + 校验切片区间」，不做拼接、不写 asset、不建稿件、更不推进发布状态；
+// 实际链路由 Worker 依次调用 ReportReplayProgress / BindReplayAsset 回填。
+message SubmitReplayTaskReq {
+  int64 room_id = 1;
+  int64 live_session_id = 2;
+  int64 record_id = 3;             // 录制任务 ID（必填，回放素材来源）
+  int64 from_seq = 4;              // 起始切片序号（<=0 表示从 1）
+  int64 to_seq = 5;                // 结束切片序号（<=0 表示到最后）
+  int64 start_at = 6;              // 可选时间区间起点（Unix 秒）
+  int64 end_at = 7;                // 可选时间区间终点（Unix 秒）
+  bool allow_gaps = 8;             // 是否允许切片缺口（false 时缺口直接拒绝提交，避免产出坏回放）
+  int64 anchor_mid = 9;            // 回放稿件归属主播 mid（video.CreateSubmission 的投稿人）
+  string title = 10;               // 回放标题（透传给稿件，不在本服务做审核判断）
+  string description = 11;
+  string request_id = 12;          // 幂等键
+  string trace_id = 13;
+}
+
+message LiveReplayTaskInfo {
+  int64 replay_id = 1;
+  int64 room_id = 2;
+  int64 live_session_id = 3;
+  int64 record_id = 4;
+  ReplayState state = 5;
+  int64 from_seq = 6;
+  int64 to_seq = 7;
+  int64 segment_count = 8;         // 参与拼接的有效切片数
+  int64 gap_count = 9;             // 区间内缺口切片数
+  int64 start_at = 10;             // 回放覆盖区间起点（Unix 秒）
+  int64 end_at = 11;               // 终点
+  int64 duration_ms = 12;          // 拼接后时长（毫秒）
+  bool allow_gaps = 13;
+  string output_bucket = 14;       // 产物引用（大文件不入 MySQL）
+  string output_key = 15;
+  int64 asset_id = 16;             // 登记的媒资 ID（asset 主键，0 表示未登记）
+  int64 aid = 17;                  // 稿件 ID（video 主键，0 表示未建稿）
+  string bvid = 18;                // 稿件 bvid（冗余展示字段，事实源仍是 video）
+  int64 anchor_mid = 19;
+  string title = 20;
+  int64 version = 21;
+  FailureReason reason = 22;
+  int32 errno = 23;
+  string err_msg = 24;
+  string request_id = 25;
+  string trace_id = 26;
+  int64 ctime = 27;
+  int64 mtime = 28;
+}
+
+message ReplayTaskReq {
+  int64 replay_id = 1;
+}
+
+message ReportReplayProgressReq {
+  int64 replay_id = 1;
+  int64 expected_version = 2;      // 乐观并发版本
+  ReplayState state = 3;           // 目标状态（受状态机约束）
+  int64 segment_count = 4;
+  int64 gap_count = 5;
+  int64 duration_ms = 6;
+  string output_bucket = 7;
+  string output_key = 8;
+  FailureReason reason = 9;
+  int32 errno = 10;
+  string err_msg = 11;
+  string worker_id = 12;
+  string trace_id = 13;
+}
+
+// BindReplayAsset 回填「回放产物 ↔ asset/稿件」引用。
+// 关键约束：本方法只在 live_replay_asset_ref 里保存 asset_id/aid 引用，
+// 不写 asset_meta、不写 video_submission、不调用任何推进稿件状态的路径。
+// 回放的审核与发布由 video/moderation-orchestrator 负责（AGENTS.md §5/§8）。
+message BindReplayAssetReq {
+  int64 replay_id = 1;
+  int64 asset_id = 2;              // asset.RegisterAsset 返回的媒资 ID
+  int64 aid = 3;                   // video.CreateSubmission 返回的稿件 ID
+  string bvid = 4;
+  string bucket = 5;
+  string object_key = 6;
+  int64 duration_ms = 7;
+  string request_id = 8;           // 幂等键（同 replay_id 重复绑定同值返回成功）
+  string trace_id = 9;
+}
+
+message ReplayAssetRefInfo {
+  int64 id = 1;
+  int64 room_id = 2;
+  int64 live_session_id = 3;
+  int64 replay_id = 4;
+  int64 record_id = 5;
+  int64 asset_id = 6;
+  int64 aid = 7;
+  string bvid = 8;
+  int64 anchor_mid = 9;
+  string bucket = 10;
+  string object_key = 11;
+  int64 duration_ms = 12;
+  int64 segment_from_seq = 13;
+  int64 segment_to_seq = 14;
+  int64 gap_count = 15;
+  ReviewState review_state = 16;   // 只读投影，事实源是 video
+  int64 review_state_at = 17;      // 投影同步时间（Unix 秒）
+  int32 retention_state = 18;      // 0 正常、1 待回收、2 已回收（引用行的生命周期）
+  int64 published_at = 19;         // video 侧发布时间（Unix 秒，投影值，0 表示未发布）
+  int64 ctime = 20;
+  int64 mtime = 21;
+}
+
+message ListReplayAssetRefsReq {
+  int64 room_id = 1;               // 按房间过滤（<=0 不过滤）
+  int64 live_session_id = 2;       // 按场次过滤
+  ReviewState review_state = 3;    // 按投影状态过滤
+  int64 anchor_mid = 4;            // 按主播过滤
+  PageParam page = 5;
+}
+
+message ListReplayAssetRefsReply {
+  PageResult page = 1;
+  repeated ReplayAssetRefInfo refs = 2;
+}
+
+// ApplyReplayContentState 同步 video 侧的审核/发布投影。
+// 调用方：content.published.v1 消费者，或运营/排障链路上的显式刷新。
+// 本方法只更新本地投影字段，永不调用 video 的状态推进接口（方向单一：video → live-media）。
+message ApplyReplayContentStateReq {
+  int64 replay_id = 1;             // replay_id 与 asset_id 至少一个
+  int64 asset_id = 2;
+  ReviewState review_state = 3;    // 必填：来自 video 的事实状态
+  int64 published_at = 4;          // video 侧发布时间（Unix 秒）
+  string event_id = 5;             // 驱动本次同步的事件 ID（按 event_id 幂等）
+  string source = 6;               // 来源：content.published.v1 / video.rpc / manual
+  string trace_id = 7;
+}
+
+message ListReplayTasksReq {
+  int64 room_id = 1;
+  int64 live_session_id = 2;
+  ReplayState state = 3;
+  PageParam page = 4;
+}
+
+message ListReplayTasksReply {
+  PageResult page = 1;
+  repeated LiveReplayTaskInfo tasks = 2;
+}
+
+// ---------------------------------------------------------------------------
+// 回收任务
+// ---------------------------------------------------------------------------
+
+message SubmitRetentionTaskReq {
+  RetentionTargetKind target_kind = 1; // 回收对象类型
+  int64 room_id = 2;                   // <=0 表示全局扫描
+  int64 target_id = 3;                 // 指定回收对象主键（0 表示按 expire_before 批量）
+  int64 expire_before = 4;             // 只回收该时刻（Unix 秒）之前到期的对象
+  bool purge = 5;                      // false 只登记并置标记，true 才真正删除对象存储引用
+  int32 batch_limit = 6;               // 单次处理上限（最大 500，默认 100）
+  string reason = 7;                   // 回收原因（审计必填：超期/切片被回放吸收/房间删除）
+  string request_id = 8;               // 幂等键
+  string operator = 9;
+  string trace_id = 10;
+}
+
+message LiveRetentionTaskInfo {
+  int64 retention_id = 1;
+  RetentionTargetKind target_kind = 2;
+  int64 room_id = 3;
+  int64 target_id = 4;
+  int64 expire_before = 5;
+  bool purge = 6;
+  int32 batch_limit = 7;
+  RetentionState state = 8;
+  int32 scanned = 9;                   // 扫描命中行数
+  int32 deleted = 10;                  // 实际删除行数（purge=false 时恒为 0）
+  int32 skipped = 11;                  // 跳过行数（仍被引用/状态不允许）
+  string reason = 12;
+  string operator = 13;
+  int64 version = 14;
+  FailureReason fail_reason = 15;
+  int32 errno = 16;
+  string err_msg = 17;
+  string request_id = 18;
+  string trace_id = 19;
+  int64 ctime = 20;
+  int64 mtime = 21;
+}
+
+message RetentionTaskReq {
+  int64 retention_id = 1;
+}
+
+message ReportRetentionResultReq {
+  int64 retention_id = 1;
+  int64 expected_version = 2;
+  RetentionState state = 3;            // RUNNING/SUCCEEDED/FAILED/CANCELLED
+  int32 scanned = 4;
+  int32 deleted = 5;
+  int32 skipped = 6;
+  FailureReason fail_reason = 7;
+  int32 errno = 8;
+  string err_msg = 9;
+  string worker_id = 10;
+  string trace_id = 11;
+}
+
+message ListRetentionTasksReq {
+  RetentionTargetKind target_kind = 1;
+  RetentionState state = 2;
+  int64 room_id = 3;
+  PageParam page = 4;
+}
+
+message ListRetentionTasksReply {
+  PageResult page = 1;
+  repeated LiveRetentionTaskInfo tasks = 2;
+}
+
+// ---------------------------------------------------------------------------
+// 服务定义
+// ---------------------------------------------------------------------------
+
+// LiveMedia 直播转码、分发、录制、回放与回收服务。
+// 注意：本服务不提供任何会员/付费直播/商业化能力（AGENTS.md §1）。
+service LiveMedia {
+  // --- 直播转码任务：启停、重试、超时、取消、进度上报 ---
+
+  // 登记直播转码任务（PENDING），request_id 幂等；不在此调用 FFmpeg
+  rpc StartLiveTranscode(StartLiveTranscodeReq) returns (LiveTranscodeTaskInfo);
+  // 请求停止（RUNNING→STOPPING，Worker 收尾后 STOPPED）
+  rpc StopLiveTranscode(StopLiveTranscodeReq) returns (LiveTranscodeTaskInfo);
+  // 重试失败任务（FAILED→PENDING，attempt+1，受 max_attempts 限制）
+  rpc RetryLiveTranscode(RetryLiveTranscodeReq) returns (LiveTranscodeTaskInfo);
+  // 取消未运行/停止中的任务（PENDING|STOPPING→CANCELLED 终态）
+  rpc CancelLiveTranscode(CancelLiveTranscodeReq) returns (LiveTranscodeTaskInfo);
+  // Worker 上报心跳/进度/终态（含超时判定），条件 UPDATE + 版本校验
+  rpc ReportLiveTranscodeProgress(ReportLiveTranscodeProgressReq) returns (LiveTranscodeTaskInfo);
+  // 查询单个转码任务
+  rpc GetLiveTranscodeTask(LiveTranscodeTaskReq) returns (LiveTranscodeTaskInfo);
+  // 分页查询转码任务（房间/场次/状态/模板）
+  rpc ListLiveTranscodeTasks(ListLiveTranscodeTasksReq) returns (ListLiveTranscodeTasksReply);
+
+  // --- 分发输出（直播实时链路） ---
+
+  // 登记或刷新一个码率档位的分发输出（(room,session,level,protocol) 唯一）
+  rpc UpsertStreamOutput(UpsertStreamOutputReq) returns (StreamOutputInfo);
+  // 下线一个档位（断流/到期/人工），与回放发布状态无关
+  rpc OfflineStreamOutput(OfflineStreamOutputReq) returns (StreamOutputInfo);
+  // 查询房间当前可分发档位（live-gateway / live-room 只读投影）
+  rpc ListStreamOutputs(ListStreamOutputsReq) returns (ListStreamOutputsReply);
+
+  // --- 录制任务与切片 ---
+
+  // 登记录制任务（PENDING），request_id 幂等
+  rpc StartLiveRecord(StartLiveRecordReq) returns (LiveRecordTaskInfo);
+  // 停止录制（RECORDING→STOPPING，最后一片落库后 STOPPED）
+  rpc StopLiveRecord(StopLiveRecordReq) returns (LiveRecordTaskInfo);
+  // Worker 上报录制心跳与状态（含超时/断点续录）
+  rpc ReportLiveRecordProgress(ReportLiveRecordProgressReq) returns (LiveRecordTaskInfo);
+  // 查询单个录制任务（含 last_seq，供断点续录）
+  rpc GetLiveRecordTask(LiveRecordTaskReq) returns (LiveRecordTaskInfo);
+  // 分页查询录制任务
+  rpc ListLiveRecordTasks(ListLiveRecordTasksReq) returns (ListLiveRecordTasksReply);
+  // 逐片登记切片（(record_id,seq) 幂等，缺口必须显式登记 MISSING）
+  rpc ReportRecordSegment(ReportRecordSegmentReq) returns (RecordSegmentInfo);
+  // keyset 分页拉取切片（回放拼接与排障）
+  rpc ListRecordSegments(ListRecordSegmentsReq) returns (ListRecordSegmentsReply);
+
+  // --- 回放拼接与资产引用 ---
+
+  // 提交回放拼接任务（只登记与校验切片区间，不拼接、不发布）
+  rpc SubmitReplayTask(SubmitReplayTaskReq) returns (LiveReplayTaskInfo);
+  // Worker 上报回放进度（拼接/上传/登记/送审）
+  rpc ReportReplayProgress(ReportReplayProgressReq) returns (LiveReplayTaskInfo);
+  // 查询单个回放任务
+  rpc GetReplayTask(ReplayTaskReq) returns (LiveReplayTaskInfo);
+  // 分页查询回放任务
+  rpc ListReplayTasks(ListReplayTasksReq) returns (ListReplayTasksReply);
+  // 回填回放产物与 asset/稿件的引用关系（只存引用，不推进稿件状态）
+  rpc BindReplayAsset(BindReplayAssetReq) returns (ReplayAssetRefInfo);
+  // 同步 video 侧审核/发布投影（单向：video → live-media）
+  rpc ApplyReplayContentState(ApplyReplayContentStateReq) returns (ReplayAssetRefInfo);
+  // 分页查询回放资产引用（房间/场次/主播/投影状态）
+  rpc ListReplayAssetRefs(ListReplayAssetRefsReq) returns (ListReplayAssetRefsReply);
+
+  // --- 回收任务 ---
+
+  // 提交回收任务（超期切片/回放产物/残留档位），先登记后执行，保留审计证据
+  rpc SubmitRetentionTask(SubmitRetentionTaskReq) returns (LiveRetentionTaskInfo);
+  // Worker 上报回收结果（扫描/删除/跳过计数）
+  rpc ReportRetentionResult(ReportRetentionResultReq) returns (LiveRetentionTaskInfo);
+  // 查询单个回收任务
+  rpc GetRetentionTask(RetentionTaskReq) returns (LiveRetentionTaskInfo);
+  // 分页查询回收任务
+  rpc ListRetentionTasks(ListRetentionTasksReq) returns (ListRetentionTasksReply);
+}

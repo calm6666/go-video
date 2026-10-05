@@ -1,0 +1,86 @@
+Name: eventcollector.v1.rpc
+# 8152：批次 A2 分配给 event-collector 的端口（8150/8151 已被 private-message、
+# open-platform 占用，8080 是 gateway/app 的 HTTP 监听端口，不能复用）。
+ListenOn: 0.0.0.0:8152
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: eventcollector.v1.rpc
+# 契约轮不启用 etcd 鉴权与Consul，超时按采集链路特点放宽：
+# 上报是「批量 + 可重试」，客户端有自己的退避，服务端不需要在 RPC 层堆积等待。
+Timeout: 2000
+MaxConns: 200
+# 全局限流由 Collector.GlobalQps/GlobalBurst（进程内令牌桶）+ risk-control（真值）承担。
+
+# 业务缓存（键名不能写 Redis：zrpc.RpcServerConf 内嵌同名 RedisKeyConf，会触发 conflict key redis）
+CacheRedis:
+  Host: 127.0.0.1:6379
+  Type: node
+
+# MySQL DSN（仅本地示例，生产从配置中心/Secret 注入；库：go_video_event_collector）
+DataSource: root:root@tcp(127.0.0.1:3306)/go_video_event_collector?charset=utf8mb4&parseTime=true&loc=Local
+
+# 采集链路参数：这里是「服务端硬上限的默认值」，每批实际以 ACTIVE 策略
+# （ec_dispatch_policy）里的同名列裁决；策略缺失时才回落到这里的值。
+Collector:
+  PageSize: 50
+  MaxPageSize: 500
+  # 单请求条数与字节双重限制（proto CollectEventsReq 幂等注释）
+  MaxEventsPerBatch: 200
+  MaxRequestBytes: 1048576
+  MaxEventPayloadBytes: 8192
+  # 时钟偏差与回补窗口：偏差按绝对值判定，回补窗口必须大于偏差
+  MaxClockSkewSeconds: 300
+  MaxBackfillSeconds: 86400
+  KeywordMaxRunes: 64
+  # 无匹配规则时全量采集（10000 基点）：宁可多存，不可静默丢行为数据
+  DefaultSampleBps: 10000
+  SupportedSchemaVersion: 1
+  # 出口 IP 脱敏粒度：/24；必须落在 (0,32)，/32 等于把出口 IP 原样入库
+  IPSegmentBits: 24
+  # mid / 设备 / IP 段三个维度的进程内限流下限（真值判定仍以 risk-control 为准）
+  MidQps: 200
+  DeviceQps: 200
+  IPSegmentQps: 2000
+  GlobalQps: 2000
+  GlobalBurst: 800
+  # 降级期间的丢弃比例（基点）：0 表示依赖故障也不主动丢事件，只回带 degraded
+  DegradedRejectRatioBps: 0
+  ReportIntervalSeconds: 10
+  RetryHintMs: 1000
+  # 台账与死信保留天数：超期由 services/cron 清理，open 死信永不清理
+  RetentionDays: 30
+  DeadLetterRetentionDays: 90
+  BatchLimit: 200
+  MaxReplayPerRequest: 100
+
+# 脱敏参数：盐值只从 Secret/环境变量注入，示例配置必须留空（AGENTS.md §4/§7）。
+# 缺失时哈希路径返回 model.ErrSaltMissing，绝不退化成「无盐 sha256 设备号」。
+Privacy:
+  SaltRef: EVENT_COLLECTOR_SALT_V1
+  SaltVersion: 1
+  SaltValue: ""
+
+# MQ 投递：Endpoints 留空表示本契约轮不启用 dispatcher，
+# 事件仍会写 ec_pending_delivery（Outbox），由 services/cron 的 RetryPendingDelivery 兜底。
+Dispatch:
+  Endpoints: []
+  BatchSize: 200
+  DeliverMaxAttempts: 8
+  RetryBaseSeconds: 5
+  RetryMaxSeconds: 3600
+  LeaseSeconds: 60
+  RetryScanLookaheadSeconds: 86400
+
+# 下游 RPC（可选）：未配置时 svc 不构造客户端，依赖它的 logic 返回
+# model.ErrSpmRPCNotConfigured / model.ErrRiskControlNotConfigured，不伪造结论。
+SPMRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: spm.v1.rpc
+RiskControlRPC:
+  Etcd:
+    Hosts:
+    - 127.0.0.1:2379
+    Key: risk-control.v1.rpc

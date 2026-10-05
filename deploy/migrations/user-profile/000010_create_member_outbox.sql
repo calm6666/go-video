@@ -5,10 +5,10 @@
 --   事件记录在同一事务内提交，由独立发布器轮询投递（消费者按 event_id
 --   幂等，失败指数退避重试，超过上限标记失败转人工处理）。
 -- 事件类型：
---   user.profile_updated  资料更新 → 发布器调用 account 服务的 DelCache RPC
+--   user.profile.updated  资料更新 → 发布器调用 account 服务的 DelCache RPC
 --                         失效 account 侧缓存（对应参考仓库 databus 的
 --                         MemberService-AccountNotify 主题，本项目服务间只用 RPC）
---   user.moral_notice     节操阈值通知 → notification 服务（待接入）
+--   user.moral.notice     节操阈值通知 → notification 服务（待接入）
 -- 数据所有者：user-profile 服务。
 -- 回滚：DROP TABLE IF EXISTS member_outbox;
 -- 锁风险：仅建表；uk_event_id/idx_status_next_retry 空库建索引无锁风险。
@@ -22,8 +22,8 @@ CREATE TABLE IF NOT EXISTS `member_outbox`
     -- event_id 事件唯一 ID（ULID，common/eventenvelope 生成）
     `event_id` CHAR(26) NOT NULL DEFAULT '' COMMENT '事件唯一 ID（ULID，消费者按此幂等去重）',
 
-    -- event_type 事件类型：user.profile_updated / user.moral_notice
-    `event_type` VARCHAR(64) NOT NULL DEFAULT '' COMMENT '事件类型（user.profile_updated / user.moral_notice）',
+    -- event_type 事件类型：user.profile.updated / user.moral.notice
+    `event_type` VARCHAR(64) NOT NULL DEFAULT '' COMMENT '事件类型（user.profile.updated / user.moral.notice）',
 
     -- aggregate_id 聚合根 ID（mid 十进制字符串）
     `aggregate_id` VARCHAR(32) NOT NULL DEFAULT '' COMMENT '聚合根 ID（mid 十进制字符串）',
