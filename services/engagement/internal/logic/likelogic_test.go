@@ -17,21 +17,47 @@ const (
 )
 
 // likeOps 是「一次真正改变状态的点赞」的完整调用序列（顺序即结论）。
-// Repository.Like 的口径：先查旧状态 → 写关系行 → 增计数 → 影子计数器 → 回读真值。
-func likeOps(ld, dd int64) []string {
+// Repository.Like 的口径：开事务 → 事务内查旧状态 → 写关系行 → 增计数 →
+// **同一会话**回读真值 → 同一会话写 outbox 事件 → 提交之后才动影子计数器。
+// txn 是事务会话号（"t1"、"t2"…）：回读与事件行的后缀必须和 TransactCtx 一致，
+// 退回自动提交连接就是缺陷 #1 的回归，而调用顺序完全看不出来，只能靠这个后缀抓。
+// 事件行的有无由 likeDelta 推导：只有 like_number 变化才产 engagement.action.v1
+// （dislike_number 不在事件契约里，见 README 已知缺口 22），
+// 「不产事件」的分支另有用例用 wantCount 单独钉住，不靠这里的推导。
+func likeOps(txn string, ld, dd int64) []string {
+	ops := []string{
+		"db.TransactCtx:" + txn,
+		"like.FindStates:archive:7:101#" + txn,
+		"like.Upsert:archive:7:101#" + txn,
+		"stat.Incr:archive:1:101:" + itoa(ld) + "/" + itoa(dd) + "#" + txn,
+		"stat.FindOne:archive:1:101#" + txn,
+	}
+	if ld != 0 {
+		ops = append(ops, "outbox.Insert:101:1#"+txn)
+	}
+	return append(ops,
+		"cache.IncrLike:lc:archive:1:101:"+itoa(ld),
+		"cache.IncrDislike:dc:archive:1:101:"+itoa(dd))
+}
+
+// likeReadOps 是「状态没变，幂等短路」的调用序列：事务里只查状态和计数，一次写都没有。
+// 短路读也在事务内（它返回的就是本次要回给客户端的计数），所以同样带 #txn。
+func likeReadOps(txn string) []string {
 	return []string{
-		"like.FindStates:archive:7:101",
-		"like.Upsert:archive:7:101",
-		"stat.Incr:archive:1:101:" + itoa(ld) + "/" + itoa(dd),
-		"cache.IncrLike:lc:archive:1:101:" + itoa(ld),
-		"cache.IncrDislike:dc:archive:1:101:" + itoa(dd),
-		"stat.FindOne:archive:1:101",
+		"db.TransactCtx:" + txn,
+		"like.FindStates:archive:7:101#" + txn,
+		"stat.FindOne:archive:1:101#" + txn,
 	}
 }
 
-// likeReadOps 是「状态没变，幂等短路」的调用序列：只查状态和计数，一次写都没有。
-func likeReadOps() []string {
-	return []string{"like.FindStates:archive:7:101", "stat.FindOne:archive:1:101"}
+// likeFailOps 是「事务体走到第 n 步就报错」的前缀序列：TransactCtx 打头，其余按顺序截断。
+func likeFailOps(txn string, steps ...string) []string {
+	ops := make([]string, 0, len(steps)+1)
+	ops = append(ops, "db.TransactCtx:"+txn)
+	for _, s := range steps {
+		ops = append(ops, s+"#"+txn)
+	}
+	return ops
 }
 
 // TestLikeRejectsGuardsBeforeTouchingDeps business → mid → message_id，三条都在触库之前。
@@ -93,7 +119,7 @@ func TestLikeFirstLikeWritesRelationAndCount(t *testing.T) {
 		MessageId: likeMessage, Action: rpc.Action_ACTION_LIKE,
 	})
 	wantNoErr(t, "首次点赞", err)
-	wantOps(t, "首次点赞", st.log.opsFrom(0), likeOps(1, 0))
+	wantOps(t, "首次点赞", st.log.opsFrom(0), likeOps("t1", 1, 0))
 
 	wantEQ(t, "首次点赞", "OriginId 回显", got.OriginId, likeOrigin)
 	wantEQ(t, "首次点赞", "MessageId 回显", got.MessageId, likeMessage)
@@ -166,7 +192,7 @@ func TestLikeRepeatedLikeIsIdempotent(t *testing.T) {
 	third, err := l.Like(in)
 	wantNoErr(t, "第三次点赞", err)
 
-	wantOps(t, "重复点赞", st.log.opsFrom(0), append(append(likeOps(1, 0), likeReadOps()...), likeReadOps()...))
+	wantOps(t, "重复点赞", st.log.opsFrom(0), append(append(likeOps("t1", 1, 0), likeReadOps("t2")...), likeReadOps("t3")...))
 	wantEQ(t, "重复点赞", "首次 LikeNumber", first.LikeNumber, int64(1))
 	wantEQ(t, "重复点赞", "第二次不叠加", second.LikeNumber, int64(1))
 	wantEQ(t, "重复点赞", "第三次不叠加", third.LikeNumber, int64(1))
@@ -196,7 +222,7 @@ func TestLikeCancelAfterLikeThenLikeAgainNetsOne(t *testing.T) {
 	wantNoErr(t, "再点赞", err)
 
 	wantOps(t, "点赞/取消/再点赞", st.log.opsFrom(0),
-		append(append(likeOps(1, 0), likeOps(-1, 0)...), likeOps(1, 0)...))
+		append(append(likeOps("t1", 1, 0), likeOps("t2", -1, 0)...), likeOps("t3", 1, 0)...))
 	wantEQ(t, "净值", "点赞后", a.LikeNumber, int64(1))
 	wantEQ(t, "净值", "取消后", b.LikeNumber, int64(0))
 	wantEQ(t, "净值", "再点赞后", c.LikeNumber, int64(1))
@@ -221,7 +247,7 @@ func TestLikeCancelWithoutAnyRecordIsSilentNoop(t *testing.T) {
 	wantEQ(t, "取消不存在的点赞", "MessageId 回显", got.MessageId, likeMessage)
 	wantEQ(t, "取消不存在的点赞", "LikeNumber", got.LikeNumber, int64(0))
 	wantEQ(t, "取消不存在的点赞", "DislikeNumber", got.DislikeNumber, int64(0))
-	wantOps(t, "取消不存在的点赞", st.log.opsFrom(0), likeReadOps())
+	wantOps(t, "取消不存在的点赞", st.log.opsFrom(0), likeReadOps("t1"))
 	wantEQ(t, "取消不存在的点赞", "没有插入关系行", len(st.like.rows), 0)
 	wantEQ(t, "取消不存在的点赞", "没有插入计数行", len(st.stat.rows), 0)
 	wantCount(t, "取消不存在的点赞", st.log, "like.Upsert:", 0)
@@ -242,7 +268,7 @@ func TestLikeNoopReadReturnsExistingCounts(t *testing.T) {
 	wantNoErr(t, "重复取消", err)
 	wantEQ(t, "重复取消", "LikeNumber 取计数行真值", got.LikeNumber, int64(9))
 	wantEQ(t, "重复取消", "DislikeNumber", got.DislikeNumber, int64(3))
-	wantOps(t, "重复取消", st.log.opsFrom(0), likeReadOps())
+	wantOps(t, "重复取消", st.log.opsFrom(0), likeReadOps("t1"))
 	wantEQ(t, "重复取消", "计数行未被改动", st.stat.get(likeBiz, likeOrigin, likeMessage).LikeNumber, int64(9))
 	wantEQ(t, "重复取消", "运营修正位未被改动", st.stat.get(likeBiz, likeOrigin, likeMessage).LikeChange, int64(1))
 }
@@ -259,7 +285,7 @@ func TestLikeSwitchFromLikeToDislikeMovesTheSingleVote(t *testing.T) {
 		Action: rpc.Action_ACTION_DISLIKE,
 	})
 	wantNoErr(t, "点赞改点踩", err)
-	wantOps(t, "点赞改点踩", st.log.opsFrom(0), likeOps(-1, 1))
+	wantOps(t, "点赞改点踩", st.log.opsFrom(0), likeOps("t1", -1, 1))
 	wantEQ(t, "点赞改点踩", "LikeNumber", got.LikeNumber, int64(4))
 	wantEQ(t, "点赞改点踩", "DislikeNumber", got.DislikeNumber, int64(3))
 	wantEQ(t, "点赞改点踩", "State", st.like.get(likeBiz, likeMid, likeMessage).State, int32(model.LikeStateDislike))
@@ -278,7 +304,7 @@ func TestLikeCancelDislikeOnlyDeductsDislike(t *testing.T) {
 		Action: rpc.Action_ACTION_CANCEL_DISLIKE,
 	})
 	wantNoErr(t, "取消点踩", err)
-	wantOps(t, "取消点踩", st.log.opsFrom(0), likeOps(0, -1))
+	wantOps(t, "取消点踩", st.log.opsFrom(0), likeOps("t1", 0, -1))
 	wantEQ(t, "取消点踩", "LikeNumber 不变", got.LikeNumber, int64(5))
 	wantEQ(t, "取消点踩", "DislikeNumber 减一", got.DislikeNumber, int64(1))
 	wantEQ(t, "取消点踩", "State", st.like.get(likeBiz, likeMid, likeMessage).State, int32(model.LikeStateCancel))
@@ -297,7 +323,7 @@ func TestLikeTrustsStoredStateNotClientIntent(t *testing.T) {
 		Action: rpc.Action_ACTION_CANCEL_DISLIKE,
 	})
 	wantNoErr(t, "错报动作", err)
-	wantOps(t, "错报动作", st.log.opsFrom(0), likeOps(-1, 0))
+	wantOps(t, "错报动作", st.log.opsFrom(0), likeOps("t1", -1, 0))
 	wantEQ(t, "错报动作", "LikeNumber", got.LikeNumber, int64(4))
 	wantEQ(t, "错报动作", "DislikeNumber 未被扣成负", got.DislikeNumber, int64(2))
 }
@@ -314,7 +340,7 @@ func TestLikeUnknownActionBehavesAsCancel(t *testing.T) {
 		Action: rpc.Action(77),
 	})
 	wantNoErr(t, "未知动作", err)
-	wantOps(t, "未知动作", st.log.opsFrom(0), likeOps(-1, 0))
+	wantOps(t, "未知动作", st.log.opsFrom(0), likeOps("t1", -1, 0))
 	wantEQ(t, "未知动作", "LikeNumber", got.LikeNumber, int64(4))
 }
 
@@ -331,7 +357,7 @@ func TestLikeCancelWithoutStatRowGoesNegative(t *testing.T) {
 		Action: rpc.Action_ACTION_CANCEL_LIKE,
 	})
 	wantNoErr(t, "缺计数行的取消", err)
-	wantOps(t, "缺计数行的取消", st.log.opsFrom(0), likeOps(-1, 0))
+	wantOps(t, "缺计数行的取消", st.log.opsFrom(0), likeOps("t1", -1, 0))
 	stat := st.stat.get(likeBiz, likeOrigin, likeMessage)
 	if stat == nil {
 		t.Fatalf("Incr 应插入计数行")
@@ -501,6 +527,6 @@ func TestLikeSwallowsCacheCounterFailure(t *testing.T) {
 	})
 	wantNoErr(t, "计数器写失败", err)
 	wantEQ(t, "计数器写失败", "LikeNumber 以 DB 为准", got.LikeNumber, int64(1))
-	wantOps(t, "计数器写失败", st.log.opsFrom(0), likeOps(1, 0))
+	wantOps(t, "计数器写失败", st.log.opsFrom(0), likeOps("t1", 1, 0))
 	wantEQ(t, "计数器写失败", "Redis 计数器没写上", st.cache.likeCounter(likeBiz, likeOrigin, likeMessage), int64(0))
 }
